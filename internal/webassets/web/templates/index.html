@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Watch Party</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <main class="container">
+    <h1>Watch Party</h1>
+
+    <section id="login-section">
+      <h2>Sign in with your Emby account</h2>
+      <form id="login-form">
+        <label>Username <input type="text" name="username" autocomplete="username" required></label>
+        <label>Password <input type="password" name="password" autocomplete="current-password" required></label>
+        <button type="submit">Sign in</button>
+      </form>
+      <p class="error" id="login-error"></p>
+    </section>
+
+    <section id="home-section" hidden>
+      <p id="whoami"></p>
+      <button id="logout-btn">Sign out</button>
+
+      <h2>Start a party</h2>
+      <form id="create-party-form">
+        <label>Emby item ID <input type="text" name="item_id" required placeholder="e.g. 4f2a91b7c3..."></label>
+        <button type="submit">Create party</button>
+      </form>
+      <p class="error" id="create-error"></p>
+
+      <h2>Join a party</h2>
+      <form id="join-party-form">
+        <label>Party link or ID <input type="text" name="party_id" required></label>
+        <button type="submit">Join party</button>
+      </form>
+      <p class="error" id="join-error"></p>
+    </section>
+  </main>
+  <script type="module" src="/static/js/app.js"></script>
+</body>
+</html>

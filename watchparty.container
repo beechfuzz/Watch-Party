@@ -1,0 +1,34 @@
+# Example Podman Quadlet unit. Install at, e.g.,
+# ~/.config/containers/systemd/watchparty.container (rootless) or
+# /etc/containers/systemd/watchparty.container (system-wide), then:
+#   systemctl daemon-reload
+#   systemctl start watchparty
+#
+# systemd sends SIGTERM on stop/restart, which this app handles explicitly
+# (drains WebSocket connections, flushes in-memory party state to SQLite,
+# then exits) — see ARCHITECTURE.md and cmd/server/main.go.
+#
+# No HealthCheck= directive: the image is distroless (no shell, nothing to
+# exec inside the container for a healthcheck), so health should be probed
+# externally against GET /healthz instead — e.g. by whatever reverse proxy
+# fronts this alongside Emby.
+
+[Unit]
+Description=Watch Party
+After=network-online.target
+
+[Container]
+Image=ghcr.io/beechfuzz/watch-party:latest
+EnvironmentFile=/etc/watchparty/watchparty.env
+Volume=watchparty-data.volume:/data
+PublishPort=127.0.0.1:8080:8080
+# Adjust to however Emby/Traefik are reachable in your setup — e.g. join
+# the same Podman network Emby and Traefik use instead of publishing a
+# host port at all, if they're all co-located.
+
+[Service]
+Restart=on-failure
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target default.target
