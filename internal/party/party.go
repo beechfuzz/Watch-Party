@@ -100,10 +100,18 @@ const (
 // Event is a best-effort notification; consumers must not assume delivery
 // is guaranteed (the channel is bounded and full sends are dropped) since
 // nothing in the sync-critical path may block on a slow consumer.
+//
+// PositionTicks/IsPlaying/ItemID are captured at the moment the event is
+// raised rather than left for the consumer to re-derive later by looking
+// the party back up in the hub — critical for EventEnded specifically,
+// since End() immediately removes the party from the hub afterward
+// (see Hub.EndParty), so a consumer that tried to call hub.Get() upon
+// receiving this event would always find it already gone.
 type Event struct {
 	Type          EventType
 	PartyID       string
 	UserID        string // empty for party-scoped events with no single subject user
+	ItemID        string
 	PositionTicks int64
 	IsPlaying     bool
 }
@@ -305,7 +313,7 @@ func (p *Party) checkEndOfMedia() {
 	}
 	p.broadcastControl(wsproto.MsgPause)
 	p.persistStateAsync()
-	p.emit(Event{Type: EventStateChanged, PositionTicks: p.state.PositionTicks, IsPlaying: false})
+	p.emit(Event{Type: EventStateChanged, ItemID: p.ItemID, PositionTicks: p.state.PositionTicks, IsPlaying: false})
 	p.logger.Info("end of media reached", "party_id", p.ID)
 }
 
@@ -372,7 +380,7 @@ func (p *Party) Join(userID, displayName string) (wsproto.SnapshotPayload, error
 				p.logger.Error("persist member join failed", "party_id", p.ID, "user_id", userID, "error", err)
 			}
 		}()
-		p.emit(Event{Type: EventJoined, UserID: userID, PositionTicks: p.state.PositionTicks, IsPlaying: p.state.IsPlaying})
+		p.emit(Event{Type: EventJoined, UserID: userID, ItemID: p.ItemID, PositionTicks: p.state.PositionTicks, IsPlaying: p.state.IsPlaying})
 	})
 	return snap, outErr
 }
@@ -411,7 +419,7 @@ func (p *Party) Disconnect(userID string) {
 				p.logger.Error("persist disconnect failed", "party_id", p.ID, "user_id", userID, "error", err)
 			}
 		}()
-		p.emit(Event{Type: EventDisconnected, UserID: userID})
+		p.emit(Event{Type: EventDisconnected, UserID: userID, ItemID: p.ItemID, PositionTicks: p.state.PositionTicks, IsPlaying: p.state.IsPlaying})
 	})
 }
 
@@ -435,7 +443,7 @@ func (p *Party) Leave(userID string) {
 				p.logger.Error("persist leave failed", "party_id", p.ID, "user_id", userID, "error", err)
 			}
 		}()
-		p.emit(Event{Type: EventLeft, UserID: userID})
+		p.emit(Event{Type: EventLeft, UserID: userID, ItemID: p.ItemID, PositionTicks: p.state.PositionTicks, IsPlaying: p.state.IsPlaying})
 		if wasHost {
 			p.hostDisconnectedAt = nil
 			newHost, ok := syncalg.SelectNewHost(p.connectedMembersForSelection(), userID)
@@ -483,7 +491,7 @@ func (p *Party) HandleControl(userID string, msgType wsproto.MessageType, positi
 		}
 		p.broadcastControl(msgType)
 		p.persistStateAsync()
-		p.emit(Event{Type: EventStateChanged, UserID: userID, PositionTicks: p.state.PositionTicks, IsPlaying: p.state.IsPlaying})
+		p.emit(Event{Type: EventStateChanged, UserID: userID, ItemID: p.ItemID, PositionTicks: p.state.PositionTicks, IsPlaying: p.state.IsPlaying})
 	})
 	return outErr
 }
@@ -546,11 +554,21 @@ func (p *Party) HostUserID() string {
 // write here.
 func (p *Party) End(ctx context.Context) error {
 	var outErr error
+	var finalPosition int64
+	var finalIsPlaying bool
+	var alreadyEnded bool
 	p.do(func() {
 		if p.ended {
+			alreadyEnded = true
 			return
 		}
 		p.ended = true
+		// Captured here, synchronously inside the actor, and carried on the
+		// emitted Event below — not re-derived later by a consumer looking
+		// the party back up in the hub, since Hub.EndParty removes it
+		// immediately after this call returns.
+		finalPosition = syncalg.ExpectedPosition(p.state.toAlg(), time.Now(), 0)
+		finalIsPlaying = p.state.IsPlaying
 		p.broadcastSnapshot()
 		for _, m := range p.members {
 			if m.conn != nil {
@@ -559,10 +577,13 @@ func (p *Party) End(ctx context.Context) error {
 			}
 		}
 	})
+	if alreadyEnded {
+		return nil
+	}
 	if err := p.store.UpdatePartyStatus(ctx, p.ID, dbx.PartyStatusEnded); err != nil {
 		outErr = err
 	}
-	p.emit(Event{Type: EventEnded})
+	p.emit(Event{Type: EventEnded, ItemID: p.ItemID, PositionTicks: finalPosition, IsPlaying: finalIsPlaying})
 	return outErr
 }
 

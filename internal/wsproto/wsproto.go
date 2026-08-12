@@ -83,9 +83,23 @@ type SnapshotPayload struct {
 	Members       []MemberInfo `json:"members"`
 }
 
-// ClockSyncPing is sent client -> server to begin the handshake.
+// ClockSyncPing is sent client -> server to begin the handshake. Beyond t0,
+// it optionally carries the client's own most recent sync diagnostics —
+// its current player position, and the RTT/offset/correction action it
+// computed from the *previous* handshake — purely so the server can emit
+// the debug-level sync diagnostics logging the spec requires (party ID,
+// user ID, sequence, authoritative-vs-client position, drift, RTT, clock
+// offset, action taken). None of these fields affect server behavior; the
+// server never trusts client-reported position for anything authoritative
+// (see the emby reporting package) — this is diagnostics-only, piggybacked
+// on the clock-sync frame rather than inventing a new message type outside
+// the spec's three message categories.
 type ClockSyncPing struct {
-	T0 int64 `json:"t0"` // client send time, ms since Unix epoch, client's own clock
+	T0                   int64  `json:"t0"`
+	PositionTicks        *int64 `json:"position_ticks,omitempty"`
+	LastRTTMs            *int64 `json:"last_rtt_ms,omitempty"`
+	LastClockOffsetMs    *int64 `json:"last_clock_offset_ms,omitempty"`
+	LastCorrectionAction string `json:"last_correction_action,omitempty"` // "none" | "nudge_rate" | "hard_seek"
 }
 
 // ClockSyncPong is the server's reply.

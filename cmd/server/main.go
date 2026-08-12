@@ -16,6 +16,8 @@ import (
 	"github.com/beechfuzz/watch-party/internal/config"
 	"github.com/beechfuzz/watch-party/internal/cryptox"
 	"github.com/beechfuzz/watch-party/internal/dbx"
+	"github.com/beechfuzz/watch-party/internal/emby"
+	"github.com/beechfuzz/watch-party/internal/embyreport"
 	"github.com/beechfuzz/watch-party/internal/httpapi"
 	"github.com/beechfuzz/watch-party/internal/logging"
 	"github.com/beechfuzz/watch-party/internal/party"
@@ -62,10 +64,9 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("token cipher: %w", err)
 	}
-	_ = tokenCipher
 
 	sessions := session.NewManager(store, cfg.SessionIdleTimeout, cfg.SessionMaxAge, cfg.DevMode)
-	_ = sessions
+	embyClient := emby.NewClient(cfg.EmbyServerURL)
 
 	hub := party.NewHub(store, party.Tuning{
 		SnapshotInterval:  cfg.SyncSnapshotInterval,
@@ -81,8 +82,23 @@ func run() error {
 		return fmt.Errorf("recovering active parties: %w", err)
 	}
 
+	reporter := embyreport.New(hub, store, embyClient, tokenCipher, cfg.EmbyProgressInterval, logger)
+	reporterCtx, stopReporter := context.WithCancel(context.Background())
+	defer stopReporter()
+	go reporter.Run(reporterCtx)
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", httpapi.Healthz)
+	httpapi.RegisterRoutes(mux, &httpapi.App{
+		Store:                store,
+		Sessions:             sessions,
+		Hub:                  hub,
+		Emby:                 embyClient,
+		TokenCipher:          tokenCipher,
+		Reporter:             reporter,
+		Logger:               logger,
+		AppOrigins:           cfg.AppOrigins,
+		EmbyProgressInterval: cfg.EmbyProgressInterval,
+	})
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,

@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Watch Party</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <main class="container party-layout">
+    <div class="player-column">
+      <div class="video-wrap">
+        <video id="video" playsinline></video>
+        <div id="start-overlay" class="overlay" hidden>
+          <button id="start-playback-btn">▶ Start Playback</button>
+        </div>
+      </div>
+
+      <div id="host-controls" hidden>
+        <button id="play-btn">Play</button>
+        <button id="pause-btn">Pause</button>
+      </div>
+
+      <p>Status: <span id="status">Connecting…</span></p>
+      <p class="error" id="error" hidden></p>
+
+      <button id="leave-btn">Leave party</button>
+      <button id="end-btn">End party</button>
+    </div>
+
+    <aside class="members-column">
+      <h2>In this party</h2>
+      <ul id="members"></ul>
+    </aside>
+  </main>
+
+  <script>window.WATCH_PARTY_ID = {{.PartyID}};</script>
+  <script type="module" src="/static/js/player.js"></script>
+</body>
+</html>

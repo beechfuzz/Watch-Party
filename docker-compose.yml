@@ -1,0 +1,37 @@
+# Example Compose deployment behind Traefik, matching the "Emby and Watch
+# Party both reverse-proxied through the same Traefik instance" deployment
+# this project was designed for. See README.md for the CORS configuration
+# Emby's own Traefik router needs alongside this.
+#
+# No `healthcheck:` block here: the final image is distroless (no shell, no
+# wget/curl), so a Docker exec-based healthcheck can't run inside the
+# container by design — see Dockerfile. Health should instead be checked
+# externally against GET /healthz, e.g. via Traefik's own health-check
+# support on this service's router, which is what the labels below assume.
+
+services:
+  watchparty:
+    build: .
+    # Or, once published: image: ghcr.io/beechfuzz/watch-party:latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - watchparty-data:/data
+    networks:
+      - traefik
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.watchparty.rule=Host(`watchparty.example.com`)"
+      - "traefik.http.routers.watchparty.entrypoints=websecure"
+      - "traefik.http.routers.watchparty.tls.certresolver=letsencrypt"
+      - "traefik.http.services.watchparty.loadbalancer.server.port=8080"
+      - "traefik.http.services.watchparty.loadbalancer.healthcheck.path=/healthz"
+      - "traefik.http.services.watchparty.loadbalancer.healthcheck.interval=10s"
+
+networks:
+  traefik:
+    external: true
+
+volumes:
+  watchparty-data:

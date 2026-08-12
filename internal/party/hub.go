@@ -74,6 +74,19 @@ func (h *Hub) Get(partyID string) (*Party, bool) {
 	return p, ok
 }
 
+// All returns a snapshot slice of every currently-active party actor. Used
+// by the Emby progress-reporting side channel to enumerate what it needs
+// to poll; safe to call concurrently.
+func (h *Hub) All() []*Party {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]*Party, 0, len(h.parties))
+	for _, p := range h.parties {
+		out = append(out, p)
+	}
+	return out
+}
+
 func (h *Hub) remove(partyID string) {
 	h.mu.Lock()
 	delete(h.parties, partyID)

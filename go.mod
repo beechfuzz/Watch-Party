@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/golang-migrate/migrate/v4 v4.19.1
 	modernc.org/sqlite v1.56.0
+	nhooyr.io/websocket v1.8.17
 )
 
 require (

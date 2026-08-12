@@ -74,6 +74,10 @@ The spec allows either `golang-migrate` or a minimal hand-rolled runner. `golang
 ### 1.3 Token-at-rest encryption: AES-256-GCM
 `TOKEN_ENCRYPTION_KEY` (32 bytes, base64 or hex) is used directly as an AES-256 key; each encrypted value is `nonce (96 bits, random per call) || ciphertext || GCM tag`, base64-encoded for SQLite TEXT storage. AES-GCM was chosen over a non-authenticated mode because it detects tampering/corruption on decrypt (returns an error) rather than silently producing garbage that would then be sent to Emby as a bearer token.
 
+### 1.3.1 CSRF coverage and where "join" fits
+
+The spec lists join among the state-changing actions needing CSRF protection. In this implementation, joining a party is not a separate HTTP endpoint — it happens as part of the WebSocket handshake itself (`GET /ws/parties/{id}`), which re-validates the user's media authorization and is protected by Origin validation instead (browsers don't attach custom headers to a WebSocket upgrade the way a synchronizer token would need, so Origin checking — already required by the spec for this endpoint — is the applicable defense here, not CSRF). Every other state-changing action the spec calls out (create party, transfer host, end party, logout, leave) is a regular JSON POST and does carry the CSRF header requirement.
+
 ### 1.4 CSRF: synchronizer token, not double-submit-cookie
 The spec explicitly says not to introduce a `SESSION_SECRET` unless something actually needs signing, and that CSRF may need its own key only if a double-submit-cookie (HMAC-based) pattern is used. Since sessions are already server-side and opaque, Watch Party generates a second random 256-bit token at session-creation time, stores it alongside the session row, and requires it to be echoed back in an `X-CSRF-Token` header on every state-changing request (compared with a constant-time comparison). This needs no signing key at all — one fewer secret to manage — and is exactly as strong as a synchronizer token is expected to be, since the token is bound server-side to the session rather than derived from anything guessable.
 
