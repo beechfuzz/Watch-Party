@@ -62,10 +62,12 @@ labels:
 ### Local development
 
 ```
-go run ./cmd/server   # needs the env vars from .env.example set; DEV_MODE=true permits http:// cookies
+go run ./cmd/server   # needs the env vars from .env.example set
 go test ./...
 node --test internal/webassets/web/static/js/sync.test.mjs   # frontend sync-math tests
 ```
+
+Running directly with `go run` (no reverse proxy in front) over plain `http://localhost:8080` works with no extra configuration — see "Mixing HTTP and HTTPS origins" below for why.
 
 ## Environment variables
 
@@ -73,11 +75,10 @@ Every variable Watch Party recognizes, with its default — all of these can be 
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `APP_ORIGINS` | *(required)* | Comma-separated origins this app is served from, e.g. `https://watchparty.example.com`. Enforced on WebSocket connections. |
+| `APP_ORIGINS` | *(required)* | Comma-separated origins this app is served from, e.g. `https://watchparty.example.com`. Enforced on WebSocket connections. Mixed HTTP/HTTPS origins are fine — see below. |
 | `EMBY_SERVER_URL` | *(required)* | Your Emby server's base URL. |
 | `TOKEN_ENCRYPTION_KEY` | *(required)* | 32-byte key (base64 or hex) encrypting stored Emby tokens at rest. Never stored in SQLite. Generate with `openssl rand -base64 32` or `./watchparty --generate-key`. |
 | `DATABASE_PATH` | `/data/watchparty.db` | Path to the SQLite database file; the directory is created (and chowned to `PUID:PGID`, if running as root) if missing. Point this somewhere writable instead, e.g. `./data/watchparty.db`, for local `go run` development. |
-| `DEV_MODE` | `false` | Permits non-Secure cookies for local `http://` testing only. Never enable in production. |
 | `EMBY_PROGRESS_INTERVAL` | `10s` | How often each participant's watch progress is reported back to their own Emby account. |
 | `HOST_GRACE_PERIOD_SECONDS` | `20` | How long a disconnected host has to reconnect before host status transfers. |
 | `LISTEN_ADDR` | `:8080` | Address the HTTP server listens on. |
@@ -92,6 +93,16 @@ Every variable Watch Party recognizes, with its default — all of these can be 
 | `SYNC_SOFT_DRIFT_MS` | `300` | Drift below this (milliseconds) is left uncorrected. |
 
 `SESSION_IDLE_TIMEOUT`, `SESSION_MAX_AGE`, and `HOST_GRACE_PERIOD_SECONDS` accept either a bare integer (seconds) or a Go duration string (`30m`, `24h`).
+
+### Mixing HTTP and HTTPS origins
+
+A single Watch Party instance can be reachable at more than one origin at once — for example, an external `https://watchparty.example.com` fronted by a reverse proxy, alongside an internal-only `http://watchparty.home` that's only ever reachable on your own network and doesn't have (or need) a TLS certificate. List both in `APP_ORIGINS`, comma-separated, schemes and all:
+
+```
+APP_ORIGINS=https://watchparty.example.com,http://watchparty.home
+```
+
+Each session cookie's `Secure` attribute is set to match what the *specific request that issued it* actually arrived over — not a single setting for the whole deployment — so logging in through the internal HTTP origin gets a plain cookie (a browser would silently refuse to store a `Secure` one from a non-HTTPS page anyway) while logging in through the external HTTPS origin still gets a fully `Secure` one, from the same running server, automatically. This is why there's no `DEV_MODE`-style flag to flip: it's derived per-request instead, via the standard `X-Forwarded-Proto` header your reverse proxy already sends (trusted because Watch Party is designed to sit behind one — see `ARCHITECTURE.md` §2 — rather than being directly internet-reachable itself; `watchparty.container`'s example binds its port to `127.0.0.1` for exactly this reason). Running directly with `go run` and no reverse proxy in front works the same way: no `X-Forwarded-Proto` header at all is indistinguishable from plain HTTP, so local development just works without any extra flag.
 
 ### Running as a specific user (`PUID`/`PGID`)
 

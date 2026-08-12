@@ -88,7 +88,7 @@ func newTestApp(t *testing.T) (*App, *httptest.Server) {
 		Store: store, Hub: hub, Emby: embyClient, TokenCipher: cipher, Reporter: reporter, Logger: logger,
 		AppOrigins: []string{"http://test-origin.example"},
 	}
-	app.Sessions = session.NewManager(store, time.Hour, 24*time.Hour, true)
+	app.Sessions = session.NewManager(store, time.Hour, 24*time.Hour)
 
 	mux := http.NewServeMux()
 	RegisterRoutes(mux, app)
@@ -295,7 +295,8 @@ func TestEndParty_OnlyHostAllowed(t *testing.T) {
 	// Can't log Bob in via fake Emby (only "alice" is accepted there), so
 	// create a session directly through the session manager instead.
 	rec := httptest.NewRecorder()
-	sess, err := app.Sessions.Create(context.Background(), rec, "user-bob")
+	fakeReq := httptest.NewRequest("POST", "/", nil)
+	sess, err := app.Sessions.Create(context.Background(), rec, fakeReq, "user-bob")
 	if err != nil {
 		t.Fatal(err)
 	}

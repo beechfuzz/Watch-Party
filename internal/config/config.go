@@ -24,8 +24,12 @@ const defaultContainerID = 65532
 type Config struct {
 	// Server
 	ListenAddr string
-	AppOrigins []string // used for CORS-adjacent checks and WebSocket Origin validation
-	DevMode    bool     // when true, permits non-Secure session cookies for local http:// testing
+	// AppOrigins is used for WebSocket Origin validation. Mixed schemes are
+	// fine — e.g. an external https:// domain alongside an internal-only
+	// http:// LAN hostname for the same instance — since session cookie
+	// Secure-ness is now determined per-request, not from a single global
+	// flag; see internal/session.isSecureRequest and ARCHITECTURE.md §2.
+	AppOrigins []string
 
 	// Emby
 	EmbyServerURL string
@@ -77,7 +81,6 @@ func Load() (*Config, error) {
 		// ./data/watchparty.db, via .env.
 		DatabasePath: getEnvDefault("DATABASE_PATH", "/data/watchparty.db"),
 		LogLevel:     strings.ToLower(getEnvDefault("LOG_LEVEL", "info")),
-		DevMode:      getEnvBool("DEV_MODE", false),
 	}
 
 	origins := getEnvDefault("APP_ORIGINS", "")
@@ -149,15 +152,22 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("SYNC_MAX_RATE_ADJUSTMENT must be between 0 and 1 (exclusive), got %v", cfg.SyncMaxRateAdjust)
 	}
 
-	if !cfg.DevMode {
-		for _, o := range cfg.AppOrigins {
-			if strings.HasPrefix(o, "http://") {
-				return nil, fmt.Errorf("APP_ORIGINS contains a non-https origin (%s) but DEV_MODE is not enabled; set DEV_MODE=true only for local development", o)
-			}
+	return cfg, nil
+}
+
+// NonHTTPSOrigins returns every configured origin that isn't https://, for
+// callers that want to log a startup reminder — see main.go. This is
+// informational only: it's a legitimate, supported configuration (e.g. an
+// internal-only LAN hostname alongside an external HTTPS domain), not a
+// warning-worthy misconfiguration by itself.
+func (c *Config) NonHTTPSOrigins() []string {
+	var out []string
+	for _, o := range c.AppOrigins {
+		if !strings.HasPrefix(o, "https://") {
+			out = append(out, o)
 		}
 	}
-
-	return cfg, nil
+	return out
 }
 
 // decodeKey accepts either a base64 (standard, with or without padding) or
@@ -192,18 +202,6 @@ func getEnvDefault(key, def string) string {
 		return v
 	}
 	return def
-}
-
-func getEnvBool(key string, def bool) bool {
-	v, ok := os.LookupEnv(key)
-	if !ok || v == "" {
-		return def
-	}
-	b, err := strconv.ParseBool(v)
-	if err != nil {
-		return def
-	}
-	return b
 }
 
 func getEnvInt(key string, def int) int {
