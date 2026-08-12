@@ -73,23 +73,23 @@ Every variable Watch Party recognizes, with its default — all of these can be 
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `LISTEN_ADDR` | `:8080` | Address the HTTP server listens on. |
 | `APP_ORIGINS` | *(required)* | Comma-separated origins this app is served from, e.g. `https://watchparty.example.com`. Enforced on WebSocket connections. |
-| `DEV_MODE` | `false` | Permits non-Secure cookies for local `http://` testing only. Never enable in production. |
 | `EMBY_SERVER_URL` | *(required)* | Your Emby server's base URL. |
-| `PUID` | `65532` | UID the server process runs as — see [Running as a specific user](#running-as-a-specific-user-puidpgid) below. |
-| `PGID` | `65532` | GID the server process runs as — same section. |
-| `DATABASE_PATH` | `/data/watchparty.db` | Path to the SQLite database file; the directory is created (and chowned to `PUID:PGID`, if running as root) if missing. Point this somewhere writable instead, e.g. `./data/watchparty.db`, for local `go run` development. |
 | `TOKEN_ENCRYPTION_KEY` | *(required)* | 32-byte key (base64 or hex) encrypting stored Emby tokens at rest. Never stored in SQLite. Generate with `openssl rand -base64 32` or `./watchparty --generate-key`. |
+| `DATABASE_PATH` | `/data/watchparty.db` | Path to the SQLite database file; the directory is created (and chowned to `PUID:PGID`, if running as root) if missing. Point this somewhere writable instead, e.g. `./data/watchparty.db`, for local `go run` development. |
+| `DEV_MODE` | `false` | Permits non-Secure cookies for local `http://` testing only. Never enable in production. |
+| `EMBY_PROGRESS_INTERVAL` | `10s` | How often each participant's watch progress is reported back to their own Emby account. |
+| `HOST_GRACE_PERIOD_SECONDS` | `20` | How long a disconnected host has to reconnect before host status transfers. |
+| `LISTEN_ADDR` | `:8080` | Address the HTTP server listens on. |
+| `LOG_LEVEL` | `info` | One of `debug`, `info`, `warn`, `error`. |
+| `PGID` | `65532` | GID the server process runs as — same section. |
+| `PUID` | `65532` | UID the server process runs as — see [Running as a specific user](#running-as-a-specific-user-puidpgid) below. |
 | `SESSION_IDLE_TIMEOUT` | `24h` | Sliding idle timeout — a session with no activity this long is invalidated. |
 | `SESSION_MAX_AGE` | `720h` (30 days) | Absolute maximum session age, regardless of activity. |
-| `HOST_GRACE_PERIOD_SECONDS` | `20` | How long a disconnected host has to reconnect before host status transfers. |
-| `SYNC_SNAPSHOT_INTERVAL` | `4s` | How often the server broadcasts a full authoritative snapshot to every participant. |
-| `SYNC_SOFT_DRIFT_MS` | `300` | Drift below this (milliseconds) is left uncorrected. |
 | `SYNC_HARD_DRIFT_MS` | `1500` | Drift above this (milliseconds) triggers a hard seek. Must be greater than `SYNC_SOFT_DRIFT_MS`. |
 | `SYNC_MAX_RATE_ADJUSTMENT` | `0.05` | Max fractional playback-rate nudge for gradual drift correction (`0.05` ⇒ rate range `[0.95, 1.05]`). |
-| `EMBY_PROGRESS_INTERVAL` | `10s` | How often each participant's watch progress is reported back to their own Emby account. |
-| `LOG_LEVEL` | `info` | One of `debug`, `info`, `warn`, `error`. |
+| `SYNC_SNAPSHOT_INTERVAL` | `4s` | How often the server broadcasts a full authoritative snapshot to every participant. |
+| `SYNC_SOFT_DRIFT_MS` | `300` | Drift below this (milliseconds) is left uncorrected. |
 
 `SESSION_IDLE_TIMEOUT`, `SESSION_MAX_AGE`, and `HOST_GRACE_PERIOD_SECONDS` accept either a bare integer (seconds) or a Go duration string (`30m`, `24h`).
 
