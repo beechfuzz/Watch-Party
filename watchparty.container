@@ -20,6 +20,14 @@ After=network-online.target
 [Container]
 Image=ghcr.io/beechfuzz/watch-party:latest
 EnvironmentFile=/etc/watchparty/watchparty.env
+# PUID/PGID can also be set inline here instead of (or to override) the
+# environment file — e.g. to match the UID/GID that owns an existing Emby
+# library/config mount on the host. Both default to 65532 if unset. The
+# container image starts as root specifically so it can chown /data to
+# these and then permanently drop to them before running anything else —
+# see README.md and ARCHITECTURE.md.
+#Environment=PUID=1000
+#Environment=PGID=1000
 Volume=watchparty-data.volume:/data
 PublishPort=127.0.0.1:8080:8080
 # Adjust to however Emby/Traefik are reachable in your setup — e.g. join

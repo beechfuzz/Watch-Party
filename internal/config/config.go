@@ -14,6 +14,12 @@ import (
 	"time"
 )
 
+// defaultContainerID is the UID/GID PUID/PGID fall back to when unset. It
+// matches the distroless "nonroot" convention this image used before
+// PUID/PGID existed, so upgrading without setting either variable doesn't
+// change file ownership underneath existing deployments.
+const defaultContainerID = 65532
+
 // Config holds all runtime configuration for the Watch Party server.
 type Config struct {
 	// Server
@@ -46,6 +52,15 @@ type Config struct {
 	// Emby playback reporting
 	EmbyProgressInterval time.Duration
 
+	// Container UID/GID (the common self-hosted-image PUID/PGID pattern).
+	// Only meaningful when the process is started as root (see Dockerfile
+	// and internal/privdrop): in that case the server takes ownership of
+	// its data directory and permanently drops to this UID/GID before
+	// doing anything else. Has no effect otherwise — e.g. local `go run`
+	// as a normal user during development.
+	PUID int
+	PGID int
+
 	// Logging
 	LogLevel string
 }
@@ -54,8 +69,13 @@ type Config struct {
 // missing required value or value that fails validation.
 func Load() (*Config, error) {
 	cfg := &Config{
-		ListenAddr:   getEnvDefault("LISTEN_ADDR", ":8080"),
-		DatabasePath: getEnvDefault("DATABASE_PATH", "./data/watchparty.db"),
+		ListenAddr: getEnvDefault("LISTEN_ADDR", ":8080"),
+		// Defaults to the container's conventional volume mount point (see
+		// docker-compose.yml and watchparty.container, both of which mount
+		// a persistent volume at /data) — local `go run` development
+		// should set DATABASE_PATH to something writable, e.g.
+		// ./data/watchparty.db, via .env.
+		DatabasePath: getEnvDefault("DATABASE_PATH", "/data/watchparty.db"),
 		LogLevel:     strings.ToLower(getEnvDefault("LOG_LEVEL", "info")),
 		DevMode:      getEnvBool("DEV_MODE", false),
 	}
@@ -104,6 +124,15 @@ func Load() (*Config, error) {
 	}
 	if cfg.EmbyProgressInterval, err = getEnvDuration("EMBY_PROGRESS_INTERVAL", 10*time.Second); err != nil {
 		return nil, err
+	}
+
+	cfg.PUID = getEnvInt("PUID", defaultContainerID)
+	cfg.PGID = getEnvInt("PGID", defaultContainerID)
+	if cfg.PUID < 0 {
+		return nil, fmt.Errorf("PUID must not be negative, got %d", cfg.PUID)
+	}
+	if cfg.PGID < 0 {
+		return nil, fmt.Errorf("PGID must not be negative, got %d", cfg.PGID)
 	}
 
 	cfg.SyncSoftDriftMS = getEnvInt("SYNC_SOFT_DRIFT_MS", 300)
