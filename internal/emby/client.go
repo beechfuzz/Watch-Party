@@ -141,13 +141,17 @@ func (c *Client) GetItem(ctx context.Context, accessToken, userID, itemID string
 // MediaSource is the subset of Emby's MediaSourceInfo Watch Party needs to
 // build a playback URL. There is deliberately no DirectStreamUrl field —
 // per the Phase 0 findings, Emby does not return one; the client builds
-// the direct-play/stream URL itself (see BuildPlaybackURL).
+// the direct-play/stream URL itself. TranscodingUrl, by contrast, IS
+// returned by Emby for the transcode case (server-relative, missing only
+// the host and api_key) and is preferred over hand-building one — see
+// GetPlaybackURL.
 type MediaSource struct {
 	ID                   string `json:"Id"`
 	Container            string `json:"Container"`
 	SupportsDirectPlay   bool   `json:"SupportsDirectPlay"`
 	SupportsDirectStream bool   `json:"SupportsDirectStream"`
 	SupportsTranscoding  bool   `json:"SupportsTranscoding"`
+	TranscodingUrl       string `json:"TranscodingUrl"`
 }
 
 type playbackInfoResponse struct {
@@ -156,24 +160,79 @@ type playbackInfoResponse struct {
 	ErrorCode     string        `json:"ErrorCode"`
 }
 
-// PlaybackURLResult is what the frontend needs to point a <video> element
-// (or an HLS player) at Emby directly.
-type PlaybackURLResult struct {
-	URL           string
-	IsTranscoded  bool
-	MediaSourceID string
-	PlaySessionID string
-	Container     string
+// browserDeviceProfile tells Emby what a generic modern browser's <video>
+// element can actually decode natively, so PlaybackInfo's
+// SupportsDirectPlay/SupportsDirectStream reflect real browser capability
+// instead of just "can the server serve these bytes as-is" — the two are
+// very different questions (a browser cannot open an .mkv container at
+// all, regardless of the codec inside, even though Emby is perfectly happy
+// to serve one unmodified). Without this, Emby has no idea it's talking to
+// a browser and defaults to permissive server-side answers, which is what
+// produced "resource not suitable" errors in practice — see ARCHITECTURE.md.
+//
+// Deliberately conservative on the direct-play side (only combinations
+// virtually every current browser supports natively) and routes everything
+// else through HLS transcoding — a working transcode beats a direct-play
+// claim that fails to actually load.
+func browserDeviceProfile() map[string]any {
+	return map[string]any{
+		"MaxStreamingBitrate": 120_000_000,
+		"DirectPlayProfiles": []map[string]any{
+			{"Container": "mp4,m4v", "Type": "Video", "VideoCodec": "h264,vp9,av1", "AudioCodec": "aac,mp3,opus,flac"},
+			{"Container": "webm", "Type": "Video", "VideoCodec": "vp8,vp9,av1", "AudioCodec": "opus,vorbis"},
+		},
+		"TranscodingProfiles": []map[string]any{
+			{"Container": "ts", "Type": "Video", "VideoCodec": "h264", "AudioCodec": "aac", "Protocol": "hls", "Context": "Streaming"},
+		},
+		"SubtitleProfiles": []map[string]any{
+			{"Format": "vtt", "Method": "External"},
+		},
+	}
 }
 
-// GetPlaybackURL calls PlaybackInfo and constructs the resulting stream
-// URL. It always includes the requesting user's own AccessToken as the
-// api_key query parameter, since a plain <video src> cannot set custom
-// headers — see ARCHITECTURE.md §0.2.
+// PlaybackURLResult is what the frontend needs to point a <video> element
+// (or an HLS player) at Emby directly. JSON tags matter here: this is
+// serialized straight to the browser (see httpapi.handlePlaybackURL) and
+// must match what player.js actually reads.
+type PlaybackURLResult struct {
+	URL           string `json:"url"`
+	IsTranscoded  bool   `json:"is_transcoded"`
+	MediaSourceID string `json:"media_source_id"`
+	PlaySessionID string `json:"play_session_id"`
+	Container     string `json:"container"`
+}
+
+// GetPlaybackURL calls PlaybackInfo — POSTing a DeviceProfile describing
+// what a browser can actually decode, so Emby's SupportsDirectPlay/
+// SupportsDirectStream/SupportsTranscoding reflect real browser capability
+// rather than raw server-side "can I serve this file" capability — and
+// constructs the resulting stream URL. It always includes the requesting
+// user's own AccessToken as the api_key query parameter, since a plain
+// <video src> cannot set custom headers — see ARCHITECTURE.md §0.2.
 func (c *Client) GetPlaybackURL(ctx context.Context, accessToken, userID, itemID, deviceID string) (*PlaybackURLResult, error) {
-	u := fmt.Sprintf("%s/Items/%s/PlaybackInfo?UserId=%s", c.baseURL, url.PathEscape(itemID), url.QueryEscape(userID))
+	reqBody, err := json.Marshal(map[string]any{
+		"UserId":               userID,
+		"DeviceProfile":        browserDeviceProfile(),
+		"AutoOpenLiveStream":   false,
+		"EnableDirectPlay":     true,
+		"EnableDirectStream":   true,
+		"EnableTranscoding":    true,
+		"AllowVideoStreamCopy": true,
+		"AllowAudioStreamCopy": true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("emby: marshal playback info request: %w", err)
+	}
+	u := fmt.Sprintf("%s/Items/%s/PlaybackInfo", c.baseURL, url.PathEscape(itemID))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("emby: build playback info request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Emby-Token", accessToken)
+
 	var info playbackInfoResponse
-	if err := c.getJSON(ctx, u, accessToken, &info); err != nil {
+	if err := c.do(req, &info); err != nil {
 		return nil, err
 	}
 	if info.ErrorCode != "" {
@@ -203,7 +262,19 @@ func (c *Client) GetPlaybackURL(ctx context.Context, accessToken, userID, itemID
 	}
 	if src.SupportsTranscoding {
 		q.Set("DeviceId", deviceID)
-		hlsURL := fmt.Sprintf("%s/Videos/%s/master.m3u8?%s", c.baseURL, url.PathEscape(itemID), q.Encode())
+		hlsURL := src.TranscodingUrl
+		if hlsURL != "" {
+			// Emby-provided, server-relative, already carries
+			// MediaSourceId/PlaySessionId/DeviceId — just needs the host
+			// and our token appended.
+			sep := "&"
+			if !strings.Contains(hlsURL, "?") {
+				sep = "?"
+			}
+			hlsURL = c.baseURL + hlsURL + sep + "api_key=" + url.QueryEscape(accessToken)
+		} else {
+			hlsURL = fmt.Sprintf("%s/Videos/%s/master.m3u8?%s", c.baseURL, url.PathEscape(itemID), q.Encode())
+		}
 		return &PlaybackURLResult{
 			URL: hlsURL, IsTranscoded: true,
 			MediaSourceID: src.ID, PlaySessionID: info.PlaySessionId,

@@ -80,6 +80,37 @@ function ticksToSeconds(ticks) {
   return ticks / TICKS_PER_SECOND;
 }
 
+// attachSource points the <video> element at the Emby playback URL. Direct
+// play/stream URLs (a plain media file Emby is serving as-is) just become
+// video.src — the browser handles those natively. Transcoded URLs are
+// always HLS (.m3u8): only Safari plays that format natively in a <video>
+// element, so everywhere else needs hls.js (vendored — see
+// vendor/README.md and ARCHITECTURE.md §5) to demux and feed it in via
+// Media Source Extensions.
+function attachSource(url, isTranscoded) {
+  if (!isTranscoded) {
+    video.src = url;
+    return;
+  }
+  const nativelySupportsHls = video.canPlayType("application/vnd.apple.mpegurl") !== "";
+  if (nativelySupportsHls) {
+    video.src = url;
+    return;
+  }
+  if (typeof Hls === "undefined" || !Hls.isSupported()) {
+    showError("This browser can't play transcoded video (no native HLS support and hls.js is unavailable).");
+    return;
+  }
+  const hls = new Hls();
+  hls.on(Hls.Events.ERROR, (_event, data) => {
+    if (data.fatal) {
+      showError("Playback error: " + (data.details || data.type));
+    }
+  });
+  hls.loadSource(url);
+  hls.attachMedia(video);
+}
+
 function applyAuthoritativeState(state, { hardSeek } = {}) {
   currentState = state;
   if (hardSeek) {
@@ -252,7 +283,7 @@ async function main() {
     setStatus("Could not get a playback URL from Emby: " + err.message);
     return;
   }
-  video.src = playback.url;
+  attachSource(playback.url, playback.is_transcoded);
 
   conn = new PartyConnection(
     partyId,
