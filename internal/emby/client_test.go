@@ -72,6 +72,99 @@ func TestDeviceID_StableAndDeterministic(t *testing.T) {
 	}
 }
 
+func TestGetPlaybackURL_SendsDeviceProfileToLetEmbyDecide(t *testing.T) {
+	var gotMethod string
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		json.NewEncoder(w).Encode(map[string]any{
+			"PlaySessionId": "sess1",
+			"MediaSources":  []map[string]any{{"Id": "src1", "Container": "mp4", "SupportsDirectStream": true}},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	if _, err := c.GetPlaybackURL(context.Background(), "tok", "user-1", "item1", "device-1"); err != nil {
+		t.Fatalf("GetPlaybackURL: %v", err)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("method = %q, want POST (a plain GET can't carry a DeviceProfile body)", gotMethod)
+	}
+	if gotBody["UserId"] != "user-1" {
+		t.Errorf("UserId = %v, want user-1", gotBody["UserId"])
+	}
+	profile, ok := gotBody["DeviceProfile"].(map[string]any)
+	if !ok {
+		t.Fatal("expected a DeviceProfile in the request body so Emby can tell direct-play-capable browsers apart from ones that need transcoding")
+	}
+	if _, ok := profile["DirectPlayProfiles"]; !ok {
+		t.Error("DeviceProfile missing DirectPlayProfiles")
+	}
+	if _, ok := profile["TranscodingProfiles"]; !ok {
+		t.Error("DeviceProfile missing TranscodingProfiles")
+	}
+}
+
+func TestGetPlaybackURL_PreferEmbyProvidedTranscodingUrl(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"PlaySessionId": "sess-abc",
+			"MediaSources": []map[string]any{
+				{
+					"Id": "src-abc", "SupportsDirectStream": false, "SupportsDirectPlay": false, "SupportsTranscoding": true,
+					"TranscodingUrl": "/Videos/item1/master.m3u8?MediaSourceId=src-abc&PlaySessionId=sess-abc&DeviceId=device-1",
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	result, err := c.GetPlaybackURL(context.Background(), "tok-xyz", "user-1", "item1", "device-1")
+	if err != nil {
+		t.Fatalf("GetPlaybackURL: %v", err)
+	}
+	if !result.IsTranscoded {
+		t.Fatal("expected transcoded result")
+	}
+	parsed, err := url.Parse(result.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Path != "/Videos/item1/master.m3u8" {
+		t.Errorf("path = %q, want the Emby-provided path preserved verbatim", parsed.Path)
+	}
+	q := parsed.Query()
+	if q.Get("MediaSourceId") != "src-abc" || q.Get("PlaySessionId") != "sess-abc" || q.Get("DeviceId") != "device-1" {
+		t.Errorf("query lost Emby-provided params: %v", q)
+	}
+	if q.Get("api_key") != "tok-xyz" {
+		t.Errorf("api_key = %q, want it appended to the Emby-provided URL", q.Get("api_key"))
+	}
+}
+
+func TestPlaybackURLResult_WireCasingMatchesFrontend(t *testing.T) {
+	// player.js reads playback.url / playback.is_transcoded (snake_case) —
+	// this pins the JSON wire shape so a struct-tag regression here would
+	// silently break every login again, the way the untagged struct did.
+	result := PlaybackURLResult{URL: "http://x/y", IsTranscoded: true, MediaSourceID: "s1", PlaySessionID: "p1", Container: "mp4"}
+	b, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"url", "is_transcoded", "media_source_id", "play_session_id", "container"} {
+		if _, ok := m[key]; !ok {
+			t.Errorf("wire JSON missing expected key %q; got keys %v", key, m)
+		}
+	}
+}
+
 func TestGetPlaybackURL_DirectStream_UsesQueryParamToken(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/Items/item42/PlaybackInfo" {

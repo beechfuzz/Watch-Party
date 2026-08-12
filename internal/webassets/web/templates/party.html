@@ -35,6 +35,11 @@
   </main>
 
   <script>window.WATCH_PARTY_ID = {{.PartyID}};</script>
+  <!-- Plain (non-module) script: hls.js's UMD build attaches itself as
+       window.Hls this way, which player.js checks for. Only Safari plays
+       HLS natively; everywhere else needs this for transcoded content —
+       see ARCHITECTURE.md §5 and vendor/README.md. -->
+  <script src="/static/js/vendor/hls.min.js"></script>
   <script type="module" src="/static/js/player.js"></script>
 </body>
 </html>

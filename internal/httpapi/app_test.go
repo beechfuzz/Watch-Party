@@ -265,9 +265,17 @@ func TestPlaybackURL_UsesRequestingUsersOwnToken(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d body=%v", resp.StatusCode, got)
 	}
-	u, ok := got["URL"].(string)
+	// lowercase "url": this is what player.js actually reads. A previous
+	// version of PlaybackURLResult had no JSON tags at all (serializing as
+	// "URL"), which this test asserted on without noticing it didn't match
+	// the frontend — silently breaking every login. Assert the real
+	// contract here instead of whatever the server happens to emit.
+	u, ok := got["url"].(string)
 	if !ok || !strings.Contains(u, "api_key=fake-token") {
 		t.Errorf("playback URL missing expected api_key: %v", got)
+	}
+	if _, ok := got["is_transcoded"]; !ok {
+		t.Errorf("response missing is_transcoded (player.js needs this to decide direct playback vs. HLS): %v", got)
 	}
 }
 
