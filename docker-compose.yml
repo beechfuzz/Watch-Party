@@ -16,6 +16,11 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    # PUID/PGID (see .env / README.md) can also be set/overridden directly
+    # here, e.g. to match the UID/GID that owns an existing host mount:
+    # environment:
+    #   - PUID=1000
+    #   - PGID=1000
     volumes:
       - watchparty-data:/data
     networks:

@@ -69,18 +69,37 @@ node --test internal/webassets/web/static/js/sync.test.mjs   # frontend sync-mat
 
 ## Environment variables
 
-See `.env.example` for the full, commented list. Highlights:
+Every variable Watch Party recognizes, with its default — all of these can be set the same way whether you're running via `docker run`/`docker compose`, `podman run`, or a Podman Quadlet `.container` unit (as plain `Environment=`/`EnvironmentFile=` entries — see the comments in `watchparty.container`). `.env.example` has the same list with longer inline explanations.
 
-| Variable | Purpose |
-|---|---|
-| `EMBY_SERVER_URL` | Your Emby server's base URL. |
-| `APP_ORIGINS` | Comma-separated origins this app is served from; enforced on WebSocket connections. |
-| `TOKEN_ENCRYPTION_KEY` | 32-byte key encrypting stored Emby tokens at rest. Never stored in SQLite. |
-| `SESSION_IDLE_TIMEOUT` / `SESSION_MAX_AGE` | Sliding idle timeout and absolute session lifetime. |
-| `HOST_GRACE_PERIOD_SECONDS` | How long a disconnected host has to reconnect before losing host status. |
-| `SYNC_SNAPSHOT_INTERVAL`, `SYNC_SOFT_DRIFT_MS`, `SYNC_HARD_DRIFT_MS`, `SYNC_MAX_RATE_ADJUSTMENT` | Drift-correction tuning — see below. |
-| `EMBY_PROGRESS_INTERVAL` | How often each participant's watch progress is reported back to their own Emby account. |
-| `DEV_MODE` | Permits non-Secure cookies for local `http://` testing only. Never enable in production. |
+| Variable | Default | Purpose |
+|---|---|---|
+| `LISTEN_ADDR` | `:8080` | Address the HTTP server listens on. |
+| `APP_ORIGINS` | *(required)* | Comma-separated origins this app is served from, e.g. `https://watchparty.example.com`. Enforced on WebSocket connections. |
+| `DEV_MODE` | `false` | Permits non-Secure cookies for local `http://` testing only. Never enable in production. |
+| `EMBY_SERVER_URL` | *(required)* | Your Emby server's base URL. |
+| `PUID` | `65532` | UID the server process runs as — see [Running as a specific user](#running-as-a-specific-user-puidpgid) below. |
+| `PGID` | `65532` | GID the server process runs as — same section. |
+| `DATABASE_PATH` | `/data/watchparty.db` | Path to the SQLite database file; the directory is created (and chowned to `PUID:PGID`, if running as root) if missing. Point this somewhere writable instead, e.g. `./data/watchparty.db`, for local `go run` development. |
+| `TOKEN_ENCRYPTION_KEY` | *(required)* | 32-byte key (base64 or hex) encrypting stored Emby tokens at rest. Never stored in SQLite. Generate with `openssl rand -base64 32` or `./watchparty --generate-key`. |
+| `SESSION_IDLE_TIMEOUT` | `24h` | Sliding idle timeout — a session with no activity this long is invalidated. |
+| `SESSION_MAX_AGE` | `720h` (30 days) | Absolute maximum session age, regardless of activity. |
+| `HOST_GRACE_PERIOD_SECONDS` | `20` | How long a disconnected host has to reconnect before host status transfers. |
+| `SYNC_SNAPSHOT_INTERVAL` | `4s` | How often the server broadcasts a full authoritative snapshot to every participant. |
+| `SYNC_SOFT_DRIFT_MS` | `300` | Drift below this (milliseconds) is left uncorrected. |
+| `SYNC_HARD_DRIFT_MS` | `1500` | Drift above this (milliseconds) triggers a hard seek. Must be greater than `SYNC_SOFT_DRIFT_MS`. |
+| `SYNC_MAX_RATE_ADJUSTMENT` | `0.05` | Max fractional playback-rate nudge for gradual drift correction (`0.05` ⇒ rate range `[0.95, 1.05]`). |
+| `EMBY_PROGRESS_INTERVAL` | `10s` | How often each participant's watch progress is reported back to their own Emby account. |
+| `LOG_LEVEL` | `info` | One of `debug`, `info`, `warn`, `error`. |
+
+`SESSION_IDLE_TIMEOUT`, `SESSION_MAX_AGE`, and `HOST_GRACE_PERIOD_SECONDS` accept either a bare integer (seconds) or a Go duration string (`30m`, `24h`).
+
+### Running as a specific user (`PUID`/`PGID`)
+
+If you've used a linuxserver.io-style image before, this works the same way: set `PUID`/`PGID` to the UID/GID you want the server to actually run as — typically whatever owns a host directory you're bind-mounting in, so files Watch Party creates aren't owned by some arbitrary container-internal ID that your host user can't touch.
+
+The container image starts as root, but only ever as a brief, fixed first step: before opening its database or listening on anything, the server itself takes ownership of its data directory (`chown -R` to `PUID:PGID`) and then **permanently** drops root privileges down to `PUID:PGID` for the rest of the process's life — there's no shell or `su-exec`/`gosu` involved (the image is still distroless — no shell, no package manager), the Go binary does this itself via a raw syscall applied across every OS thread it's running on, which is the part that's easy to get subtly wrong (a naive single-thread privilege drop can leave *other* threads still running as root) and is covered by tests exercising the real syscalls, not just mocked logic. See `internal/privdrop` and `ARCHITECTURE.md` for the implementation and the reasoning.
+
+If you don't set `PUID`/`PGID`, both default to `65532` — an arbitrary, unprivileged, non-root ID (the same one this image used to hardcode before `PUID`/`PGID` existed), so you get sane non-root behavior with zero configuration. Setting either to `0` is possible but not recommended — you'll get a startup log warning, since running the server as root is what this whole mechanism exists to avoid.
 
 ## Media authorization
 
@@ -106,7 +125,7 @@ New or reconnecting participants never try to replay everything that happened wh
 
 ## Testing
 
-- `go test ./...` — unit tests (drift calculation, clock-offset estimation, sequence-number ordering/staleness rejection, host authorization, host-transfer selection, grace-period behavior) and integration tests against the real party actor (host/participant connect, play/seek/pause propagation, disconnect/reconnect with a correct snapshot, rapid-succession command ordering, end-of-media detection, explicit and grace-period host transfer).
+- `go test ./...` — unit tests (drift calculation, clock-offset estimation, sequence-number ordering/staleness rejection, host authorization, host-transfer selection, grace-period behavior, the `PUID`/`PGID` privilege-drop syscalls) and integration tests against the real party actor (host/participant connect, play/seek/pause propagation, disconnect/reconnect with a correct snapshot, rapid-succession command ordering, end-of-media detection, explicit and grace-period host transfer). The `internal/privdrop` tests that exercise the real privilege-drop syscalls only run when `go test` itself is run as root (they `t.Skip` otherwise) — CI runners typically aren't root, so don't be surprised to see them skipped there.
 - `node --test internal/webassets/web/static/js/sync.test.mjs` — the same drift/clock-offset/staleness math, mirrored in the browser client (see `ARCHITECTURE.md` §1.6 for why it's mirrored rather than shared), tested the same way.
 
 ## License

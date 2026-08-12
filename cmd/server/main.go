@@ -21,6 +21,7 @@ import (
 	"github.com/beechfuzz/watch-party/internal/httpapi"
 	"github.com/beechfuzz/watch-party/internal/logging"
 	"github.com/beechfuzz/watch-party/internal/party"
+	"github.com/beechfuzz/watch-party/internal/privdrop"
 	"github.com/beechfuzz/watch-party/internal/session"
 )
 
@@ -50,9 +51,23 @@ func run() error {
 	logger := logging.New(cfg.LogLevel)
 	logger.Info("starting watch party", "listen_addr", cfg.ListenAddr, "dev_mode", cfg.DevMode)
 
-	if err := os.MkdirAll(dirOf(cfg.DatabasePath), 0o755); err != nil {
+	dataDir := dirOf(cfg.DatabasePath)
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return fmt.Errorf("creating database directory: %w", err)
 	}
+
+	// No-op unless actually running as root (the container image starts
+	// as root specifically to make this possible — see Dockerfile); takes
+	// ownership of the data directory and permanently drops to PUID:PGID
+	// before opening the database or listening on anything. See
+	// internal/privdrop and ARCHITECTURE.md.
+	if os.Geteuid() == 0 && (cfg.PUID == 0 || cfg.PGID == 0) {
+		logger.Warn("PUID or PGID resolved to 0 (root); the server will continue running as root", "puid", cfg.PUID, "pgid", cfg.PGID)
+	}
+	if err := privdrop.Apply(privdrop.Config{UID: cfg.PUID, GID: cfg.PGID, Paths: []string{dataDir}}); err != nil {
+		return fmt.Errorf("dropping privileges to PUID=%d PGID=%d: %w", cfg.PUID, cfg.PGID, err)
+	}
+
 	db, err := dbx.Open(cfg.DatabasePath)
 	if err != nil {
 		return fmt.Errorf("opening database: %w", err)
