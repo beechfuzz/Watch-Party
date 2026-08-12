@@ -58,7 +58,7 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sess, err := a.Sessions.Create(r.Context(), w, result.UserID)
+	sess, err := a.Sessions.Create(r.Context(), w, r, result.UserID)
 	if err != nil {
 		a.Logger.Error("create session failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
@@ -73,7 +73,7 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 	sess := sessionFromContext(r.Context())
-	if err := a.Sessions.Logout(r.Context(), w, sess.ID); err != nil {
+	if err := a.Sessions.Logout(r.Context(), w, r, sess.ID); err != nil {
 		a.Logger.Error("logout failed", "error", err)
 	}
 	w.WriteHeader(http.StatusNoContent)

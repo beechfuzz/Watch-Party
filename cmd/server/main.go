@@ -49,7 +49,10 @@ func run() error {
 	}
 
 	logger := logging.New(cfg.LogLevel)
-	logger.Info("starting watch party", "listen_addr", cfg.ListenAddr, "dev_mode", cfg.DevMode)
+	logger.Info("starting watch party", "listen_addr", cfg.ListenAddr, "app_origins", cfg.AppOrigins)
+	if nonHTTPS := cfg.NonHTTPSOrigins(); len(nonHTTPS) > 0 {
+		logger.Warn("APP_ORIGINS includes non-HTTPS origin(s); session cookies issued for these will not be marked Secure, matching what browsers require for a plain HTTP page — make sure they're only reachable on a trusted network", "origins", nonHTTPS)
+	}
 
 	dataDir := dirOf(cfg.DatabasePath)
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
@@ -80,7 +83,7 @@ func run() error {
 		return fmt.Errorf("token cipher: %w", err)
 	}
 
-	sessions := session.NewManager(store, cfg.SessionIdleTimeout, cfg.SessionMaxAge, cfg.DevMode)
+	sessions := session.NewManager(store, cfg.SessionIdleTimeout, cfg.SessionMaxAge)
 	embyClient := emby.NewClient(cfg.EmbyServerURL)
 
 	hub := party.NewHub(store, party.Tuning{

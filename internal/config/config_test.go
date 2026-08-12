@@ -51,6 +51,39 @@ func TestLoad_PGID_Negative_Rejected(t *testing.T) {
 	}
 }
 
+func TestLoad_MixedSchemeAppOrigins_Allowed(t *testing.T) {
+	// A single Watch Party instance can legitimately be reachable at an
+	// external HTTPS domain and an internal-only HTTP LAN hostname at the
+	// same time — this must not be rejected. Session cookie security is
+	// determined per-request instead (see internal/session).
+	t.Setenv("APP_ORIGINS", "https://watchparty.example.com,http://watchparty.home")
+	t.Setenv("EMBY_SERVER_URL", "https://emby.example.com")
+	t.Setenv("TOKEN_ENCRYPTION_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.AppOrigins) != 2 {
+		t.Fatalf("AppOrigins = %v, want 2 entries", cfg.AppOrigins)
+	}
+}
+
+func TestConfig_NonHTTPSOrigins(t *testing.T) {
+	c := &Config{AppOrigins: []string{"https://watchparty.example.com", "http://watchparty.home", "https://also-fine.example.com"}}
+	got := c.NonHTTPSOrigins()
+	if len(got) != 1 || got[0] != "http://watchparty.home" {
+		t.Errorf("NonHTTPSOrigins() = %v, want [http://watchparty.home]", got)
+	}
+}
+
+func TestConfig_NonHTTPSOrigins_AllHTTPS(t *testing.T) {
+	c := &Config{AppOrigins: []string{"https://a.example.com", "https://b.example.com"}}
+	if got := c.NonHTTPSOrigins(); len(got) != 0 {
+		t.Errorf("NonHTTPSOrigins() = %v, want empty", got)
+	}
+}
+
 func TestLoad_DatabasePath_DefaultsToDataVolumeMountPoint(t *testing.T) {
 	setRequiredEnv(t)
 	cfg, err := Load()
