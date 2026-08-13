@@ -104,6 +104,17 @@ button:hover { opacity: 0.9; }
   align-items: center;
   justify-content: center;
   background: rgba(0, 0, 0, 0.6);
+  /* The backdrop itself lets clicks fall through to whatever's underneath
+     (the video element and, for the host, its native controls bar) --
+     only the button itself is actually clickable. Otherwise this div,
+     positioned over the entire video, would block the native controls
+     any time it's showing, leaving a host who clicks the native play
+     button instead of this one stuck with a video that never starts. */
+  pointer-events: none;
+}
+
+.overlay button {
+  pointer-events: auto;
 }
 
 #members {

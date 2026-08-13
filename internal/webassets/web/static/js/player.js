@@ -204,7 +204,14 @@ video.addEventListener("playing", () => {
 // have landed at the wrong spot. Listening on both events since it's not
 // guaranteed which one first has a populated video.seekable across
 // browsers/hls.js; recalibrating and reseeking again on the second is a
-// harmless no-op if the first already got it right.
+// harmless no-op if the first already got it right. { once: true } on both
+// is load-bearing, not just tidiness: unlike loadedmetadata, canplay is not
+// a fires-once event -- it refires every time playback recovers from a
+// stall, which happens routinely on real network video. Without once:true
+// here, every stall recovery re-triggered a fresh programmatic seek, which
+// is indistinguishable from constant involuntary seeking -- i.e. choppy
+// playback and a scrub bar that fights the user's own input. See
+// ARCHITECTURE.md §5.8.
 function recalibrateAndReseek() {
   calibratePlaybackOffset();
   if (currentState) {
@@ -212,10 +219,15 @@ function recalibrateAndReseek() {
     programmaticSeek(videoSeconds(expected));
   }
 }
-video.addEventListener("loadedmetadata", recalibrateAndReseek);
-video.addEventListener("canplay", recalibrateAndReseek);
+video.addEventListener("loadedmetadata", recalibrateAndReseek, { once: true });
+video.addEventListener("canplay", recalibrateAndReseek, { once: true });
 
 startBtn.addEventListener("click", () => {
+  // Belt-and-suspenders alongside the "playing" listener above: hide
+  // immediately on the user's own explicit click rather than waiting for
+  // "playing" to fire, which can lag noticeably behind a real click if the
+  // stream is buffering.
+  startOverlay.hidden = true;
   video.play().catch((err) => showError("Could not start playback: " + err.message));
 });
 
