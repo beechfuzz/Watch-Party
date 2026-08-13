@@ -45,15 +45,21 @@ let conn = null;
 let suppress = { play: false, pause: false, seeking: false };
 
 // A transcoded stream that starts mid-item (the common case: anyone but the
-// very first person to load the page) has Emby reset the HLS timeline to 0
-// rather than continuing from that offset -- see attachSource's caller in
-// main() and ARCHITECTURE.md §5.4. playbackOffsetTicks is how far into the
-// real item this video's local timeline (video.currentTime) starts;
-// itemPositionTicks/videoSeconds below are the two-way conversion between
-// "where this video element thinks it is" and "where the party actually
-// is," which every position sent to or received from the server must go
-// through. It's 0 (a no-op conversion) for direct play/stream, where
-// video.currentTime is already an absolute item position.
+// very first person to load the page) *may* have Emby reset its HLS
+// timeline to 0 rather than continuing from that offset -- or may not,
+// depending on the Emby version/config; this turned out not to be
+// consistent enough to hardcode (see ARCHITECTURE.md §5.6 -- an earlier
+// version of this file assumed it always resets, which put every guest
+// joining a party in progress tens of seconds into the past). Rather than
+// guess, playbackOffsetTicks is *calibrated* from what the browser actually
+// reports once the stream has loaded (see calibratePlaybackOffset) --
+// requestedStartPositionTicks (from the backend's start_position_ticks,
+// always 0 for direct play/stream) is only the best guess used until that
+// first calibration lands. itemPositionTicks/videoSeconds are the two-way
+// conversion between "where this video element thinks it is" and "where
+// the party actually is" that every position sent to or read from the
+// server must go through.
+let requestedStartPositionTicks = 0;
 let playbackOffsetTicks = 0;
 
 function itemPositionTicks(videoCurrentTimeSeconds) {
@@ -62,6 +68,22 @@ function itemPositionTicks(videoCurrentTimeSeconds) {
 
 function videoSeconds(itemTicks) {
   return ticksToSeconds(Math.max(0, itemTicks - playbackOffsetTicks));
+}
+
+// video.seekable reflects where this specific session's timeline actually
+// starts, once the browser knows it -- unlike requestedStartPositionTicks,
+// which is only what we *asked* Emby for, not confirmation of what it did.
+// If Emby reset the timeline to 0, seekable.start(0) reads ~0 and the
+// requested offset is the right one to add back; if Emby instead kept the
+// source's absolute timestamps, seekable.start(0) already reads close to
+// the requested position, meaning video.currentTime is already an absolute
+// item position and no additional offset belongs on top of it. Either way,
+// this converges on the correct offset without needing to know in advance
+// which convention this particular Emby build/config uses.
+function calibratePlaybackOffset() {
+  if (!video.seekable || video.seekable.length === 0) return;
+  const seekableStartTicks = Math.round(video.seekable.start(0) * TICKS_PER_SECOND);
+  playbackOffsetTicks = requestedStartPositionTicks - seekableStartTicks;
 }
 
 function isHost() {
@@ -175,6 +197,24 @@ video.addEventListener("playing", () => {
   startOverlay.hidden = true;
 });
 
+// Recalibrate playbackOffsetTicks once the browser actually knows this
+// session's real seekable range, and immediately re-seek to the currently
+// expected position using the corrected offset -- any earlier seek
+// (attempted before this fires, using only the pre-calibration guess) may
+// have landed at the wrong spot. Listening on both events since it's not
+// guaranteed which one first has a populated video.seekable across
+// browsers/hls.js; recalibrating and reseeking again on the second is a
+// harmless no-op if the first already got it right.
+function recalibrateAndReseek() {
+  calibratePlaybackOffset();
+  if (currentState) {
+    const expected = expectedPositionTicks(currentState, Date.now(), clockOffsetMs);
+    programmaticSeek(videoSeconds(expected));
+  }
+}
+video.addEventListener("loadedmetadata", recalibrateAndReseek);
+video.addEventListener("canplay", recalibrateAndReseek);
+
 startBtn.addEventListener("click", () => {
   video.play().catch((err) => showError("Could not start playback: " + err.message));
 });
@@ -247,6 +287,12 @@ function renderMembers(members) {
   // participant's local scrub away within a second or two. Fullscreen is
   // available to everyone regardless, via the dedicated button.
   video.controls = isHost();
+  // Ending the party is host-only, enforced server-side (a non-host's
+  // request 403s — see ARCHITECTURE.md §3/handleEndParty), but there's no
+  // reason to show a participant a button that can only ever error out for
+  // them. Leaving, unlike ending, is available to everyone and stays
+  // unconditionally visible.
+  endBtn.hidden = !isHost();
 }
 
 function handleSnapshotOrControl(env) {
@@ -333,12 +379,14 @@ async function main() {
     setStatus("Could not get a playback URL from Emby: " + err.message);
     return;
   }
-  // See the playbackOffsetTicks declaration above: 0 for direct play/
-  // stream, and for transcoded playback the item offset Emby actually
-  // started this specific transcode session at (the party's position at
-  // the moment this request was made) — every position sent to or read
-  // from the server has to be translated through this.
-  playbackOffsetTicks = playback.start_position_ticks || 0;
+  // See the requestedStartPositionTicks/playbackOffsetTicks declarations
+  // above: 0 for direct play/stream, and for transcoded playback the item
+  // offset Emby was *asked* to start this transcode session at (the
+  // party's position at the moment this request was made). playbackOffsetTicks
+  // starts equal to this as a best guess and gets corrected once the real
+  // stream loads — see calibratePlaybackOffset.
+  requestedStartPositionTicks = playback.start_position_ticks || 0;
+  playbackOffsetTicks = requestedStartPositionTicks;
   attachSource(playback.url, playback.is_transcoded);
 
   conn = new PartyConnection(

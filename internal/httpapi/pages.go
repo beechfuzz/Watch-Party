@@ -28,10 +28,11 @@ func registerPages(mux *http.ServeMux) {
 		panic("webassets: static fs: " + err.Error())
 	}
 	fileServer := http.FileServer(http.FS(staticSub))
-	mux.Handle("GET /static/", http.StripPrefix("/static/", fileServer))
+	mux.Handle("GET /static/", http.StripPrefix("/static/", noCache(fileServer)))
 
 	mux.HandleFunc("GET /party/{id}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
 		pageTemplates.ExecuteTemplate(w, "party.html", map[string]string{"PartyID": r.PathValue("id")})
 	})
 
@@ -41,6 +42,25 @@ func registerPages(mux *http.ServeMux) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
 		pageTemplates.ExecuteTemplate(w, "index.html", nil)
+	})
+}
+
+// noCache forces every response through it to be revalidated before use --
+// by a browser, or by an intermediate cache/CDN a deployment happens to sit
+// behind -- rather than served straight from a stale copy. This app has no
+// frontend build pipeline (§1.6): static assets are served at fixed URLs
+// with no content hash in the filename, so a new deploy overwrites the
+// same URL's content in place. Go's http.FileServer over an embed.FS sends
+// no cache-lifetime header of its own, which is exactly the condition under
+// which some CDNs (e.g. Cloudflare's default cache level) apply their own
+// heuristic caching by file extension regardless of what the origin did or
+// didn't send — silently serving a pre-deploy JS/CSS file indefinitely. See
+// ARCHITECTURE.md §1.7.
+func noCache(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache")
+		next.ServeHTTP(w, r)
 	})
 }
