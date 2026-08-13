@@ -284,14 +284,26 @@ func (c *Client) GetPlaybackURL(ctx context.Context, accessToken, userID, itemID
 		q.Set("DeviceId", deviceID)
 		hlsURL := src.TranscodingUrl
 		if hlsURL != "" {
-			// Emby-provided, server-relative, already carries
-			// MediaSourceId/PlaySessionId/DeviceId — just needs the host
-			// and our token appended.
-			sep := "&"
-			if !strings.Contains(hlsURL, "?") {
-				sep = "?"
+			// Emby-provided, server-relative, already carries its own
+			// MediaSourceId/PlaySessionId/DeviceId — and, critically,
+			// its own api_key, embedded from whatever token authenticated
+			// the PlaybackInfo call that returned it. Parse and overwrite
+			// rather than blindly append: appending produced two api_key
+			// params on the wire, which Emby can't reconcile into one
+			// valid token and rejects with 401 — see ARCHITECTURE.md
+			// §5.3. Overwriting also guarantees the URL carries the
+			// requesting user's own token specifically, not just whatever
+			// token happened to authenticate the PlaybackInfo call (in
+			// practice the same token, but that's not a guarantee this
+			// code should rely on).
+			parsed, err := url.Parse(hlsURL)
+			if err != nil {
+				return nil, fmt.Errorf("emby: parse TranscodingUrl: %w", err)
 			}
-			hlsURL = c.publicBaseURL + hlsURL + sep + "api_key=" + url.QueryEscape(accessToken)
+			vals := parsed.Query()
+			vals.Set("api_key", accessToken)
+			parsed.RawQuery = vals.Encode()
+			hlsURL = c.publicBaseURL + parsed.String()
 		} else {
 			hlsURL = fmt.Sprintf("%s/Videos/%s/master.m3u8?%s", c.publicBaseURL, url.PathEscape(itemID), q.Encode())
 		}

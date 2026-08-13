@@ -157,6 +157,14 @@ After §5.1 shipped, the same deployment hit a new failure: hls.js immediately r
 
 The fix splits them: `emby.Client` gained a second `publicBaseURL`, defaulting to `baseURL` (so nothing changes for deployments where both are already reachable from everywhere), overridable via `SetPublicBaseURL` — wired to a new `EMBY_PUBLIC_URL` config variable. `GetPlaybackURL` now builds the direct-stream URL, the Emby-provided `TranscodingUrl`, and the hand-built `master.m3u8` fallback from `publicBaseURL`; every other Emby call still uses `baseURL`. See README.md's "Internal vs. public Emby address" section for the operator-facing explanation.
 
+### 5.3 A fourth bug, from the same deployment: a duplicated `api_key` query param
+
+§5.2's fix got the HLS manifest URL reachable, but the same deployment then hit a `401` fetching it — this time with CORS working correctly (confirmed via the browser's network inspector: the actual GET reached Emby and got a same-origin-correct response, just with a `401` status). The request URL, inspected directly, had **two** `api_key` query parameters with the same value.
+
+The cause: Emby's `PlaybackInfo` response often returns a `TranscodingUrl` that already has its own `api_key` embedded — from whichever token authenticated that `PlaybackInfo` call. `GetPlaybackURL`'s handling of the Emby-provided `TranscodingUrl` case (added in §5.1's fix) assumed it never carried one, and unconditionally appended `&api_key=<token>` regardless. When Emby's URL already had one, the wire request ended up with `...&api_key=X&api_key=X`. Emby's query-parameter binding apparently can't reconcile two values for the same key into a single valid token, and rejects the request outright rather than picking one — hence the `401`, with the CORS layer never even coming into play since the request itself was well-formed enough to reach Emby and get a real (if rejecting) response.
+
+Fixed by parsing the Emby-provided `TranscodingUrl`'s query string and overwriting `api_key` (via `url.Values.Set`, which replaces rather than appends) instead of string-concatenating one on. This has a secondary benefit: it guarantees the final URL always carries the *requesting user's own* token, not whatever token happened to authenticate the `PlaybackInfo` call — in practice these are the same token today, but the fix no longer depends on that coincidence holding.
+
 ---
 
 ## 6. Container privilege model: PUID/PGID without a shell
