@@ -538,6 +538,21 @@ func (p *Party) Snapshot() wsproto.SnapshotPayload {
 	return snap
 }
 
+// CurrentPositionTicks returns where this party actually is *right now* —
+// unlike the raw State.PositionTicks captured in Snapshot, which is a
+// point-in-time value as of the last state change and, while playing,
+// drifts further from reality the longer it's been since then. Used when
+// starting a new Emby transcode session (e.g. for someone joining a party
+// already in progress) so Emby begins encoding at roughly the right offset
+// instead of from the beginning — see ARCHITECTURE.md §5.4. A few seconds
+// of imprecision here is fine: the client hard-seeks to the precise
+// position once its own manifest loads, same as always.
+func (p *Party) CurrentPositionTicks() int64 {
+	var ticks int64
+	p.do(func() { ticks = syncalg.ExpectedPosition(p.state.toAlg(), time.Now(), 0) })
+	return ticks
+}
+
 // HostUserID returns the current host (helper for authorization checks
 // that happen outside the actor, e.g. at the HTTP layer before a WS
 // upgrade).

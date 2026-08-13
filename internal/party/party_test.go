@@ -176,6 +176,50 @@ func TestHandleControl_HostAllowed(t *testing.T) {
 	}
 }
 
+func TestCurrentPositionTicks_ExtrapolatesWhilePlaying(t *testing.T) {
+	hub := newTestHub(t)
+	seedUser(t, hub.store, "host", "Host")
+	p, _ := hub.CreateParty(context.Background(), "party1", "item1", 1_000*10_000_000, "host")
+	_, _ = p.Join("host", "Host")
+
+	if err := p.HandleControl("host", wsproto.MsgPlay, 5*10_000_000); err != nil {
+		t.Fatalf("host play: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	got := p.CurrentPositionTicks()
+	// Started at 5s (5*10_000_000 ticks) and playing; some nonzero amount
+	// of time has elapsed since, so this must have moved forward from the
+	// raw authoritative PositionTicks a snapshot would report -- otherwise
+	// a new joiner's transcode would still start at the stale position, not
+	// where the party actually is now. See ARCHITECTURE.md §5.4.
+	if got <= 5*10_000_000 {
+		t.Errorf("CurrentPositionTicks = %d, want > %d (playing, time has elapsed)", got, 5*10_000_000)
+	}
+	// 50ms of sleep plus scheduling slack shouldn't extrapolate to seconds.
+	if got > 5*10_000_000+2*10_000_000 {
+		t.Errorf("CurrentPositionTicks = %d, implausibly far ahead of the 5s start plus ~50ms elapsed", got)
+	}
+}
+
+func TestCurrentPositionTicks_DoesNotAdvanceWhilePaused(t *testing.T) {
+	hub := newTestHub(t)
+	seedUser(t, hub.store, "host", "Host")
+	p, _ := hub.CreateParty(context.Background(), "party1", "item1", 1_000*10_000_000, "host")
+	_, _ = p.Join("host", "Host")
+
+	if err := p.HandleControl("host", wsproto.MsgPause, 5*10_000_000); err != nil {
+		t.Fatalf("host pause: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	if got := p.CurrentPositionTicks(); got != 5*10_000_000 {
+		t.Errorf("CurrentPositionTicks = %d, want exactly %d while paused (time must not advance it)", got, 5*10_000_000)
+	}
+}
+
 // --- integration: host connects, participant connects, play/seek/pause propagate ---
 
 func TestIntegration_PlaySeekPausePropagateToParticipant(t *testing.T) {

@@ -24,6 +24,7 @@ const membersEl = document.getElementById("members");
 const hostControls = document.getElementById("host-controls");
 const playBtn = document.getElementById("play-btn");
 const pauseBtn = document.getElementById("pause-btn");
+const fullscreenBtn = document.getElementById("fullscreen-btn");
 const endBtn = document.getElementById("end-btn");
 const leaveBtn = document.getElementById("leave-btn");
 const errorEl = document.getElementById("error");
@@ -42,6 +43,26 @@ let currentState = null; // { positionTicks, isPlaying, serverTimestampMs }
 let clockOffsetMs = 0;
 let conn = null;
 let suppress = { play: false, pause: false, seeking: false };
+
+// A transcoded stream that starts mid-item (the common case: anyone but the
+// very first person to load the page) has Emby reset the HLS timeline to 0
+// rather than continuing from that offset -- see attachSource's caller in
+// main() and ARCHITECTURE.md §5.4. playbackOffsetTicks is how far into the
+// real item this video's local timeline (video.currentTime) starts;
+// itemPositionTicks/videoSeconds below are the two-way conversion between
+// "where this video element thinks it is" and "where the party actually
+// is," which every position sent to or received from the server must go
+// through. It's 0 (a no-op conversion) for direct play/stream, where
+// video.currentTime is already an absolute item position.
+let playbackOffsetTicks = 0;
+
+function itemPositionTicks(videoCurrentTimeSeconds) {
+  return playbackOffsetTicks + Math.round(videoCurrentTimeSeconds * TICKS_PER_SECOND);
+}
+
+function videoSeconds(itemTicks) {
+  return ticksToSeconds(Math.max(0, itemTicks - playbackOffsetTicks));
+}
 
 function isHost() {
   return me && hostUserId === me.user.id;
@@ -115,7 +136,7 @@ function applyAuthoritativeState(state, { hardSeek } = {}) {
   currentState = state;
   if (hardSeek) {
     const expected = expectedPositionTicks(state, Date.now(), clockOffsetMs);
-    programmaticSeek(ticksToSeconds(expected));
+    programmaticSeek(videoSeconds(expected));
     video.playbackRate = 1.0;
   }
   if (state.isPlaying && video.paused) {
@@ -143,13 +164,35 @@ video.addEventListener("seeked", () => {
   if (isHost()) sendControl("seek", video.currentTime);
 });
 
-startBtn.addEventListener("click", () => {
+// The "start playback" overlay is only ever needed until the video is
+// actually, verifiably playing — hiding it solely on the start button's
+// own click (as before) left it stuck on screen over live video any time
+// playback began some other way (e.g. an autoplay attempt that succeeded
+// on a later authoritative state after an earlier one was blocked). This
+// fires regardless of what caused playback to start, so it can't get out
+// of sync with reality the way a per-code-path hide can.
+video.addEventListener("playing", () => {
   startOverlay.hidden = true;
+});
+
+startBtn.addEventListener("click", () => {
   video.play().catch((err) => showError("Could not start playback: " + err.message));
 });
 
+fullscreenBtn.addEventListener("click", () => {
+  if (video.requestFullscreen) {
+    video.requestFullscreen().catch((err) => showError("Couldn't enter fullscreen: " + err.message));
+  } else if (video.webkitEnterFullscreen) {
+    // iOS Safari: only the <video> element itself can go fullscreen, via
+    // this legacy prefixed method instead of the standard Fullscreen API.
+    video.webkitEnterFullscreen();
+  } else {
+    showError("Fullscreen isn't supported in this browser.");
+  }
+});
+
 function sendControl(type, currentTimeSeconds) {
-  conn.send(type, { position_ticks: Math.round(currentTimeSeconds * TICKS_PER_SECOND) });
+  conn.send(type, { position_ticks: itemPositionTicks(currentTimeSeconds) });
 }
 
 playBtn.addEventListener("click", () => sendControl("play", video.currentTime));
@@ -197,6 +240,13 @@ function renderMembers(members) {
     membersEl.appendChild(li);
   }
   hostControls.hidden = !isHost();
+  // Native controls (play/pause/seek bar/volume) are host-only — a
+  // participant's native seeking wouldn't do anything but confuse them,
+  // since only the host's play/pause/seek commands reach the server (see
+  // the isHost() checks below); the drift loop would just correct a
+  // participant's local scrub away within a second or two. Fullscreen is
+  // available to everyone regardless, via the dedicated button.
+  video.controls = isHost();
 }
 
 function handleSnapshotOrControl(env) {
@@ -230,7 +280,7 @@ let lastCorrectionAction = "none";
 
 function startClockSync() {
   const doSync = () => {
-    const payload = { t0: Date.now(), position_ticks: Math.round(video.currentTime * TICKS_PER_SECOND) };
+    const payload = { t0: Date.now(), position_ticks: itemPositionTicks(video.currentTime) };
     if (lastRttMs !== null) payload.last_rtt_ms = Math.round(lastRttMs);
     if (lastOffsetMs !== null) payload.last_clock_offset_ms = Math.round(lastOffsetMs);
     payload.last_correction_action = lastCorrectionAction;
@@ -244,10 +294,10 @@ function startDriftLoop() {
   setInterval(() => {
     if (!currentState || video.paused || video.seeking) return;
     const expected = expectedPositionTicks(currentState, Date.now(), clockOffsetMs);
-    const actual = Math.round(video.currentTime * TICKS_PER_SECOND);
+    const actual = itemPositionTicks(video.currentTime);
     const { driftTicks, action } = classifyDrift(actual, expected, thresholds);
     if (action === DriftAction.HARD_SEEK) {
-      programmaticSeek(ticksToSeconds(expected));
+      programmaticSeek(videoSeconds(expected));
       video.playbackRate = 1.0;
     } else if (action === DriftAction.NUDGE_RATE) {
       video.playbackRate = recommendedPlaybackRate(driftTicks, thresholds);
@@ -283,6 +333,12 @@ async function main() {
     setStatus("Could not get a playback URL from Emby: " + err.message);
     return;
   }
+  // See the playbackOffsetTicks declaration above: 0 for direct play/
+  // stream, and for transcoded playback the item offset Emby actually
+  // started this specific transcode session at (the party's position at
+  // the moment this request was made) — every position sent to or read
+  // from the server has to be translated through this.
+  playbackOffsetTicks = playback.start_position_ticks || 0;
   attachSource(playback.url, playback.is_transcoded);
 
   conn = new PartyConnection(

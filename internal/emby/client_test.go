@@ -86,7 +86,7 @@ func TestGetPlaybackURL_SendsDeviceProfileToLetEmbyDecide(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL)
-	if _, err := c.GetPlaybackURL(context.Background(), "tok", "user-1", "item1", "device-1"); err != nil {
+	if _, err := c.GetPlaybackURL(context.Background(), "tok", "user-1", "item1", "device-1", 0); err != nil {
 		t.Fatalf("GetPlaybackURL: %v", err)
 	}
 	if gotMethod != http.MethodPost {
@@ -107,6 +107,69 @@ func TestGetPlaybackURL_SendsDeviceProfileToLetEmbyDecide(t *testing.T) {
 	}
 }
 
+func TestGetPlaybackURL_StartPositionTicks_SentToEmbyAndReturnedForTranscoded(t *testing.T) {
+	// A nonzero startPositionTicks tells Emby to begin the transcode at
+	// that offset (instead of the beginning) -- essential for anyone
+	// joining a party already in progress, so Emby doesn't have to
+	// transcode through everything that already played before it can
+	// serve the current position. See ARCHITECTURE.md §5.4.
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		json.NewEncoder(w).Encode(map[string]any{
+			"PlaySessionId": "sess1",
+			"MediaSources": []map[string]any{
+				{"Id": "src1", "SupportsDirectStream": false, "SupportsDirectPlay": false, "SupportsTranscoding": true},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	result, err := c.GetPlaybackURL(context.Background(), "tok", "user-1", "item1", "device-1", 123456789)
+	if err != nil {
+		t.Fatalf("GetPlaybackURL: %v", err)
+	}
+	if got := gotBody["StartTimeTicks"]; got != float64(123456789) {
+		t.Errorf("PlaybackInfo request StartTimeTicks = %v, want 123456789", got)
+	}
+	if result.StartPositionTicks != 123456789 {
+		t.Errorf("result.StartPositionTicks = %d, want 123456789 (frontend needs this to translate video.currentTime to/from the item's real position)", result.StartPositionTicks)
+	}
+	parsed, err := url.Parse(result.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := parsed.Query().Get("StartTimeTicks"); got != "123456789" {
+		t.Errorf("hand-built master.m3u8 URL StartTimeTicks = %q, want 123456789", got)
+	}
+}
+
+func TestGetPlaybackURL_DirectStream_StartPositionTicksAlwaysZero(t *testing.T) {
+	// Direct play/stream serves the file as-is: video.currentTime is
+	// already an absolute item position (the browser Range-requests
+	// wherever it seeks to), so there's no timeline offset to track,
+	// regardless of what startPositionTicks the caller passed.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"PlaySessionId": "sess1",
+			"MediaSources": []map[string]any{
+				{"Id": "src1", "Container": "mp4", "SupportsDirectStream": true, "SupportsDirectPlay": true},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	result, err := c.GetPlaybackURL(context.Background(), "tok", "user-1", "item1", "device-1", 123456789)
+	if err != nil {
+		t.Fatalf("GetPlaybackURL: %v", err)
+	}
+	if result.StartPositionTicks != 0 {
+		t.Errorf("result.StartPositionTicks = %d, want 0 for direct stream", result.StartPositionTicks)
+	}
+}
+
 func TestGetPlaybackURL_PreferEmbyProvidedTranscodingUrl(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
@@ -122,7 +185,7 @@ func TestGetPlaybackURL_PreferEmbyProvidedTranscodingUrl(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL)
-	result, err := c.GetPlaybackURL(context.Background(), "tok-xyz", "user-1", "item1", "device-1")
+	result, err := c.GetPlaybackURL(context.Background(), "tok-xyz", "user-1", "item1", "device-1", 0)
 	if err != nil {
 		t.Fatalf("GetPlaybackURL: %v", err)
 	}
@@ -166,7 +229,7 @@ func TestGetPlaybackURL_TranscodingUrlAlreadyHasAPIKey_NoDuplicate(t *testing.T)
 	defer srv.Close()
 
 	c := NewClient(srv.URL)
-	result, err := c.GetPlaybackURL(context.Background(), "tok-xyz", "user-1", "item1", "device-1")
+	result, err := c.GetPlaybackURL(context.Background(), "tok-xyz", "user-1", "item1", "device-1", 0)
 	if err != nil {
 		t.Fatalf("GetPlaybackURL: %v", err)
 	}
@@ -225,7 +288,7 @@ func TestGetPlaybackURL_UsesPublicBaseURLForBrowserFacingURLs(t *testing.T) {
 
 			c := NewClient(srv.URL)
 			c.SetPublicBaseURL("http://public.example")
-			result, err := c.GetPlaybackURL(context.Background(), "tok", "user-1", "item1", "device-1")
+			result, err := c.GetPlaybackURL(context.Background(), "tok", "user-1", "item1", "device-1", 0)
 			if err != nil {
 				t.Fatalf("GetPlaybackURL: %v", err)
 			}
@@ -249,7 +312,7 @@ func TestSetPublicBaseURL_BlankIsNoOp(t *testing.T) {
 
 	c := NewClient(srv.URL)
 	c.SetPublicBaseURL("") // e.g. EMBY_PUBLIC_URL unset
-	result, err := c.GetPlaybackURL(context.Background(), "tok", "user-1", "item1", "device-1")
+	result, err := c.GetPlaybackURL(context.Background(), "tok", "user-1", "item1", "device-1", 0)
 	if err != nil {
 		t.Fatalf("GetPlaybackURL: %v", err)
 	}
@@ -262,7 +325,7 @@ func TestPlaybackURLResult_WireCasingMatchesFrontend(t *testing.T) {
 	// player.js reads playback.url / playback.is_transcoded (snake_case) —
 	// this pins the JSON wire shape so a struct-tag regression here would
 	// silently break every login again, the way the untagged struct did.
-	result := PlaybackURLResult{URL: "http://x/y", IsTranscoded: true, MediaSourceID: "s1", PlaySessionID: "p1", Container: "mp4"}
+	result := PlaybackURLResult{URL: "http://x/y", IsTranscoded: true, MediaSourceID: "s1", PlaySessionID: "p1", Container: "mp4", StartPositionTicks: 42}
 	b, err := json.Marshal(result)
 	if err != nil {
 		t.Fatal(err)
@@ -271,7 +334,7 @@ func TestPlaybackURLResult_WireCasingMatchesFrontend(t *testing.T) {
 	if err := json.Unmarshal(b, &m); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"url", "is_transcoded", "media_source_id", "play_session_id", "container"} {
+	for _, key := range []string{"url", "is_transcoded", "media_source_id", "play_session_id", "container", "start_position_ticks"} {
 		if _, ok := m[key]; !ok {
 			t.Errorf("wire JSON missing expected key %q; got keys %v", key, m)
 		}
@@ -296,7 +359,7 @@ func TestGetPlaybackURL_DirectStream_UsesQueryParamToken(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL)
-	result, err := c.GetPlaybackURL(context.Background(), "tok-abc", "user-1", "item42", "device-1")
+	result, err := c.GetPlaybackURL(context.Background(), "tok-abc", "user-1", "item42", "device-1", 0)
 	if err != nil {
 		t.Fatalf("GetPlaybackURL: %v", err)
 	}
@@ -341,7 +404,7 @@ func TestGetPlaybackURL_Transcoded_BuildsHLSUrl(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL)
-	result, err := c.GetPlaybackURL(context.Background(), "tok-xyz", "user-1", "item99", "device-1")
+	result, err := c.GetPlaybackURL(context.Background(), "tok-xyz", "user-1", "item99", "device-1", 0)
 	if err != nil {
 		t.Fatalf("GetPlaybackURL: %v", err)
 	}
@@ -368,7 +431,7 @@ func TestGetPlaybackURL_NoSupportedMethod_Errors(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL)
-	_, err := c.GetPlaybackURL(context.Background(), "tok", "user-1", "item1", "device-1")
+	_, err := c.GetPlaybackURL(context.Background(), "tok", "user-1", "item1", "device-1", 0)
 	if err == nil {
 		t.Error("expected error when no playback method is supported")
 	}

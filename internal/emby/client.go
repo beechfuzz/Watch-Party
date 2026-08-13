@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -220,6 +221,15 @@ type PlaybackURLResult struct {
 	MediaSourceID string `json:"media_source_id"`
 	PlaySessionID string `json:"play_session_id"`
 	Container     string `json:"container"`
+	// StartPositionTicks is the item offset this URL's timeline starts at —
+	// always 0 for direct play/stream (video.currentTime is already an
+	// absolute item position there), and equal to whatever startPositionTicks
+	// was passed to GetPlaybackURL for a transcoded URL, since Emby's HLS
+	// output for a transcode session starting mid-item resets its own
+	// timeline to 0 rather than continuing from that offset. The frontend
+	// must add this back to translate video.currentTime to/from the item's
+	// real (server-authoritative) position — see ARCHITECTURE.md §5.4.
+	StartPositionTicks int64 `json:"start_position_ticks"`
 }
 
 // GetPlaybackURL calls PlaybackInfo — POSTing a DeviceProfile describing
@@ -229,11 +239,20 @@ type PlaybackURLResult struct {
 // constructs the resulting stream URL. It always includes the requesting
 // user's own AccessToken as the api_key query parameter, since a plain
 // <video src> cannot set custom headers — see ARCHITECTURE.md §0.2.
-func (c *Client) GetPlaybackURL(ctx context.Context, accessToken, userID, itemID, deviceID string) (*PlaybackURLResult, error) {
+//
+// startPositionTicks tells Emby where in the item this specific transcode
+// session should begin (the party's current position — nonzero for anyone
+// joining a party already in progress, which is the common case). This
+// matters only for the transcoded path: Emby starts encoding at that offset
+// directly, rather than from the beginning, so the browser doesn't have to
+// wait for the transcoder to work forward through however much of the item
+// has already played before it can seek — see ARCHITECTURE.md §5.4.
+func (c *Client) GetPlaybackURL(ctx context.Context, accessToken, userID, itemID, deviceID string, startPositionTicks int64) (*PlaybackURLResult, error) {
 	reqBody, err := json.Marshal(map[string]any{
 		"UserId":               userID,
 		"DeviceProfile":        browserDeviceProfile(),
 		"AutoOpenLiveStream":   false,
+		"StartTimeTicks":       startPositionTicks,
 		"EnableDirectPlay":     true,
 		"EnableDirectStream":   true,
 		"EnableTranscoding":    true,
@@ -282,6 +301,9 @@ func (c *Client) GetPlaybackURL(ctx context.Context, accessToken, userID, itemID
 	}
 	if src.SupportsTranscoding {
 		q.Set("DeviceId", deviceID)
+		if startPositionTicks > 0 {
+			q.Set("StartTimeTicks", strconv.FormatInt(startPositionTicks, 10))
+		}
 		hlsURL := src.TranscodingUrl
 		if hlsURL != "" {
 			// Emby-provided, server-relative, already carries its own
@@ -310,6 +332,7 @@ func (c *Client) GetPlaybackURL(ctx context.Context, accessToken, userID, itemID
 		return &PlaybackURLResult{
 			URL: hlsURL, IsTranscoded: true,
 			MediaSourceID: src.ID, PlaySessionID: info.PlaySessionId,
+			StartPositionTicks: startPositionTicks,
 		}, nil
 	}
 	return nil, fmt.Errorf("emby: media source %s supports neither direct play/stream nor transcoding", src.ID)
