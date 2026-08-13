@@ -145,6 +145,81 @@ func TestGetPlaybackURL_PreferEmbyProvidedTranscodingUrl(t *testing.T) {
 	}
 }
 
+func TestGetPlaybackURL_UsesPublicBaseURLForBrowserFacingURLs(t *testing.T) {
+	// baseURL (the internal address, e.g. container DNS) is used for the
+	// PlaybackInfo call itself; publicBaseURL (a browser-reachable address)
+	// must be used for every URL handed back to the browser, both direct
+	// and transcoded — otherwise a browser can't resolve it at all. See
+	// ARCHITECTURE.md §5.2.
+	for _, tc := range []struct {
+		name         string
+		mediaSource  map[string]any
+		wantHostPart string
+	}{
+		{
+			name: "direct stream",
+			mediaSource: map[string]any{
+				"Id": "src1", "Container": "mp4", "SupportsDirectStream": true, "SupportsDirectPlay": true,
+			},
+		},
+		{
+			name: "transcoded, Emby-provided TranscodingUrl",
+			mediaSource: map[string]any{
+				"Id": "src2", "SupportsDirectStream": false, "SupportsDirectPlay": false, "SupportsTranscoding": true,
+				"TranscodingUrl": "/Videos/item1/master.m3u8?MediaSourceId=src2",
+			},
+		},
+		{
+			name: "transcoded, no TranscodingUrl, fall back to hand-built master.m3u8",
+			mediaSource: map[string]any{
+				"Id": "src3", "SupportsDirectStream": false, "SupportsDirectPlay": false, "SupportsTranscoding": true,
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				json.NewEncoder(w).Encode(map[string]any{
+					"PlaySessionId": "sess-1",
+					"MediaSources":  []map[string]any{tc.mediaSource},
+				})
+			}))
+			defer srv.Close()
+
+			c := NewClient(srv.URL)
+			c.SetPublicBaseURL("http://public.example")
+			result, err := c.GetPlaybackURL(context.Background(), "tok", "user-1", "item1", "device-1")
+			if err != nil {
+				t.Fatalf("GetPlaybackURL: %v", err)
+			}
+			if !strings.HasPrefix(result.URL, "http://public.example/") {
+				t.Errorf("URL = %q, want it built from the public base URL, not %q", result.URL, srv.URL)
+			}
+		})
+	}
+}
+
+func TestSetPublicBaseURL_BlankIsNoOp(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"PlaySessionId": "sess-1",
+			"MediaSources": []map[string]any{
+				{"Id": "src1", "Container": "mp4", "SupportsDirectStream": true, "SupportsDirectPlay": true},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	c.SetPublicBaseURL("") // e.g. EMBY_PUBLIC_URL unset
+	result, err := c.GetPlaybackURL(context.Background(), "tok", "user-1", "item1", "device-1")
+	if err != nil {
+		t.Fatalf("GetPlaybackURL: %v", err)
+	}
+	if !strings.HasPrefix(result.URL, srv.URL+"/") {
+		t.Errorf("URL = %q, want it to default to baseURL (%q) when publicBaseURL is never set", result.URL, srv.URL)
+	}
+}
+
 func TestPlaybackURLResult_WireCasingMatchesFrontend(t *testing.T) {
 	// player.js reads playback.url / playback.is_transcoded (snake_case) —
 	// this pins the JSON wire shape so a struct-tag regression here would

@@ -146,6 +146,17 @@ That second fix has a consequence: transcoded output is always HLS (`.m3u8`), wh
 
 **Also fixed while in the area:** when Emby's `PlaybackInfo` response includes its own `TranscodingUrl` for the transcode case (it does, once a `DeviceProfile` is supplied), that URL is now used verbatim (host-prefixed, `api_key` appended) instead of hand-constructing a `master.m3u8` URL from scratch — more robust, since Emby's own URL already carries whatever parameters its transcoding pipeline actually needs for that specific negotiation.
 
+### 5.2 A third bug, from the same deployment: one Emby base URL was doing two jobs
+
+After §5.1 shipped, the same deployment hit a new failure: hls.js immediately reported `manifestLoadError` — it couldn't fetch the `.m3u8` manifest at all. The cause was `emby.Client` using a single `baseURL` for two purposes that need different values whenever Emby is reached over an internal address:
+
+- **Server-to-server calls** (`AuthenticateByName`, `PlaybackInfo`, progress reporting) — these can and, per this same deployment's earlier hairpin-NAT fix (Emby and Watch Party sharing a Podman network, `EMBY_SERVER_URL=http://emby:8096`), *should* use an address only this server can reach.
+- **Browser-facing playback URLs** (the direct-stream/HLS URL handed to `<video>`/hls.js) — these are fetched by the participant's own browser, which has no way to resolve container-internal DNS like `emby:8096`. hls.js's manifest fetch failed for exactly this reason: it was trying to load a manifest URL the browser's network stack couldn't even look up.
+
+`GetPlaybackURL` built both kinds of URL from the same `baseURL`, so fixing reachability for one direction (server → Emby) broke reachability for the other (browser → Emby) — the two requirements are in direct tension, and a single config value can't satisfy both once Emby is only reachable from the server via an internal address.
+
+The fix splits them: `emby.Client` gained a second `publicBaseURL`, defaulting to `baseURL` (so nothing changes for deployments where both are already reachable from everywhere), overridable via `SetPublicBaseURL` — wired to a new `EMBY_PUBLIC_URL` config variable. `GetPlaybackURL` now builds the direct-stream URL, the Emby-provided `TranscodingUrl`, and the hand-built `master.m3u8` fallback from `publicBaseURL`; every other Emby call still uses `baseURL`. See README.md's "Internal vs. public Emby address" section for the operator-facing explanation.
+
 ---
 
 ## 6. Container privilege model: PUID/PGID without a shell

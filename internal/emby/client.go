@@ -36,14 +36,34 @@ var AppVersion = "0.1.0"
 var ErrUnauthorized = fmt.Errorf("emby: unauthorized (token rejected)")
 
 type Client struct {
-	baseURL string
-	http    *http.Client
+	baseURL string // used for server-to-server Emby API calls
+	// publicBaseURL is used only when constructing playback URLs handed to
+	// the browser (see GetPlaybackURL). It defaults to baseURL, but the two
+	// can legitimately differ: baseURL may point at an address only this
+	// server can reach (e.g. container-DNS like http://emby:8096 on a
+	// shared Docker/Podman network, used to route around hairpin NAT — see
+	// ARCHITECTURE.md §5.1), which a browser on the user's LAN cannot
+	// resolve at all. See SetPublicBaseURL and ARCHITECTURE.md §5.2.
+	publicBaseURL string
+	http          *http.Client
 }
 
 func NewClient(baseURL string) *Client {
+	trimmed := strings.TrimRight(baseURL, "/")
 	return &Client{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		http:    &http.Client{Timeout: 15 * time.Second},
+		baseURL:       trimmed,
+		publicBaseURL: trimmed,
+		http:          &http.Client{Timeout: 15 * time.Second},
+	}
+}
+
+// SetPublicBaseURL overrides the base URL used for browser-facing playback
+// URLs, when it must differ from the base URL used for this server's own
+// calls to Emby. A blank publicBaseURL is a no-op (keeps the default set by
+// NewClient) so callers can pass an unset config value unconditionally.
+func (c *Client) SetPublicBaseURL(publicBaseURL string) {
+	if trimmed := strings.TrimRight(publicBaseURL, "/"); trimmed != "" {
+		c.publicBaseURL = trimmed
 	}
 }
 
@@ -254,7 +274,7 @@ func (c *Client) GetPlaybackURL(ctx context.Context, accessToken, userID, itemID
 			container = "mp4"
 		}
 		q.Set("Static", "true")
-		streamURL := fmt.Sprintf("%s/Videos/%s/stream.%s?%s", c.baseURL, url.PathEscape(itemID), container, q.Encode())
+		streamURL := fmt.Sprintf("%s/Videos/%s/stream.%s?%s", c.publicBaseURL, url.PathEscape(itemID), container, q.Encode())
 		return &PlaybackURLResult{
 			URL: streamURL, IsTranscoded: false,
 			MediaSourceID: src.ID, PlaySessionID: info.PlaySessionId, Container: container,
@@ -271,9 +291,9 @@ func (c *Client) GetPlaybackURL(ctx context.Context, accessToken, userID, itemID
 			if !strings.Contains(hlsURL, "?") {
 				sep = "?"
 			}
-			hlsURL = c.baseURL + hlsURL + sep + "api_key=" + url.QueryEscape(accessToken)
+			hlsURL = c.publicBaseURL + hlsURL + sep + "api_key=" + url.QueryEscape(accessToken)
 		} else {
-			hlsURL = fmt.Sprintf("%s/Videos/%s/master.m3u8?%s", c.baseURL, url.PathEscape(itemID), q.Encode())
+			hlsURL = fmt.Sprintf("%s/Videos/%s/master.m3u8?%s", c.publicBaseURL, url.PathEscape(itemID), q.Encode())
 		}
 		return &PlaybackURLResult{
 			URL: hlsURL, IsTranscoded: true,

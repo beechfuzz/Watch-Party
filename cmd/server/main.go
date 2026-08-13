@@ -85,6 +85,7 @@ func run() error {
 
 	sessions := session.NewManager(store, cfg.SessionIdleTimeout, cfg.SessionMaxAge)
 	embyClient := emby.NewClient(cfg.EmbyServerURL)
+	embyClient.SetPublicBaseURL(cfg.EmbyPublicURL)
 
 	hub := party.NewHub(store, party.Tuning{
 		SnapshotInterval:  cfg.SyncSnapshotInterval,

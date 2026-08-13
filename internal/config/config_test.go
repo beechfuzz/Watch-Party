@@ -11,6 +11,29 @@ func setRequiredEnv(t *testing.T) {
 	t.Setenv("TOKEN_ENCRYPTION_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=") // 32 zero bytes, base64
 }
 
+func TestLoad_EmbyPublicURL_DefaultsToEmbyServerURL(t *testing.T) {
+	setRequiredEnv(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.EmbyPublicURL != "" {
+		t.Errorf("EmbyPublicURL = %q, want empty when EMBY_PUBLIC_URL is unset (caller defaults it via emby.Client)", cfg.EmbyPublicURL)
+	}
+}
+
+func TestLoad_EmbyPublicURL_Override(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("EMBY_PUBLIC_URL", "https://emby.example.com/")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.EmbyPublicURL != "https://emby.example.com" {
+		t.Errorf("EmbyPublicURL = %q, want trailing slash trimmed", cfg.EmbyPublicURL)
+	}
+}
+
 func TestLoad_PUIDPGID_DefaultTo65532(t *testing.T) {
 	setRequiredEnv(t)
 	cfg, err := Load()
