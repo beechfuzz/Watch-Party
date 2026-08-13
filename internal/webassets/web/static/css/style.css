@@ -127,6 +127,12 @@ button:hover { opacity: 0.9; }
 
 .member.disconnected { opacity: 0.6; }
 
+#player-controls {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
 #host-controls {
   display: flex;
   gap: 0.5rem;

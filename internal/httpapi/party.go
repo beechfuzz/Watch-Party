@@ -132,9 +132,21 @@ func (a *App) handlePlaybackURL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Start the transcode (if any) at the party's current position, not the
+	// beginning — critical for anyone joining a party already in progress,
+	// which is the common case. Without this, Emby starts encoding from
+	// zero and the client's subsequent seek to the real position makes the
+	// transcoder work forward through however much has already played
+	// before it can produce that segment — see ARCHITECTURE.md §5.4. Falls
+	// back to 0 (start of item) in the rare case the party isn't in the hub.
+	var startPositionTicks int64
+	if p, ok := a.Hub.Get(id); ok {
+		startPositionTicks = p.CurrentPositionTicks()
+	}
+
 	// Always derived from THIS user's own token — never a shared token —
 	// so every participant streams under their own Emby permissions.
-	result, err := a.Emby.GetPlaybackURL(r.Context(), token, user.ID, row.ItemID, emby.DeviceID(user.ID))
+	result, err := a.Emby.GetPlaybackURL(r.Context(), token, user.ID, row.ItemID, emby.DeviceID(user.ID), startPositionTicks)
 	if err != nil {
 		a.handleEmbyErr(w, r.Context(), user.ID, err, "could not get a playback URL from Emby")
 		return

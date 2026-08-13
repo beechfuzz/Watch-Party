@@ -19,12 +19,16 @@ import (
 	"github.com/beechfuzz/watch-party/internal/embyreport"
 	"github.com/beechfuzz/watch-party/internal/party"
 	"github.com/beechfuzz/watch-party/internal/session"
+	"github.com/beechfuzz/watch-party/internal/wsproto"
 )
 
 // newFakeEmby returns an httptest server implementing just enough of the
 // Emby API (per the Phase 0 findings) for these tests: auth, item lookup,
-// playback info, and no-op session reporting endpoints.
-func newFakeEmby(t *testing.T) *httptest.Server {
+// playback info, and no-op session reporting endpoints. If capturePlaybackInfoBody
+// is non-nil, each /PlaybackInfo request body is JSON-decoded into it —
+// for tests asserting on what Watch Party sent Emby, not just what Emby
+// sent back.
+func newFakeEmby(t *testing.T, capturePlaybackInfoBody *map[string]any) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/Users/AuthenticateByName", func(w http.ResponseWriter, r *http.Request) {
@@ -43,6 +47,9 @@ func newFakeEmby(t *testing.T) *httptest.Server {
 		json.NewEncoder(w).Encode(map[string]any{"Id": "item1", "Name": "Movie", "RunTimeTicks": int64(1200000000)})
 	})
 	mux.HandleFunc("/Items/item1/PlaybackInfo", func(w http.ResponseWriter, r *http.Request) {
+		if capturePlaybackInfoBody != nil {
+			json.NewDecoder(r.Body).Decode(capturePlaybackInfoBody)
+		}
 		json.NewEncoder(w).Encode(map[string]any{
 			"PlaySessionId": "sess1",
 			"MediaSources":  []map[string]any{{"Id": "src1", "Container": "mp4", "SupportsDirectStream": true}},
@@ -58,6 +65,16 @@ func newFakeEmby(t *testing.T) *httptest.Server {
 
 func newTestApp(t *testing.T) (*App, *httptest.Server) {
 	t.Helper()
+	fakeEmbySrv := newFakeEmby(t, nil)
+	return newTestAppWithEmby(t, emby.NewClient(fakeEmbySrv.URL))
+}
+
+// newTestAppWithEmby is newTestApp but with a caller-supplied Emby client —
+// for tests that need to inspect what Watch Party sends Emby (via a fake
+// Emby server built with a non-nil capturePlaybackInfoBody in newFakeEmby),
+// not just assert on the app's own responses.
+func newTestAppWithEmby(t *testing.T, embyClient *emby.Client) (*App, *httptest.Server) {
+	t.Helper()
 	dir := t.TempDir()
 	db, err := dbx.Open(filepath.Join(dir, "test.db"))
 	if err != nil {
@@ -72,9 +89,6 @@ func newTestApp(t *testing.T) (*App, *httptest.Server) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	fakeEmbySrv := newFakeEmby(t)
-	embyClient := emby.NewClient(fakeEmbySrv.URL)
 
 	hub := party.NewHub(store, party.Tuning{
 		SnapshotInterval: 50 * time.Millisecond, SoftDriftMS: 300, HardDriftMS: 1500,
@@ -276,6 +290,44 @@ func TestPlaybackURL_UsesRequestingUsersOwnToken(t *testing.T) {
 	}
 	if _, ok := got["is_transcoded"]; !ok {
 		t.Errorf("response missing is_transcoded (player.js needs this to decide direct playback vs. HLS): %v", got)
+	}
+}
+
+func TestPlaybackURL_StartsAtPartysCurrentPosition(t *testing.T) {
+	// Someone requesting a playback URL for a party already in progress
+	// (the common case for anyone but the very first person to load the
+	// page) must have their Emby transcode session started at roughly
+	// where the party actually is now, not the beginning -- otherwise
+	// Emby has to work forward through everything that's already played
+	// before it can serve the current position. See ARCHITECTURE.md §5.4.
+	var lastPlaybackInfoBody map[string]any
+	fakeEmbySrv := newFakeEmby(t, &lastPlaybackInfoBody)
+	app, srv := newTestAppWithEmby(t, emby.NewClient(fakeEmbySrv.URL))
+
+	c := loginTestClient(t, srv)
+	_, created := c.do("POST", "/api/parties", map[string]string{"item_id": "item1"}, true)
+	partyID := created["party_id"].(string)
+
+	p, ok := app.Hub.Get(partyID)
+	if !ok {
+		t.Fatal("party not found in hub")
+	}
+	if err := p.HandleControl("user-alice", wsproto.MsgPlay, 5*10_000_000); err != nil {
+		t.Fatalf("host play: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	resp, got := c.do("GET", "/api/parties/"+partyID+"/playback-url", nil, false)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d body=%v", resp.StatusCode, got)
+	}
+
+	sentStartTicks, ok := lastPlaybackInfoBody["StartTimeTicks"].(float64)
+	if !ok {
+		t.Fatalf("PlaybackInfo request never sent StartTimeTicks: %v", lastPlaybackInfoBody)
+	}
+	if sentStartTicks <= 5*10_000_000 {
+		t.Errorf("StartTimeTicks sent to Emby = %v, want > %d (playing, time elapsed since the 5s play command)", sentStartTicks, 5*10_000_000)
 	}
 }
 
