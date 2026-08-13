@@ -331,6 +331,28 @@ func TestPlaybackURL_StartsAtPartysCurrentPosition(t *testing.T) {
 	}
 }
 
+func TestStaticAssetsAndPages_NotCacheable(t *testing.T) {
+	// This app has no frontend build pipeline: static assets are served at
+	// fixed URLs with no content hash, so a new deploy overwrites the same
+	// URL's content in place. Without an explicit Cache-Control, a browser
+	// or an intermediate CDN caching by file extension (a real default for
+	// some CDNs, regardless of what the origin sends) can keep serving a
+	// pre-deploy JS/CSS file indefinitely -- see ARCHITECTURE.md §5.6.
+	_, srv := newTestApp(t)
+	httpClient := &http.Client{}
+
+	for _, path := range []string{"/static/js/player.js", "/static/css/style.css", "/", "/party/some-id"} {
+		resp, err := httpClient.Get(srv.URL + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		resp.Body.Close()
+		if got := resp.Header.Get("Cache-Control"); got != "no-cache" {
+			t.Errorf("GET %s: Cache-Control = %q, want %q", path, got, "no-cache")
+		}
+	}
+}
+
 func TestGetParty_UnknownID_404(t *testing.T) {
 	_, srv := newTestApp(t)
 	c := loginTestClient(t, srv)
