@@ -45,21 +45,23 @@ let conn = null;
 let suppress = { play: false, pause: false, seeking: false };
 
 // A transcoded stream that starts mid-item (the common case: anyone but the
-// very first person to load the page) *may* have Emby reset its HLS
-// timeline to 0 rather than continuing from that offset -- or may not,
-// depending on the Emby version/config; this turned out not to be
-// consistent enough to hardcode (see ARCHITECTURE.md §5.6 -- an earlier
-// version of this file assumed it always resets, which put every guest
-// joining a party in progress tens of seconds into the past). Rather than
-// guess, playbackOffsetTicks is *calibrated* from what the browser actually
-// reports once the stream has loaded (see calibratePlaybackOffset) --
-// requestedStartPositionTicks (from the backend's start_position_ticks,
-// always 0 for direct play/stream) is only the best guess used until that
-// first calibration lands. itemPositionTicks/videoSeconds are the two-way
-// conversion between "where this video element thinks it is" and "where
-// the party actually is" that every position sent to or read from the
-// server must go through.
+// very first person to load the page) doesn't hand back a video.currentTime
+// that's a simple, predictable function of what was requested -- besides
+// whether Emby resets its output timeline to 0 or keeps absolute
+// timestamps, Emby can only start an HLS segment on a keyframe, so the
+// stream's real start is silently snapped to the nearest keyframe at or
+// before whatever position was actually requested (see ARCHITECTURE.md
+// §5.9). Guessing at either of these produced a real, persistent offset
+// error for actual users (§5.6, §5.9), so playbackOffsetTicks is
+// *calibrated* from what the browser actually reports once the stream has
+// loaded (see calibratePlaybackOffset) -- requestedStartPositionTicks (from
+// the backend's start_position_ticks, always 0 for direct play/stream) is
+// only the best guess used until that first calibration lands.
+// itemPositionTicks/videoSeconds are the two-way conversion between "where
+// this video element thinks it is" and "where the party actually is" that
+// every position sent to or read from the server must go through.
 let requestedStartPositionTicks = 0;
+let itemDurationTicks = 0;
 let playbackOffsetTicks = 0;
 
 function itemPositionTicks(videoCurrentTimeSeconds) {
@@ -70,20 +72,22 @@ function videoSeconds(itemTicks) {
   return ticksToSeconds(Math.max(0, itemTicks - playbackOffsetTicks));
 }
 
-// video.seekable reflects where this specific session's timeline actually
-// starts, once the browser knows it -- unlike requestedStartPositionTicks,
-// which is only what we *asked* Emby for, not confirmation of what it did.
-// If Emby reset the timeline to 0, seekable.start(0) reads ~0 and the
-// requested offset is the right one to add back; if Emby instead kept the
-// source's absolute timestamps, seekable.start(0) already reads close to
-// the requested position, meaning video.currentTime is already an absolute
-// item position and no additional offset belongs on top of it. Either way,
-// this converges on the correct offset without needing to know in advance
-// which convention this particular Emby build/config uses.
+// The robust way to find out exactly where in the item this specific
+// stream actually starts: compare how much playable content it reports
+// (video.duration) against the item's real, known total duration
+// (itemDurationTicks, from the party info fetched in main()). The gap
+// between them is exactly how much was skipped at the start -- however
+// that skip happened. An earlier version of this calibrated from
+// video.seekable.start(0) instead, comparing it against
+// requestedStartPositionTicks; that correctly handled the reset-vs-absolute
+// question but had no way to detect keyframe snapping, since a snapped
+// start looks the same in seekable.start(0) either way -- it only shows up
+// as *less total content than expected*, which is exactly what comparing
+// against the item's real duration catches.
 function calibratePlaybackOffset() {
-  if (!video.seekable || video.seekable.length === 0) return;
-  const seekableStartTicks = Math.round(video.seekable.start(0) * TICKS_PER_SECOND);
-  playbackOffsetTicks = requestedStartPositionTicks - seekableStartTicks;
+  if (!itemDurationTicks || !Number.isFinite(video.duration)) return;
+  const videoDurationTicks = Math.round(video.duration * TICKS_PER_SECOND);
+  playbackOffsetTicks = Math.max(0, itemDurationTicks - videoDurationTicks);
 }
 
 function isHost() {
@@ -382,6 +386,7 @@ async function main() {
     return;
   }
   hostUserId = partyInfo.host_user_id;
+  itemDurationTicks = partyInfo.duration_ticks || 0;
   renderMembers(partyInfo.members || []);
 
   let playback;
