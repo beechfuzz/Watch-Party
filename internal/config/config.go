@@ -32,7 +32,16 @@ type Config struct {
 	AppOrigins []string
 
 	// Emby
+	// EmbyServerURL is used for this server's own calls to Emby (auth,
+	// PlaybackInfo, progress reporting) and, unless EmbyPublicURL is set,
+	// also for playback URLs handed to the browser.
 	EmbyServerURL string
+	// EmbyPublicURL, if set, overrides the host used only for browser-facing
+	// playback URLs (see emby.Client.SetPublicBaseURL). Needed when
+	// EmbyServerURL points at an address only reachable from this server —
+	// e.g. container-DNS on a shared Docker/Podman network — which a
+	// browser on the user's LAN can't resolve; see ARCHITECTURE.md §5.2.
+	EmbyPublicURL string
 
 	// Persistence
 	DatabasePath string
@@ -102,6 +111,7 @@ func Load() (*Config, error) {
 	if cfg.EmbyServerURL == "" {
 		return nil, fmt.Errorf("EMBY_SERVER_URL is required")
 	}
+	cfg.EmbyPublicURL = strings.TrimRight(os.Getenv("EMBY_PUBLIC_URL"), "/")
 
 	keyRaw := os.Getenv("TOKEN_ENCRYPTION_KEY")
 	if keyRaw == "" {

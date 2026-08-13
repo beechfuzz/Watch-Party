@@ -76,7 +76,8 @@ Every variable Watch Party recognizes, with its default — all of these can be 
 | Variable | Default | Purpose |
 |---|---|---|
 | `APP_ORIGINS` | *(required)* | Comma-separated origins this app is served from, e.g. `https://watchparty.example.com`. Enforced on WebSocket connections. Mixed HTTP/HTTPS origins are fine — see below. |
-| `EMBY_SERVER_URL` | *(required)* | Your Emby server's base URL. |
+| `EMBY_SERVER_URL` | *(required)* | Your Emby server's base URL, reachable from the Watch Party container/process itself. |
+| `EMBY_PUBLIC_URL` | *(defaults to `EMBY_SERVER_URL`)* | Emby's base URL as reached by a participant's browser, if that's different from `EMBY_SERVER_URL` — see [Internal vs. public Emby address](#internal-vs-public-emby-address) below. |
 | `TOKEN_ENCRYPTION_KEY` | *(required)* | 32-byte key (base64 or hex) encrypting stored Emby tokens at rest. Never stored in SQLite. Generate with `openssl rand -base64 32` or `./watchparty --generate-key`. |
 | `DATABASE_PATH` | `/data/watchparty.db` | Path to the SQLite database file; the directory is created (and chowned to `PUID:PGID`, if running as root) if missing. Point this somewhere writable instead, e.g. `./data/watchparty.db`, for local `go run` development. |
 | `EMBY_PROGRESS_INTERVAL` | `10s` | How often each participant's watch progress is reported back to their own Emby account. |
@@ -103,6 +104,19 @@ APP_ORIGINS=https://watchparty.example.com,http://watchparty.home
 ```
 
 Each session cookie's `Secure` attribute is set to match what the *specific request that issued it* actually arrived over — not a single setting for the whole deployment — so logging in through the internal HTTP origin gets a plain cookie (a browser would silently refuse to store a `Secure` one from a non-HTTPS page anyway) while logging in through the external HTTPS origin still gets a fully `Secure` one, from the same running server, automatically. This is why there's no `DEV_MODE`-style flag to flip: it's derived per-request instead, via the standard `X-Forwarded-Proto` header your reverse proxy already sends (trusted because Watch Party is designed to sit behind one — see `ARCHITECTURE.md` §2 — rather than being directly internet-reachable itself; `watchparty.container`'s example binds its port to `127.0.0.1` for exactly this reason). Running directly with `go run` and no reverse proxy in front works the same way: no `X-Forwarded-Proto` header at all is indistinguishable from plain HTTP, so local development just works without any extra flag.
+
+### Internal vs. public Emby address
+
+`EMBY_SERVER_URL` is used for every call the Watch Party server itself makes to Emby: authenticating a user, fetching item metadata, negotiating playback, reporting watch progress. It's fine — often better — for this to be an address only the server can reach, e.g. Emby's container name on a Docker/Podman network you've joined both containers to (`http://emby:8096`), which sidesteps a common issue where a container can't reach another service via the host's own public-facing hostname or reverse proxy (hairpin NAT).
+
+But the playback URL a participant's *browser* loads the video from is different: the browser streams directly from Emby (see [Media authorization](#media-authorization) — this server never touches media bytes), so that URL has to be one the browser can actually resolve and reach, which an internal container-DNS name generally isn't. If you've pointed `EMBY_SERVER_URL` at an internal-only address, set `EMBY_PUBLIC_URL` to whatever address your browser actually uses to reach Emby (its LAN hostname, or the public one if Emby's exposed through a reverse proxy):
+
+```
+EMBY_SERVER_URL=http://emby:8096
+EMBY_PUBLIC_URL=http://emby.example.com
+```
+
+If `EMBY_SERVER_URL` is already reachable from both the server and participants' browsers, you don't need to set `EMBY_PUBLIC_URL` at all — it defaults to `EMBY_SERVER_URL`.
 
 ### Running as a specific user (`PUID`/`PGID`)
 
