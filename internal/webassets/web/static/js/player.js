@@ -17,8 +17,6 @@ import {
 
 const partyId = window.WATCH_PARTY_ID;
 const video = document.getElementById("video");
-const startOverlay = document.getElementById("start-overlay");
-const startBtn = document.getElementById("start-playback-btn");
 const statusEl = document.getElementById("status");
 const membersEl = document.getElementById("members");
 const hostControls = document.getElementById("host-controls");
@@ -107,9 +105,12 @@ function showError(text) {
 function programmaticPlay() {
   suppress.play = true;
   video.play().catch(() => {
-    // Autoplay blocked: show the explicit user-gesture affordance.
+    // Autoplay blocked (no user gesture yet) -- nothing to do here beyond
+    // resetting the suppress flag. The always-visible native play button
+    // (see the party.html <video controls> attribute) is what lets the
+    // user actually start playback themselves; see ARCHITECTURE.md §5.10
+    // for why this replaced a custom overlay/button doing the same job.
     suppress.play = false;
-    startOverlay.hidden = false;
   });
 }
 
@@ -173,9 +174,17 @@ function applyAuthoritativeState(state, { hardSeek } = {}) {
 }
 
 // --- native video event -> host command forwarding ---
-// Only fires for the host (participants have controls disabled) and only
-// when the event wasn't caused by our own programmatic call above — this
-// is what prevents a feedback loop between server-driven changes and the
+// Native controls (play/pause/seek bar) are visible to every participant,
+// not just the host (see the <video controls> attribute in party.html) --
+// but only the host's interactions with them are actually forwarded here.
+// A participant playing with their own native controls only ever affects
+// their own local view; it's never sent to the server, and the drift loop
+// silently corrects any local deviation back within a second or two, same
+// as it would correct any other drift. See ARCHITECTURE.md §5.10 for why
+// this replaced a host-only toggle plus a separate custom overlay button.
+// Each listener also checks suppress first, skipping forwarding entirely
+// when the event was caused by our own programmatic call above — this is
+// what prevents a feedback loop between server-driven changes and the
 // browser's native media element events.
 video.addEventListener("play", () => {
   if (suppress.play) { suppress.play = false; return; }
@@ -188,17 +197,6 @@ video.addEventListener("pause", () => {
 video.addEventListener("seeked", () => {
   if (suppress.seeking) { suppress.seeking = false; return; }
   if (isHost()) sendControl("seek", video.currentTime);
-});
-
-// The "start playback" overlay is only ever needed until the video is
-// actually, verifiably playing — hiding it solely on the start button's
-// own click (as before) left it stuck on screen over live video any time
-// playback began some other way (e.g. an autoplay attempt that succeeded
-// on a later authoritative state after an earlier one was blocked). This
-// fires regardless of what caused playback to start, so it can't get out
-// of sync with reality the way a per-code-path hide can.
-video.addEventListener("playing", () => {
-  startOverlay.hidden = true;
 });
 
 // Recalibrate playbackOffsetTicks once the browser actually knows this
@@ -225,15 +223,6 @@ function recalibrateAndReseek() {
 }
 video.addEventListener("loadedmetadata", recalibrateAndReseek, { once: true });
 video.addEventListener("canplay", recalibrateAndReseek, { once: true });
-
-startBtn.addEventListener("click", () => {
-  // Belt-and-suspenders alongside the "playing" listener above: hide
-  // immediately on the user's own explicit click rather than waiting for
-  // "playing" to fire, which can lag noticeably behind a real click if the
-  // stream is buffering.
-  startOverlay.hidden = true;
-  video.play().catch((err) => showError("Could not start playback: " + err.message));
-});
 
 fullscreenBtn.addEventListener("click", () => {
   if (video.requestFullscreen) {
@@ -296,13 +285,6 @@ function renderMembers(members) {
     membersEl.appendChild(li);
   }
   hostControls.hidden = !isHost();
-  // Native controls (play/pause/seek bar/volume) are host-only — a
-  // participant's native seeking wouldn't do anything but confuse them,
-  // since only the host's play/pause/seek commands reach the server (see
-  // the isHost() checks below); the drift loop would just correct a
-  // participant's local scrub away within a second or two. Fullscreen is
-  // available to everyone regardless, via the dedicated button.
-  video.controls = isHost();
   // Ending the party is host-only, enforced server-side (a non-host's
   // request 403s — see ARCHITECTURE.md §3/handleEndParty), but there's no
   // reason to show a participant a button that can only ever error out for
