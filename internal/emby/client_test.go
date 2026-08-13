@@ -141,7 +141,45 @@ func TestGetPlaybackURL_PreferEmbyProvidedTranscodingUrl(t *testing.T) {
 		t.Errorf("query lost Emby-provided params: %v", q)
 	}
 	if q.Get("api_key") != "tok-xyz" {
-		t.Errorf("api_key = %q, want it appended to the Emby-provided URL", q.Get("api_key"))
+		t.Errorf("api_key = %q, want it set on the Emby-provided URL", q.Get("api_key"))
+	}
+}
+
+func TestGetPlaybackURL_TranscodingUrlAlreadyHasAPIKey_NoDuplicate(t *testing.T) {
+	// Emby's own TranscodingUrl commonly already embeds an api_key, from
+	// whatever token authenticated the PlaybackInfo call that returned it.
+	// Blindly appending our own produced two api_key params on the wire,
+	// which Emby rejected outright with 401 (couldn't reconcile two values
+	// for the same key into one token) -- a real deployment hit exactly
+	// this. See ARCHITECTURE.md §5.3.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"PlaySessionId": "sess-abc",
+			"MediaSources": []map[string]any{
+				{
+					"Id": "src-abc", "SupportsDirectStream": false, "SupportsDirectPlay": false, "SupportsTranscoding": true,
+					"TranscodingUrl": "/videos/item1/master.m3u8?MediaSourceId=src-abc&PlaySessionId=sess-abc&api_key=stale-token-from-embys-own-auth",
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	result, err := c.GetPlaybackURL(context.Background(), "tok-xyz", "user-1", "item1", "device-1")
+	if err != nil {
+		t.Fatalf("GetPlaybackURL: %v", err)
+	}
+	parsed, err := url.Parse(result.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := parsed.Query()
+	if got := q["api_key"]; len(got) != 1 {
+		t.Fatalf("api_key values = %v, want exactly one", got)
+	}
+	if q.Get("api_key") != "tok-xyz" {
+		t.Errorf("api_key = %q, want the requesting user's own token, overwriting Emby's stale one", q.Get("api_key"))
 	}
 }
 
