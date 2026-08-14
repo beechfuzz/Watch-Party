@@ -331,6 +331,60 @@ func TestPlaybackURL_StartsAtPartysCurrentPosition(t *testing.T) {
 	}
 }
 
+func TestListParties_ReturnsActivePartySummary(t *testing.T) {
+	_, srv := newTestApp(t)
+	c := loginTestClient(t, srv)
+	_, created := c.do("POST", "/api/parties", map[string]string{"item_id": "item1"}, true)
+	partyID := created["party_id"].(string)
+
+	resp, got := c.do("GET", "/api/parties", nil, false)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d body=%v", resp.StatusCode, got)
+	}
+	parties, ok := got["parties"].([]any)
+	if !ok || len(parties) != 1 {
+		t.Fatalf("parties = %v, want exactly one entry", got["parties"])
+	}
+	entry := parties[0].(map[string]any)
+	if entry["party_id"] != partyID {
+		t.Errorf("party_id = %v, want %v", entry["party_id"], partyID)
+	}
+	if entry["item_title"] != "Movie" {
+		t.Errorf("item_title = %v, want %q (from the fake Emby's item1 response)", entry["item_title"], "Movie")
+	}
+	if entry["host_display_name"] != "Alice" {
+		t.Errorf("host_display_name = %v, want %q", entry["host_display_name"], "Alice")
+	}
+	if entry["host_user_id"] != "user-alice" {
+		t.Errorf("host_user_id = %v, want user-alice", entry["host_user_id"])
+	}
+	if _, ok := entry["duration_ticks"]; !ok {
+		t.Error("response missing duration_ticks")
+	}
+	if _, ok := entry["member_count"]; !ok {
+		t.Error("response missing member_count")
+	}
+}
+
+func TestListParties_EndedPartyExcluded(t *testing.T) {
+	_, srv := newTestApp(t)
+	c := loginTestClient(t, srv)
+	_, created := c.do("POST", "/api/parties", map[string]string{"item_id": "item1"}, true)
+	partyID := created["party_id"].(string)
+
+	if resp, body := c.do("POST", "/api/parties/"+partyID+"/end", nil, true); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("end party: status = %d body=%v", resp.StatusCode, body)
+	}
+
+	resp, got := c.do("GET", "/api/parties", nil, false)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d body=%v", resp.StatusCode, got)
+	}
+	if parties, _ := got["parties"].([]any); len(parties) != 0 {
+		t.Errorf("parties = %v, want none listed once the party has ended", parties)
+	}
+}
+
 func TestStaticAssetsAndPages_NotCacheable(t *testing.T) {
 	// This app has no frontend build pipeline: static assets are served at
 	// fixed URLs with no content hash, so a new deploy overwrites the same
@@ -350,6 +404,28 @@ func TestStaticAssetsAndPages_NotCacheable(t *testing.T) {
 		if got := resp.Header.Get("Cache-Control"); got != "no-cache" {
 			t.Errorf("GET %s: Cache-Control = %q, want %q", path, got, "no-cache")
 		}
+	}
+}
+
+func TestGetParty_IncludesItemTitle(t *testing.T) {
+	// The party page's topbar needs a human-readable title, not just the
+	// Emby item ID -- rides alongside the snapshot fields (see
+	// handleGetParty) using the item this endpoint already fetches for its
+	// own access check, at no extra Emby round trip.
+	_, srv := newTestApp(t)
+	c := loginTestClient(t, srv)
+	_, created := c.do("POST", "/api/parties", map[string]string{"item_id": "item1"}, true)
+	partyID := created["party_id"].(string)
+
+	resp, got := c.do("GET", "/api/parties/"+partyID, nil, false)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d body=%v", resp.StatusCode, got)
+	}
+	if got["item_title"] != "Movie" {
+		t.Errorf("item_title = %v, want %q", got["item_title"], "Movie")
+	}
+	if _, ok := got["party_id"]; !ok {
+		t.Error("response lost existing snapshot fields (party_id missing)")
 	}
 }
 
