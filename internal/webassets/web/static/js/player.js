@@ -17,12 +17,17 @@ import {
 
 const partyId = window.WATCH_PARTY_ID;
 const video = document.getElementById("video");
-const statusEl = document.getElementById("status");
+const partyTitleEl = document.getElementById("party-title");
+const partySubtitleEl = document.getElementById("party-subtitle");
+const syncBadge = document.getElementById("sync-badge");
+const syncText = document.getElementById("sync-text");
 const membersEl = document.getElementById("members");
+const participantsHeading = document.getElementById("participants-heading");
 const hostControls = document.getElementById("host-controls");
 const playBtn = document.getElementById("play-btn");
 const pauseBtn = document.getElementById("pause-btn");
 const fullscreenBtn = document.getElementById("fullscreen-btn");
+const inviteBtn = document.getElementById("invite-btn");
 const endBtn = document.getElementById("end-btn");
 const leaveBtn = document.getElementById("leave-btn");
 const errorEl = document.getElementById("error");
@@ -92,8 +97,15 @@ function isHost() {
   return me && hostUserId === me.user.id;
 }
 
-function setStatus(text) {
-  statusEl.textContent = text;
+function setConnectionState(state) {
+  syncBadge.classList.toggle("is-disconnected", state !== "open");
+  if (state === "open") {
+    syncText.textContent = lastRttMs !== null ? `In sync · ${Math.round(lastRttMs)}ms` : "In sync";
+  } else if (state === "connecting") {
+    syncText.textContent = "Connecting…";
+  } else {
+    syncText.textContent = "Reconnecting…";
+  }
 }
 
 function showError(text) {
@@ -236,6 +248,18 @@ fullscreenBtn.addEventListener("click", () => {
   }
 });
 
+inviteBtn.addEventListener("click", async () => {
+  const link = `${window.location.origin}/party/${encodeURIComponent(partyId)}`;
+  try {
+    await navigator.clipboard.writeText(link);
+    const original = inviteBtn.title;
+    inviteBtn.title = "Copied!";
+    setTimeout(() => { inviteBtn.title = original; }, 2000);
+  } catch {
+    showError("Couldn't copy the invite link — copy it from the address bar instead.");
+  }
+});
+
 function sendControl(type, currentTimeSeconds) {
   conn.send(type, { position_ticks: itemPositionTicks(currentTimeSeconds) });
 }
@@ -261,14 +285,40 @@ leaveBtn.addEventListener("click", async () => {
   window.location.href = "/";
 });
 
+function initials(name) {
+  return (name || "?").trim().slice(0, 1).toUpperCase();
+}
+
 function renderMembers(members) {
   membersEl.innerHTML = "";
+  const connectedCount = members.filter((m) => m.connection_status === "connected").length;
+  participantsHeading.textContent = `Watching now — ${connectedCount}`;
+
   for (const m of members) {
-    const li = document.createElement("li");
-    li.className = `member ${m.connection_status}`;
-    li.textContent = `${m.display_name}${m.is_host ? " (host)" : ""} — ${m.connection_status}`;
+    const row = document.createElement("div");
+    row.className = `participant-row${m.connection_status !== "connected" ? " is-offline" : ""}`;
+    row.innerHTML = `
+      <div class="pulse-avatar">
+        <span class="pulse-ring"></span>
+        <div class="avatar"></div>
+      </div>
+      <div>
+        <div class="participant-name"></div>
+        <div class="participant-status${m.connection_status === "connected" ? " online" : ""}"></div>
+      </div>
+    `;
+    row.querySelector(".avatar").textContent = initials(m.display_name);
+    const nameEl = row.querySelector(".participant-name");
+    nameEl.append(m.display_name);
+    if (m.is_host) {
+      nameEl.insertAdjacentHTML("beforeend", ` <svg class="host-star" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.9 6.6 7.1.6-5.4 4.7 1.7 7-6.3-3.9L5.7 21l1.7-7-5.4-4.7 7.1-.6L12 2z"/></svg>`);
+    }
+    row.querySelector(".participant-status").textContent =
+      m.connection_status === "connected" ? "In sync" : m.connection_status === "disconnected" ? "Reconnecting…" : "Left";
+
     if (isHost() && !m.is_host && m.connection_status === "connected") {
       const btn = document.createElement("button");
+      btn.className = "make-host-btn";
       btn.textContent = "Make host";
       btn.addEventListener("click", async () => {
         try {
@@ -280,9 +330,9 @@ function renderMembers(members) {
           showError(err.message);
         }
       });
-      li.appendChild(btn);
+      row.appendChild(btn);
     }
-    membersEl.appendChild(li);
+    membersEl.appendChild(row);
   }
   hostControls.hidden = !isHost();
   // Ending the party is host-only, enforced server-side (a non-host's
@@ -364,18 +414,25 @@ async function main() {
   try {
     partyInfo = await api(`/api/parties/${encodeURIComponent(partyId)}`);
   } catch (err) {
-    setStatus("Could not load party: " + err.message);
+    partyTitleEl.textContent = "Could not load party";
+    syncBadge.classList.add("is-disconnected");
+    syncText.textContent = err.message;
     return;
   }
   hostUserId = partyInfo.host_user_id;
   itemDurationTicks = partyInfo.duration_ticks || 0;
+  partyTitleEl.textContent = partyInfo.item_title || partyInfo.item_id;
+  const hostMember = (partyInfo.members || []).find((m) => m.is_host);
+  partySubtitleEl.textContent = hostMember ? `Hosted by ${hostMember.display_name}` : "";
   renderMembers(partyInfo.members || []);
 
   let playback;
   try {
     playback = await api(`/api/parties/${encodeURIComponent(partyId)}/playback-url`);
   } catch (err) {
-    setStatus("Could not get a playback URL from Emby: " + err.message);
+    syncBadge.classList.add("is-disconnected");
+    syncText.textContent = err.message;
+    showError("Could not get a playback URL from Emby: " + err.message);
     return;
   }
   // See the requestedStartPositionTicks/playbackOffsetTicks declarations
@@ -405,6 +462,7 @@ async function main() {
           clockOffsetMs = offsetMs;
           lastRttMs = rttMs;
           lastOffsetMs = offsetMs;
+          setConnectionState("open");
           break;
         }
         case "pong":
@@ -416,7 +474,7 @@ async function main() {
           break;
       }
     },
-    (state) => setStatus(state === "open" ? "Connected" : state === "connecting" ? "Connecting…" : "Disconnected — reconnecting…")
+    (state) => setConnectionState(state)
   );
 
   startClockSync();

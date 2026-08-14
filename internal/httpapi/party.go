@@ -17,6 +17,71 @@ type createPartyRequest struct {
 	ItemID string `json:"item_id"`
 }
 
+// partySummary is one entry in the GET /api/parties listing — enough for
+// the Home page's Active Parties / Your Parties cards without a second
+// round-trip per party. There's no per-party access-control list; visibility
+// here is simply "every currently active party" (this is a small,
+// friends/family self-hosted tool, not a multi-tenant service), same as
+// join-by-link already implicitly allowed before this endpoint existed.
+type partySummary struct {
+	PartyID         string `json:"party_id"`
+	ItemID          string `json:"item_id"`
+	ItemTitle       string `json:"item_title"`
+	HostUserID      string `json:"host_user_id"`
+	HostDisplayName string `json:"host_display_name"`
+	IsPlaying       bool   `json:"is_playing"`
+	PositionTicks   int64  `json:"position_ticks"`
+	DurationTicks   int64  `json:"duration_ticks"`
+	MemberCount     int    `json:"member_count"`
+}
+
+// handleListParties powers the Home page's Active Parties / Your Parties
+// sections. Item titles are resolved via the requesting user's own Emby
+// token (never a shared one, per the spec's hard requirement elsewhere in
+// this codebase) -- a party whose item that specific user can't see (or
+// that Emby can't resolve for any other reason) is silently omitted from
+// their listing rather than failing the whole request, matching the
+// access-control spirit of handleGetParty's join-time check.
+func (a *App) handleListParties(w http.ResponseWriter, r *http.Request) {
+	user := userFromContext(r.Context())
+	token, err := a.TokenCipher.Decrypt(user.EncryptedAccessToken)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
+		return
+	}
+
+	active := a.Hub.All()
+	summaries := make([]partySummary, 0, len(active))
+	for _, p := range active {
+		item, err := a.Emby.GetItem(r.Context(), token, user.ID, p.ItemID)
+		if err != nil {
+			continue
+		}
+		snap := p.Snapshot()
+
+		hostDisplayName := snap.HostUserID
+		if host, err := a.Store.GetUser(r.Context(), snap.HostUserID); err == nil && host != nil {
+			hostDisplayName = host.DisplayName
+		}
+
+		memberCount := 0
+		for _, m := range snap.Members {
+			if m.ConnectionStatus == "connected" {
+				memberCount++
+			}
+		}
+
+		summaries = append(summaries, partySummary{
+			PartyID: p.ID, ItemID: p.ItemID, ItemTitle: item.Name,
+			HostUserID: snap.HostUserID, HostDisplayName: hostDisplayName,
+			IsPlaying: snap.AuthoritativeState.IsPlaying, PositionTicks: p.CurrentPositionTicks(),
+			DurationTicks: p.DurationTicks, MemberCount: memberCount,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"parties": summaries})
+}
+
 func (a *App) handleCreateParty(w http.ResponseWriter, r *http.Request) {
 	var req createPartyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ItemID == "" {
@@ -91,7 +156,8 @@ func (a *App) handleGetParty(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
 		return
 	}
-	if _, err := a.Emby.GetItem(r.Context(), token, user.ID, row.ItemID); err != nil {
+	item, err := a.Emby.GetItem(r.Context(), token, user.ID, row.ItemID)
+	if err != nil {
 		a.handleEmbyErr(w, r.Context(), user.ID, err, "you do not have access to this media item")
 		return
 	}
@@ -105,7 +171,15 @@ func (a *App) handleGetParty(w http.ResponseWriter, r *http.Request) {
 		// than 500 if it ever does.
 		snap = wsproto.SnapshotPayload{PartyID: row.ID, ItemID: row.ItemID, DurationTicks: row.DurationTicks, HostUserID: row.HostUserID}
 	}
-	writeJSON(w, http.StatusOK, snap)
+	// ItemTitle rides alongside the snapshot rather than joining
+	// wsproto.SnapshotPayload itself, since that struct is also the shape of
+	// every WS snapshot broadcast — the party actor has no Emby access (by
+	// design; see ARCHITECTURE.md §3) and so has no way to populate a title.
+	// The access-check GetItem call above already fetched it for free.
+	writeJSON(w, http.StatusOK, struct {
+		wsproto.SnapshotPayload
+		ItemTitle string `json:"item_title"`
+	}{SnapshotPayload: snap, ItemTitle: item.Name})
 }
 
 func (a *App) handlePlaybackURL(w http.ResponseWriter, r *http.Request) {

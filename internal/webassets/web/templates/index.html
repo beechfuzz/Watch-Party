@@ -7,38 +7,167 @@
   <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
-  <main class="container">
-    <h1>Watch Party</h1>
+  <div class="atmosphere"></div>
 
-    <section id="login-section">
-      <h2>Sign in with your Emby account</h2>
-      <form id="login-form">
-        <label>Username <input type="text" name="username" autocomplete="username" required></label>
-        <label>Password <input type="password" name="password" autocomplete="current-password" required></label>
-        <button type="submit">Sign in</button>
-      </form>
-      <p class="error" id="login-error"></p>
-    </section>
+  <section id="login-section">
+    <div class="login-shell">
+      <div class="login-card">
+        <div class="wp-mark">
+          <svg viewBox="0 0 24 24" fill="none"><circle cx="9" cy="12" r="7" stroke="#1A1204" stroke-width="1.6"/><circle cx="15" cy="12" r="7" stroke="#1A1204" stroke-width="1.6"/></svg>
+        </div>
+        <h1 class="login-heading">Watch together, in sync.</h1>
+        <p class="login-sub">Sign in with your Emby account to create or join a watch party.</p>
 
-    <section id="home-section" hidden>
-      <p id="whoami"></p>
-      <button id="logout-btn">Sign out</button>
+        <form id="login-form">
+          <div class="field">
+            <label for="username">Username</label>
+            <input id="username" type="text" name="username" autocomplete="username" required>
+          </div>
+          <div class="field">
+            <label for="password">Password</label>
+            <input id="password" type="password" name="password" autocomplete="current-password" required>
+          </div>
+          <button type="submit" class="btn btn-primary">Sign in</button>
+        </form>
+        <p class="error" id="login-error" hidden></p>
 
-      <h2>Start a party</h2>
-      <form id="create-party-form">
-        <label>Emby item ID <input type="text" name="item_id" required placeholder="e.g. 4f2a91b7c3..."></label>
-        <button type="submit">Create party</button>
-      </form>
-      <p class="error" id="create-error"></p>
+        <p class="login-footnote">Your credentials go straight to your Emby server — Watch Party never stores your password.</p>
+      </div>
+    </div>
+  </section>
 
-      <h2>Join a party</h2>
-      <form id="join-party-form">
-        <label>Party link or ID <input type="text" name="party_id" required></label>
-        <button type="submit">Join party</button>
-      </form>
-      <p class="error" id="join-error"></p>
-    </section>
-  </main>
+  <section id="home-section" hidden>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="sidebar-top">
+          <div class="brand">
+            <div class="wp-mark"><svg viewBox="0 0 24 24" fill="none"><circle cx="9" cy="12" r="7" stroke="#1A1204" stroke-width="1.6"/><circle cx="15" cy="12" r="7" stroke="#1A1204" stroke-width="1.6"/></svg></div>
+            <span class="brand-name">Watch Party</span>
+          </div>
+        </div>
+
+        <nav class="side-nav">
+          <a class="nav-item is-active">
+            <svg viewBox="0 0 24 24" fill="none"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1v-9z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+            <span>Home</span>
+          </a>
+          <a class="nav-item is-coming-soon is-coming-soon">
+            <span class="nav-label-group">
+              <svg viewBox="0 0 24 24" fill="none"><circle cx="9" cy="8" r="3.2" stroke="currentColor" stroke-width="1.7"/><path d="M2.5 19c.5-3.4 3-5.5 6.5-5.5s6 2.1 6.5 5.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><circle cx="17" cy="8.5" r="2.6" stroke="currentColor" stroke-width="1.6"/><path d="M15.2 13.6c2.7.2 4.6 2.1 5 5.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+              <span>Parties</span>
+            </span>
+            <span class="coming-soon-badge">Soon</span>
+          </a>
+          <a class="nav-item is-coming-soon">
+            <span class="nav-label-group">
+              <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="8.2" stroke="currentColor" stroke-width="1.7"/><path d="M12 7.5V12l3 2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <span>History</span>
+            </span>
+            <span class="coming-soon-badge">Soon</span>
+          </a>
+          <a class="nav-item is-coming-soon">
+            <span class="nav-label-group">
+              <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="2.8" stroke="currentColor" stroke-width="1.7"/><path d="M19.4 13.5a1.7 1.7 0 0 0 .34 1.87l.06.06a2.05 2.05 0 1 1-2.9 2.9l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56v.17a2.05 2.05 0 1 1-4.1 0v-.09a1.7 1.7 0 0 0-1.11-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2.05 2.05 0 1 1-2.9-2.9l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1.03h-.17a2.05 2.05 0 1 1 0-4.1h.09a1.7 1.7 0 0 0 1.56-1.11 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2.05 2.05 0 1 1 2.9-2.9l.06.06a1.7 1.7 0 0 0 1.87.34H10a1.7 1.7 0 0 0 1.03-1.56v-.17a2.05 2.05 0 1 1 4.1 0v.09a1.7 1.7 0 0 0 1.03 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2.05 2.05 0 1 1 2.9 2.9l-.06.06a1.7 1.7 0 0 0-.34 1.87v.09a1.7 1.7 0 0 0 1.56 1.03h.17a2.05 2.05 0 1 1 0 4.1h-.09a1.7 1.7 0 0 0-1.56 1.03z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
+              <span>Settings</span>
+            </span>
+            <span class="coming-soon-badge">Soon</span>
+          </a>
+        </nav>
+
+        <div class="sidebar-user">
+          <div class="avatar" id="user-avatar"><span id="user-avatar-initial">?</span><span class="status-dot"></span></div>
+          <div class="user-text">
+            <div class="user-name" id="user-name">—</div>
+            <div class="user-status">Online</div>
+          </div>
+          <button class="sign-out-btn" id="logout-btn" title="Sign out">
+            <svg viewBox="0 0 24 24" fill="none"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <header class="dash-header">
+          <div>
+            <h1 id="welcome-heading">Welcome back 👋</h1>
+            <p>Jump into a party or start your own watch session.</p>
+          </div>
+          <div style="display:flex; gap:10px;">
+            <button class="btn btn-ghost" id="join-link-btn">Join by link</button>
+            <button class="btn btn-primary" id="create-party-btn">
+              <svg viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+              Create Party
+            </button>
+          </div>
+        </header>
+
+        <section>
+          <div class="section-heading"><h2>Active Parties</h2><span class="count-pill" id="active-count">0</span></div>
+          <div class="party-grid-2" id="active-parties-grid"></div>
+        </section>
+
+        <section id="your-parties-section" hidden>
+          <div class="section-heading"><h2>Your Parties</h2><span class="count-pill" id="your-count">0</span></div>
+          <div id="your-parties-list"></div>
+        </section>
+
+        <section class="is-coming-soon">
+          <div class="section-heading between">
+            <div style="display:flex; align-items:center; gap:10px;"><h2>Recent Parties</h2><span class="coming-soon-badge">Coming Soon</span></div>
+          </div>
+          <div class="recent-grid-4">
+            <div class="recent-card">
+              <div class="recent-thumb"></div>
+              <div class="recent-card-body"><h4>Watch history</h4><div class="r-sub">Coming soon</div></div>
+            </div>
+            <div class="recent-card">
+              <div class="recent-thumb"></div>
+              <div class="recent-card-body"><h4>Watch history</h4><div class="r-sub">Coming soon</div></div>
+            </div>
+            <div class="recent-card">
+              <div class="recent-thumb"></div>
+              <div class="recent-card-body"><h4>Watch history</h4><div class="r-sub">Coming soon</div></div>
+            </div>
+            <div class="recent-card">
+              <div class="recent-thumb"></div>
+              <div class="recent-card-body"><h4>Watch history</h4><div class="r-sub">Coming soon</div></div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </section>
+
+  <dialog id="create-party-dialog">
+    <form id="create-party-form">
+      <h3>Create a party</h3>
+      <div class="field">
+        <label for="create-item-id">Emby item ID</label>
+        <input id="create-item-id" type="text" name="item_id" required placeholder="e.g. 4f2a91b7c3...">
+      </div>
+      <p class="error" id="create-error" hidden></p>
+      <div style="display:flex; gap:10px; justify-content:flex-end;">
+        <button type="button" class="btn btn-ghost" id="cancel-create-btn">Cancel</button>
+        <button type="submit" class="btn btn-primary">Create</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="join-link-dialog">
+    <form id="join-party-form">
+      <h3>Join a party</h3>
+      <div class="field">
+        <label for="join-party-id">Party link or ID</label>
+        <input id="join-party-id" type="text" name="party_id" required>
+      </div>
+      <p class="error" id="join-error" hidden></p>
+      <div style="display:flex; gap:10px; justify-content:flex-end;">
+        <button type="button" class="btn btn-ghost" id="cancel-join-btn">Cancel</button>
+        <button type="submit" class="btn btn-primary">Join</button>
+      </div>
+    </form>
+  </dialog>
+
   <script type="module" src="/static/js/app.js"></script>
 </body>
 </html>
