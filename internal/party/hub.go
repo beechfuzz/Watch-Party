@@ -161,6 +161,66 @@ func (h *Hub) RecoverActiveParties(ctx context.Context) error {
 	return nil
 }
 
+// lastActivityAt returns the most recent moment "activity" happened for a
+// party: a play/pause/seek control (playback_state.server_timestamp), or
+// any member connecting/reconnecting (party_members.last_connected_at).
+// Falls back to createdAt if neither has ever happened -- a party created
+// and then immediately abandoned, with no control issued and no one ever
+// (re)connecting, should still eventually be swept.
+func (h *Hub) lastActivityAt(ctx context.Context, partyID string, createdAt time.Time) (time.Time, error) {
+	latest := createdAt
+	if st, err := h.store.GetPlaybackState(ctx, partyID); err == nil {
+		if st.ServerTimestamp.After(latest) {
+			latest = st.ServerTimestamp
+		}
+	} else if !errors.Is(err, dbx.ErrNotFound) {
+		return time.Time{}, err
+	}
+	members, err := h.store.GetMembers(ctx, partyID)
+	if err != nil {
+		return time.Time{}, err
+	}
+	for _, m := range members {
+		if m.LastConnectedAt != nil && m.LastConnectedAt.After(latest) {
+			latest = *m.LastConnectedAt
+		}
+	}
+	return latest, nil
+}
+
+// SweepInactiveParties ends every currently active party whose last
+// activity (see lastActivityAt) is older than maxIdle -- self-hosted
+// cleanup for a party nobody remembered to end (everyone left without
+// clicking End Party, or the host's browser/tab crashed), rather than it
+// lingering active forever. See ARCHITECTURE.md §8. Returns the number of
+// parties ended, for logging by the caller's periodic loop.
+func (h *Hub) SweepInactiveParties(ctx context.Context, maxIdle time.Duration) int {
+	ended := 0
+	for _, p := range h.All() {
+		row, err := h.store.GetParty(ctx, p.ID)
+		if err != nil {
+			h.logger.Error("sweep: get party failed", "party_id", p.ID, "error", err)
+			continue
+		}
+		last, err := h.lastActivityAt(ctx, p.ID, row.CreatedAt)
+		if err != nil {
+			h.logger.Error("sweep: compute last activity failed", "party_id", p.ID, "error", err)
+			continue
+		}
+		idleFor := time.Since(last)
+		if idleFor < maxIdle {
+			continue
+		}
+		if err := h.EndParty(ctx, p.ID); err != nil {
+			h.logger.Error("sweep: end inactive party failed", "party_id", p.ID, "error", err)
+			continue
+		}
+		h.logger.Info("ended inactive party", "party_id", p.ID, "idle_for", idleFor.Round(time.Minute))
+		ended++
+	}
+	return ended
+}
+
 // Shutdown flushes every active party's in-memory state to SQLite
 // synchronously and stops all actor goroutines. Called on SIGTERM before
 // the process exits (see cmd/server/main.go).

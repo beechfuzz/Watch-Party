@@ -697,3 +697,106 @@ func TestHub_RecoverActiveParties(t *testing.T) {
 		t.Error("recovered members should start as disconnected (zero connected clients) until they reconnect")
 	}
 }
+
+func TestSweepInactiveParties_EndsPartyIdleLongerThanTimeout(t *testing.T) {
+	dir := t.TempDir()
+	db, err := dbx.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store := dbx.NewStore(db)
+	ctx := context.Background()
+	seedUser(t, store, "host", "Host")
+
+	staleTime := time.Now().Add(-50 * time.Hour)
+	if err := store.CreateParty(ctx, dbx.Party{
+		ID: "stale-party", HostUserID: "host", ItemID: "item1",
+		DurationTicks: 1000 * 10_000_000, CreatedAt: staleTime, Status: dbx.PartyStatusActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertPlaybackState(ctx, dbx.PlaybackState{
+		PartyID: "stale-party", PositionTicks: 0, IsPlaying: false,
+		SequenceNumber: 0, ServerTimestamp: staleTime, UpdatedByClientType: dbx.ClientTypeSystem,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertMember(ctx, dbx.PartyMember{
+		PartyID: "stale-party", UserID: "host", JoinedAt: staleTime,
+		LastConnectedAt: &staleTime, ConnectionStatus: dbx.ConnDisconnected,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	hub := NewHub(store, testTuning(), testLogger())
+	defer hub.Shutdown(ctx)
+	if err := hub.RecoverActiveParties(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := hub.Get("stale-party"); !ok {
+		t.Fatal("party not recovered into hub")
+	}
+
+	if ended := hub.SweepInactiveParties(ctx, 48*time.Hour); ended != 1 {
+		t.Errorf("SweepInactiveParties returned %d, want 1", ended)
+	}
+	if _, ok := hub.Get("stale-party"); ok {
+		t.Error("stale party still in hub after sweep")
+	}
+	row, err := store.GetParty(ctx, "stale-party")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.Status != dbx.PartyStatusEnded {
+		t.Errorf("party status = %v, want ended", row.Status)
+	}
+}
+
+func TestSweepInactiveParties_RecentMemberActivityKeepsPartyAlive(t *testing.T) {
+	dir := t.TempDir()
+	db, err := dbx.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store := dbx.NewStore(db)
+	ctx := context.Background()
+	seedUser(t, store, "host", "Host")
+
+	staleTime := time.Now().Add(-50 * time.Hour)
+	recentTime := time.Now().Add(-1 * time.Hour)
+	if err := store.CreateParty(ctx, dbx.Party{
+		ID: "recently-active-party", HostUserID: "host", ItemID: "item1",
+		DurationTicks: 1000 * 10_000_000, CreatedAt: staleTime, Status: dbx.PartyStatusActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertPlaybackState(ctx, dbx.PlaybackState{
+		PartyID: "recently-active-party", PositionTicks: 0, IsPlaying: false,
+		SequenceNumber: 0, ServerTimestamp: staleTime, UpdatedByClientType: dbx.ClientTypeSystem,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// No play/pause/seek in 50h, but the host reconnected 1h ago -- that
+	// alone must count as activity and keep the party alive.
+	if err := store.UpsertMember(ctx, dbx.PartyMember{
+		PartyID: "recently-active-party", UserID: "host", JoinedAt: staleTime,
+		LastConnectedAt: &recentTime, ConnectionStatus: dbx.ConnDisconnected,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	hub := NewHub(store, testTuning(), testLogger())
+	defer hub.Shutdown(ctx)
+	if err := hub.RecoverActiveParties(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if ended := hub.SweepInactiveParties(ctx, 48*time.Hour); ended != 0 {
+		t.Errorf("SweepInactiveParties returned %d, want 0 (recent member reconnect should count as activity)", ended)
+	}
+	if _, ok := hub.Get("recently-active-party"); !ok {
+		t.Error("party wrongly removed from hub")
+	}
+}

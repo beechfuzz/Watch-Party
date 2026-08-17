@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -106,6 +107,10 @@ func run() error {
 	defer stopReporter()
 	go reporter.Run(reporterCtx)
 
+	sweepCtx, stopSweep := context.WithCancel(context.Background())
+	defer stopSweep()
+	go runPartyInactivitySweep(sweepCtx, hub, cfg.PartyInactivityTimeout, logger)
+
 	mux := http.NewServeMux()
 	httpapi.RegisterRoutes(mux, &httpapi.App{
 		Store:                store,
@@ -157,6 +162,31 @@ func run() error {
 
 	logger.Info("shutdown complete")
 	return nil
+}
+
+// partyInactivitySweepInterval is how often to check for inactive parties,
+// not the inactivity threshold itself (that's cfg.PartyInactivityTimeout,
+// operator-configurable and 48h by default) -- 15 minutes of imprecision on
+// a multi-hour timeout is immaterial, so this isn't exposed as its own
+// setting.
+const partyInactivitySweepInterval = 15 * time.Minute
+
+// runPartyInactivitySweep periodically ends parties idle for longer than
+// maxIdle until ctx is cancelled (server shutdown). See
+// party.Hub.SweepInactiveParties and ARCHITECTURE.md §8.
+func runPartyInactivitySweep(ctx context.Context, hub *party.Hub, maxIdle time.Duration, logger *slog.Logger) {
+	ticker := time.NewTicker(partyInactivitySweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if n := hub.SweepInactiveParties(ctx, maxIdle); n > 0 {
+				logger.Info("party inactivity sweep ended parties", "count", n)
+			}
+		}
+	}
 }
 
 func dirOf(path string) string {

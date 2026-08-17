@@ -273,7 +273,9 @@ endBtn.addEventListener("click", async () => {
     await api(`/api/parties/${encodeURIComponent(partyId)}/end`, { method: "POST" });
   } catch (err) {
     showError(err.message);
+    return;
   }
+  window.location.href = "/";
 });
 
 leaveBtn.addEventListener("click", async () => {
