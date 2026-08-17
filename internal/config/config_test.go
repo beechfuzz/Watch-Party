@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // setRequiredEnv sets the minimum env vars Load needs to succeed, using
 // t.Setenv so each test gets an isolated, auto-restored environment.
@@ -31,6 +34,29 @@ func TestLoad_EmbyPublicURL_Override(t *testing.T) {
 	}
 	if cfg.EmbyPublicURL != "https://emby.example.com" {
 		t.Errorf("EmbyPublicURL = %q, want trailing slash trimmed", cfg.EmbyPublicURL)
+	}
+}
+
+func TestLoad_PartyInactivityTimeout_DefaultsTo48Hours(t *testing.T) {
+	setRequiredEnv(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.PartyInactivityTimeout != 48*time.Hour {
+		t.Errorf("PartyInactivityTimeout = %v, want 48h", cfg.PartyInactivityTimeout)
+	}
+}
+
+func TestLoad_PartyInactivityTimeout_Override(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("PARTY_INACTIVITY_TIMEOUT", "12h")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.PartyInactivityTimeout != 12*time.Hour {
+		t.Errorf("PartyInactivityTimeout = %v, want 12h", cfg.PartyInactivityTimeout)
 	}
 }
 

@@ -84,6 +84,7 @@ Every variable Watch Party recognizes, with its default — all of these can be 
 | `HOST_GRACE_PERIOD_SECONDS` | `20` | How long a disconnected host has to reconnect before host status transfers. |
 | `LISTEN_ADDR` | `:8080` | Address the HTTP server listens on. |
 | `LOG_LEVEL` | `info` | One of `debug`, `info`, `warn`, `error`. |
+| `PARTY_INACTIVITY_TIMEOUT` | `48h` | How long a party can go with no playback control and no one connecting/reconnecting before it's automatically ended. |
 | `PGID` | `65532` | GID the server process runs as — same section. |
 | `PUID` | `65532` | UID the server process runs as — see [Running as a specific user](#running-as-a-specific-user-puidpgid) below. |
 | `SESSION_IDLE_TIMEOUT` | `24h` | Sliding idle timeout — a session with no activity this long is invalidated. |
@@ -93,7 +94,7 @@ Every variable Watch Party recognizes, with its default — all of these can be 
 | `SYNC_SNAPSHOT_INTERVAL` | `4s` | How often the server broadcasts a full authoritative snapshot to every participant. |
 | `SYNC_SOFT_DRIFT_MS` | `300` | Drift below this (milliseconds) is left uncorrected. |
 
-`SESSION_IDLE_TIMEOUT`, `SESSION_MAX_AGE`, and `HOST_GRACE_PERIOD_SECONDS` accept either a bare integer (seconds) or a Go duration string (`30m`, `24h`).
+`SESSION_IDLE_TIMEOUT`, `SESSION_MAX_AGE`, `HOST_GRACE_PERIOD_SECONDS`, and `PARTY_INACTIVITY_TIMEOUT` accept either a bare integer (seconds) or a Go duration string (`30m`, `24h`).
 
 ### Mixing HTTP and HTTPS origins
 
@@ -133,6 +134,8 @@ Every participant streams under their own Emby token — never a shared one. Acc
 ## Party lifecycle and host transfer, in plain language
 
 A party moves through `created → active → ended`, and `ended` is final — a party can never come back to life once ended. Only the host can play, pause, seek, transfer host status, or end the party; those actions are enforced on the server, not just hidden in the UI, so a participant can't bypass them by talking to the API directly.
+
+A party also ends itself automatically after `PARTY_INACTIVITY_TIMEOUT` (default 48h) with no playback control and no one connecting or reconnecting — cleanup for a party nobody remembered to end (everyone left without hitting "End party," or the host's browser crashed) rather than it sitting active forever.
 
 If the host's connection drops, the party doesn't end and host status doesn't move immediately — a disconnected host has `HOST_GRACE_PERIOD_SECONDS` (default 20s) to reconnect and keep host status, since a network hiccup or a backgrounded tab shouldn't cost you control of the party. If that window passes without the host reconnecting, host status moves automatically to whichever connected participant has been in the party the longest. Once that transfer happens, the original host doesn't automatically get host status back just by reconnecting afterward — the party would otherwise flap back and forth if the original host's connection was flaky. If the host explicitly leaves (rather than just disconnecting), the transfer happens immediately, without waiting out the grace period, since that's a deliberate action rather than a network blip.
 

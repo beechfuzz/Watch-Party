@@ -1,5 +1,5 @@
-// Index page: login form, then the dashboard (active/your parties + create/
-// join). Server is the source of truth; this just renders whatever
+// Index page: login form, then the dashboard (active/your parties +
+// create). Server is the source of truth; this just renders whatever
 // /api/me and /api/parties say.
 import { api, setCSRFToken, clearCSRFToken } from "./api.js";
 
@@ -19,12 +19,6 @@ const createDialog = document.getElementById("create-party-dialog");
 const createForm = document.getElementById("create-party-form");
 const createError = document.getElementById("create-error");
 const cancelCreateBtn = document.getElementById("cancel-create-btn");
-
-const joinLinkBtn = document.getElementById("join-link-btn");
-const joinDialog = document.getElementById("join-link-dialog");
-const joinForm = document.getElementById("join-party-form");
-const joinError = document.getElementById("join-error");
-const cancelJoinBtn = document.getElementById("cancel-join-btn");
 
 const activeGrid = document.getElementById("active-parties-grid");
 const activeCount = document.getElementById("active-count");
@@ -210,26 +204,6 @@ createForm.addEventListener("submit", async (e) => {
   } catch (err) {
     showError(createError, err.message);
   }
-});
-
-joinLinkBtn.addEventListener("click", () => {
-  hideError(joinError);
-  joinForm.reset();
-  joinDialog.showModal();
-});
-cancelJoinBtn.addEventListener("click", () => joinDialog.close());
-joinForm.addEventListener("submit", (e) => {
-  e.preventDefault();
-  hideError(joinError);
-  const formData = new FormData(joinForm);
-  const partyId = (formData.get("party_id") || "").trim();
-  if (!partyId) {
-    showError(joinError, "Enter a party ID or link.");
-    return;
-  }
-  // Accept either a bare ID or a pasted /party/<id> URL.
-  const match = partyId.match(/\/party\/([^/?#]+)/);
-  window.location.href = `/party/${encodeURIComponent(match ? match[1] : partyId)}`;
 });
 
 init();

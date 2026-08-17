@@ -93,7 +93,6 @@
             <p>Jump into a party or start your own watch session.</p>
           </div>
           <div style="display:flex; gap:10px;">
-            <button class="btn btn-ghost" id="join-link-btn">Join by link</button>
             <button class="btn btn-primary" id="create-party-btn">
               <svg viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
               Create Party
@@ -149,21 +148,6 @@
       <div style="display:flex; gap:10px; justify-content:flex-end;">
         <button type="button" class="btn btn-ghost" id="cancel-create-btn">Cancel</button>
         <button type="submit" class="btn btn-primary">Create</button>
-      </div>
-    </form>
-  </dialog>
-
-  <dialog id="join-link-dialog">
-    <form id="join-party-form">
-      <h3>Join a party</h3>
-      <div class="field">
-        <label for="join-party-id">Party link or ID</label>
-        <input id="join-party-id" type="text" name="party_id" required>
-      </div>
-      <p class="error" id="join-error" hidden></p>
-      <div style="display:flex; gap:10px; justify-content:flex-end;">
-        <button type="button" class="btn btn-ghost" id="cancel-join-btn">Cancel</button>
-        <button type="submit" class="btn btn-primary">Join</button>
       </div>
     </form>
   </dialog>

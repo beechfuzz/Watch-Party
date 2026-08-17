@@ -55,6 +55,12 @@ type Config struct {
 
 	// Party lifecycle
 	HostGracePeriod time.Duration
+	// PartyInactivityTimeout is how long a party can go with no play/pause/
+	// seek control and no member connecting/reconnecting before it's
+	// automatically ended -- cleanup for a party left running (e.g. everyone
+	// left without anyone clicking End Party, or the host's browser
+	// crashed) rather than lingering forever. See ARCHITECTURE.md §8.
+	PartyInactivityTimeout time.Duration
 
 	// Sync tuning
 	SyncSnapshotInterval time.Duration
@@ -130,6 +136,9 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if cfg.HostGracePeriod, err = getEnvDuration("HOST_GRACE_PERIOD_SECONDS", 20*time.Second); err != nil {
+		return nil, err
+	}
+	if cfg.PartyInactivityTimeout, err = getEnvDuration("PARTY_INACTIVITY_TIMEOUT", 48*time.Hour); err != nil {
 		return nil, err
 	}
 	if cfg.SyncSnapshotInterval, err = getEnvDuration("SYNC_SNAPSHOT_INTERVAL", 4*time.Second); err != nil {
