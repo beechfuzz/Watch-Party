@@ -158,4 +158,4 @@ New or reconnecting participants never try to replay everything that happened wh
 
 ## License
 
-Add a license of your choice before publishing this publicly — none is specified yet.
+[GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0).
