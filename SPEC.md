@@ -1,0 +1,224 @@
+# Watch Party — Project Spec
+
+> **Note on this document.** This is the original Claude Code project spec, updated after the build to reflect what was actually implemented. The original spec was never checked into this repository (it was supplied directly as the initiating prompt for the first build session) — this file is now its canonical, versioned home. Blocks marked **▶ As built** record where the implementation resolved something the original spec left open, or diverged from what the spec said, and why. Anything the spec asked for that isn't in the codebase is marked **✗ Not implemented**. Sections with no such marker are implemented as originally specified.
+
+## Project Overview
+
+Build **Watch Party**, an open-source, self-hosted, OCI-compliant container that lets Emby users watch the same media item in synchronized playback. It should feel like a native Emby companion app (in the spirit of Overseerr/Jellyseerr) — users log in with their existing Emby credentials, create or join a "party," and watch in sync with minimal drift.
+
+Prioritize **reliability, simplicity, and correctness over feature breadth**. This is a small-scale self-hosted tool (1–3 households, ≤20 concurrent users) — do not over-engineer for horizontal scaling, and do not add features not listed below without asking first.
+
+**Do not begin implementation until you have identified any unresolved architectural decisions that materially affect the system design.** Present those decisions and recommended options first. For decisions that do not materially affect architecture (e.g. exact folder layout, naming), choose the simplest reasonable implementation and document the choice — don't stop to ask about those.
+
+**Before writing any Emby integration code, inspect the current Emby API behavior/documentation directly** — do not assume or invent endpoint shapes, especially for the playback URL mechanism described below.
+
+> **▶ As built.** This step happened, but not the way it reads above: the sandbox this project was built in had an egress allowlist that didn't include the operator's Emby server, so a live proof-of-concept against a real server wasn't possible. With the operator's explicit agreement, the investigation was done via Emby's wiki documentation plus, for wire-level detail the wiki doesn't spell out, cross-checking Jellyfin's server source (a 2018 fork of Emby that still carries Emby-compatibility code). Every finding is marked with a confidence level and how it was confirmed. This is real, load-bearing risk, not a formality — see the Media Delivery Architecture section below for what's still unverified against a live server.
+
+**Record each material architectural decision in an `ARCHITECTURE.md` file** (or individual ADR documents), including the alternatives considered and the reason for the selected approach. This applies especially to: the Emby playback URL mechanism, the session implementation, the WebSocket protocol design, the synchronization algorithm, and the browser playback strategy.
+
+> **▶ As built.** A single `ARCHITECTURE.md` (not per-decision ADR files) — it covers all five areas called out here, plus several more that came up during and after the initial build (container privilege model, frontend redesign, party self-destruct, and a series of real-deployment bug postmortems). It's written incrementally, in build order, and is long; treat it as the primary source of "why," with this spec staying at the level of "what."
+
+## Tech Stack
+
+- **Backend:** Go (stdlib `net/http` + `nhooyr.io/websocket` or `gorilla/websocket`). No heavy web framework — stdlib routing is sufficient at this scale.
+- **Persistence:** SQLite via a pure-Go driver (`modernc.org/sqlite`) — no CGO, so the final binary stays statically linked. Use `golang-migrate` or a minimal hand-rolled migration runner for schema versioning.
+- **Frontend:** Server-rendered HTML + vanilla JavaScript. Use Alpine.js only if it materially simplifies the implementation; do not introduce a SPA framework (React/Vue/Svelte) or a frontend build pipeline. Keep client-side state minimal; the server's authoritative state is the single source of truth for playback — the client should be a thin renderer of it.
+- **Container:** Multi-stage Dockerfile producing a single static Go binary + static frontend assets, final stage on `distroless/static` or `scratch`. Must be OCI-compliant — no Docker-only assumptions (no Docker socket mounts; use an exposed `/healthz` endpoint rather than relying on Docker-specific healthcheck tooling), so it runs cleanly under Podman/podman-quadlet as well as Docker Compose.
+
+> **▶ As built — the library/tool choices this section left open.** `nhooyr.io/websocket` over `gorilla/websocket` (smaller surface, `context.Context`-native, no legacy `x/net` dependency — a genuine coin flip, not a decision with real stakes). `golang-migrate` over hand-rolling (its `database/sqlite` driver uses `modernc.org/sqlite` under the hood, confirmed by inspecting its import graph, so it doesn't reintroduce CGO). Alpine.js was **not** used — the frontend is plain vanilla JS throughout; it never reached a point where Alpine would have materially simplified anything. `distroless/static-debian12:nonroot` was the base image, which later needed its own workaround (see "Beyond the original spec" below) to support configurable `PUID`/`PGID` without giving up its no-shell property.
+
+## Media Delivery Architecture
+
+**Watch Party must not download, cache, store, transcode, or proxy media content.** It only coordinates playback state. The browser streams directly from the Emby server using the individual user's own Emby token — Watch Party's job is to hand the client the correct authenticated Emby playback URL, not to sit in the data path.
+
+This constraint held throughout — Watch Party's server never touches media bytes in the shipped implementation, confirmed by the fact that every playback-URL fix described below was a URL-construction/auth bug, never a "we need to proxy this after all" one.
+
+Rationale, since this is a deliberate architectural choice and Claude should not second-guess it: Emby already handles per-device direct-play-vs-transcode negotiation correctly; proxying media through Watch Party would require reimplementing Range/partial-content passthrough and (for transcoded/HLS content) manifest URL rewriting — a nontrivial subsystem that directly works against the "reliability and simplicity" goal, and would make Watch Party's own uptime a single point of failure for video delivery, not just sync coordination. The deployment target has Emby and Watch Party both reverse-proxied through the same Traefik instance and both already internet-reachable, so there is no network-topology reason to proxy media.
+
+- The synchronization layer only cares about `ItemId`, `position_ticks`, and playing/paused state — never codec, bitrate, resolution, container, or transcoding details. Let each user's browser negotiate playback quality with Emby independently.
+- ~~Before implementation, determine and document the exact Emby API flow for obtaining a browser-playable URL for an authenticated user...~~
+
+  > **▶ As built — the resolved playback URL mechanism.** This was the single largest area the original spec deliberately left open, and it took several rounds of real-deployment bug fixes (see below) to get right. As actually implemented:
+  >
+  > 1. **`POST /Items/{itemId}/PlaybackInfo`** is called first for any item about to be played, carrying a `DeviceProfile` describing what a generic modern browser's `<video>` element can actually decode natively (conservatively: H.264/AAC/VP9/AV1 in MP4/WebM; everything else routed to HLS transcoding). This is a resolved design choice, not something the spec anticipated: without a `DeviceProfile`, Emby answers `SupportsDirectPlay`/`SupportsDirectStream` based on raw server capability ("can I serve these bytes as-is"), which is nearly always yes — including for containers like `.mkv` that no browser can open regardless of the codec inside. Omitting this was the root cause of an early production failure (`MEDIA_ERR_SRC_NOT_SUPPORTED` on every playback attempt).
+  > 2. **Direct Play/Stream** (`SupportsDirectStream`/`SupportsDirectPlay` true): the client constructs `GET /Videos/{itemId}/stream.{container}?Static=true&MediaSourceId=...&PlaySessionId=...&api_key={AccessToken}` itself — Emby's `PlaybackInfo` response has no `DirectStreamUrl` field. `video.currentTime` maps 1:1 to the item's real position; no offset math needed.
+  > 3. **Transcoded/HLS** (`SupportsTranscoding` only): Emby's `PlaybackInfo` response, once given a `DeviceProfile`, returns its own `TranscodingUrl` (preferred over hand-building `master.m3u8`, since it already carries whatever the negotiation actually needs). The requesting user's own token is always the sole `api_key` on the final URL — Emby's `TranscodingUrl` sometimes arrives with its own `api_key` embedded already, and naively appending a second one produces two `api_key` params on the wire, which Emby rejects outright with a `401` rather than reconciling. The fix parses and overwrites (`url.Values.Set`) instead of concatenating.
+  > 4. **The `api_key` query parameter is the auth mechanism for both cases** — confirmed correct, since a `<video src>`/HLS player request can't set custom headers. Server-to-server calls (auth, `PlaybackInfo`, progress reporting) use the ordinary `X-Emby-Token` header instead, since those aren't constrained by that limitation.
+  > 5. **Range requests** work as needed for native `<video>` seeking on the direct-play/stream path — not independently re-verified against a live server beyond the smoke test noted below, but consistent with Emby's ASP.NET Core lineage.
+  > 6. **Mid-item transcode start position** — not anticipated by the original spec at all, and the single biggest source of real-deployment bugs (see below): a party already in progress needs Emby's transcode session to *start* at the current position (`StartTimeTicks` in the `PlaybackInfo` request), not at 0 followed by a client-side seek — otherwise a guest joining late waits for Emby to transcode-and-discard everything before their join point. Once that's done, Emby's resulting HLS timeline no longer starts at 0, so the client can't just do `video.currentTime = <absolute item position>` anymore. Rather than hardcode an assumption about Emby's exact timeline convention (tried once, was wrong for this deployment's Emby build), the client **calibrates the offset from observed reality**: it compares the loaded stream's actual `video.duration` against the item's known total duration once metadata is available, and derives the correction from that gap — a strictly more direct signal than comparing against the requested start time, which can't detect Emby silently snapping the start back to the nearest keyframe.
+  >
+  > **hls.js is vendored** (`web/static/js/vendor/hls.min.js`, pre-built, non-module `<script>`, no package manager at build time) to give Chrome/Firefox/Edge a JS demuxer for HLS — only Safari plays `.m3u8` natively in a bare `<video>` element. `player.js` feature-detects native support and only loads `Hls` when needed. This dependency wasn't anticipated by the original spec, which didn't distinguish direct-play from transcoded playback as a client-side concern.
+  >
+  > See `ARCHITECTURE.md` §0.2 and §5.1–§5.9 for the full investigation and bug-by-bug postmortem, including the exact wire-level confidence rating for each claim above.
+
+- **Before implementation, determine and document the exact Emby API flow for obtaining a browser-playable URL for an authenticated user** — which endpoint generates it, how the user's `AccessToken` is incorporated (query param, header, or session mechanism), how this differs between Direct Play and transcoded/HLS content, how Range requests are handled, and whether transcoded stream URLs carry their own additional auth requirements. Do not invent or assume a URL format.
+- Emby must permit the Watch Party origin through its CORS configuration where required for this to work from the browser. **A shared parent domain (e.g. `watchparty.example.com` and `emby.example.com`) does not eliminate cross-origin restrictions** — same-site and same-origin are different things, and CORS is very likely still required even with a shared parent domain. Document the actual CORS configuration needed in the README rather than assuming it away.
+
+  > **▶ As built — CORS is the one area still genuinely unresolved.** Emby's own documentation site and community forums were unreachable from the research environment, so this is the one finding *not* confirmed against any Emby-authored source — only forum-thread titles suggesting other operators have hit this, and Jellyfin's code-level CORS defaults (wildcard unless configured) as a loose proxy. The README documents concrete Traefik middleware to add non-credentialed CORS headers in front of Emby (safe to add regardless, since Watch Party authenticates media requests via `api_key`, not cookies — no `Access-Control-Allow-Credentials` needed) and states explicitly what to test live before trusting it: load a party, open the browser console, check for CORS errors on the `<video>`/hls.js requests. **This has not been verified against the operator's actual Emby server as of this writing.**
+
+- **▶ As built — server ↔ browser Emby address split, not anticipated by the spec.** A real deployment put Emby and Watch Party on a shared Docker/Podman network for server-to-server calls (`EMBY_SERVER_URL=http://emby:8096`, avoiding hairpin-NAT issues) — but that address is meaningless to a participant's browser, which needs Emby's actual LAN/public hostname to fetch playback URLs and HLS manifests directly. `emby.Client` gained a second, optional `EMBY_PUBLIC_URL` (defaults to `EMBY_SERVER_URL`) used only for browser-facing URLs. Not part of the original `.env.example` deliverable list; added because the single-URL design broke the first time internal/external addressing actually diverged. See `ARCHITECTURE.md` §5.2 and the README's "Internal vs. public Emby address" section.
+
+## Authentication & Security
+
+- Do **not** store Emby passwords. On login, proxy the credentials directly to the user's Emby server via `POST /Users/AuthenticateByName` and discard the plaintext password immediately after.
+- Use a **cryptographically random opaque session ID** (e.g. 256-bit) stored in an `HttpOnly`, `Secure`, `SameSite=Lax` cookie, associated server-side with the authenticated Emby user and their encrypted Emby `AccessToken`. ~~`Secure` is mandatory in production; provide a configurable development mode that permits non-Secure cookies for local `http://` testing (e.g. `http://192.168.x.x:8080`) — don't weaken the production requirement to accommodate this.~~
+
+  > **▶ As built — the `DEV_MODE` flag this asked for does not exist; it was built, then deliberately removed.** A first version did exactly what the spec describes: a deployment-wide `DEV_MODE` boolean flipping `Secure` for the whole process. That design has a real gap the spec didn't anticipate: a single Watch Party instance can legitimately be reachable at *multiple* origins simultaneously with different schemes at once (an external HTTPS domain through a reverse proxy, plus an internal-only HTTP LAN hostname with no TLS cert) — and a single global flag cannot get both right at the same time. The fix computes `Secure` **per request** (`internal/session.isSecureRequest`): true if `r.TLS != nil`, or if the request carries `X-Forwarded-Proto: https` (the standard reverse-proxy signal, trusted because the documented deployment model puts Watch Party behind one, never directly internet-reachable). This makes `DEV_MODE` unnecessary for its original purpose too — a bare `go run` over plain `http://localhost:8080` has no such header and is handled identically to the internal-LAN case, with zero configuration. See `ARCHITECTURE.md` §2.1 for the full trust-boundary reasoning.
+
+- Do not use JWTs, and do not introduce a session-signing secret unless the implementation actually needs to sign data (an opaque random ID stored server-side has nothing to sign). If CSRF protection ends up using a synchronizer-token pattern rather than double-submit-cookie, that may need its own key — evaluate at implementation time rather than assuming a `SESSION_SECRET` is required up front.
+
+  > **▶ As built.** Synchronizer-token pattern, resolved as the spec anticipated it might be: a second random 256-bit token generated at session creation, stored alongside the session row, echoed back via `X-CSRF-Token` and compared with a constant-time check. No `SESSION_SECRET` exists anywhere in this codebase.
+
+- Emby `AccessToken`s must be **encrypted at rest** using an application-level encryption key supplied via a `TOKEN_ENCRYPTION_KEY` environment variable. This key is never stored in SQLite.
+
+  > **▶ As built.** AES-256-GCM, `nonce (96 bits, random per call) || ciphertext || GCM tag`, base64-encoded for SQLite TEXT storage. GCM specifically (not a non-authenticated mode) so tampering/corruption surfaces as a decrypt error rather than silently handing Emby a garbage bearer token.
+
+- **Session lifecycle:** define an idle timeout and an absolute maximum session age (both configurable, e.g. `SESSION_IDLE_TIMEOUT`, `SESSION_MAX_AGE`), invalidate the session on logout, and invalidate the local session (forcing reauthentication) if the stored Emby token is rejected by Emby — do not silently retry a dead token indefinitely.
+- All media stream requests use **the requesting user's own Emby token** — never a shared service account. This is a hard requirement: it prevents Watch Party from becoming a permissions bypass.
+- **Media authorization must be re-validated on join, not just at party creation.** When a participant joins a party, Watch Party must confirm that *that specific user* has permission to access the party's Emby item before letting them connect — don't assume that because the host could access it, every participant can.
+- CSRF protection is required for all state-changing HTTP requests (create party, join party, transfer host, end party, logout).
+
+  > **▶ As built — "join" diverges from this list, deliberately.** Joining a party isn't a separate HTTP endpoint in this implementation; it happens as part of the WebSocket handshake itself (`GET /ws/parties/{id}`), which re-validates media authorization and is protected by Origin validation instead — browsers don't attach custom headers to a WS upgrade the way a synchronizer token needs. Every other action on this list (create party, transfer host, end party, logout) is a regular JSON POST and does carry `X-CSRF-Token`. See `ARCHITECTURE.md` §1.3.1.
+
+- Validate the WebSocket `Origin` header against the configured application origin(s) — do not accept arbitrary cross-origin WebSocket connections. Important given this runs behind a reverse proxy and may be internet-reachable.
+- Party IDs used in URLs must be cryptographically random (not sequential database IDs), so parties can't be enumerated by guessing.
+- Config for the Emby server URL is an environment variable (`EMBY_SERVER_URL`), not hardcoded, since this is meant to be portable across self-hosted deployments.
+- **Never log Emby passwords, AccessTokens, session IDs, cookies, Authorization headers, or fully authenticated playback URLs** — the debug-level sync logging described below must exclude these even at `LOG_LEVEL=debug`. This is a hard requirement, not a style preference: the authenticated playback URL discovered during Emby API investigation may itself embed a credential.
+
+  > **▶ As built — enforced by code-review discipline, not automated redaction.** `internal/logging` documents the rule at the package level but has no pattern-matching/redaction layer; every call site is expected to simply not pass these fields. This is a resolved implementation choice (automated secret-scrubbing on arbitrary log strings is its own unreliable subsystem), but it means the invariant currently depends on every future contributor (including Claude Code sessions) following it by hand — see the equivalent rule in `CLAUDE.md`.
+
+## Data Model (minimum viable)
+
+- `users` — Emby user ID, display name, encrypted Emby access token, last seen.
+- `parties` — random public ID, host user ID, media item ID (Emby `ItemId`), `duration_ticks` (retrieved and persisted from Emby at party creation as authoritative metadata), created_at, status (`created` / `active` / `ended` — **`ended` is a terminal state**: once a party transitions to `ended`, all WebSocket connections close and it can never return to `active`).
+
+  > **▶ As built — `created` exists in the schema's `CHECK` constraint but is never actually assigned.** A party goes straight from creation to `active`; there's no distinct staging step in this implementation (a party is immediately joinable the moment it's created). The status value is kept for conceptual completeness with this spec's stated lifecycle, not because any code path currently produces it.
+
+- `party_members` — party ID, user ID, joined_at, `last_connected_at`, connection status (`connected` / `disconnected` / `left` — see lifecycle notes below), `last_reported_position_ticks`, `last_reported_at` (throttling state for Emby progress reports).
+- `playback_state` — party ID, `position_ticks` (int64), `is_playing`, `sequence_number` (monotonically increasing per party), `server_timestamp`, `updated_by_user_id` (nullable), `updated_by_client_type` (`host` / `system` — disambiguates a user-driven change from a server-initiated one, such as the end-of-media transition, where `updated_by_user_id` is null).
+
+  > **▶ As built — one table this list omitted.** A `sessions` table (session ID, user ID, timestamps, CSRF token) also exists, since the Authentication & Security section above requires server-side session state this list didn't separately enumerate. Not a divergence — just an implied table made explicit.
+
+SQLite is fine for all of this at this scale — no need for Redis/Postgres. Party state should also be kept in-memory per active party (a `map[partyID]*PartyState` guarded by a mutex, or an actor-per-party goroutine) for low-latency broadcast, with SQLite as the durability layer.
+
+> **▶ As built.** Actor-per-party goroutine, not a mutex-guarded map of state — a `map[partyID]*Party` registry (guarded by a small mutex) exists only for lookup/creation/removal; each party's actual state mutation happens inside that party's own single goroutine, reading a buffered command channel. This gives strict command ordering "for free" rather than requiring hand-applied discipline at every call site the way a mutex-guarded struct would. See `ARCHITECTURE.md` §3.
+
+**Persistence exists for recovery and durability — party metadata, membership history, reconstructing party existence after a restart — not for maintaining perfect real-time state; the synchronization loop must never block on a SQLite write.** Cadence:
+
+- Event-driven state changes (play/pause/seek/host transfer) → persist immediately (but asynchronously — don't block the broadcast on the write completing).
+- Periodic playback snapshots → throttled persistence, not on every tick.
+- Party end → persist immediately.
+- Graceful shutdown → flush all active in-memory party state to SQLite before exit.
+- **Startup recovery:** on boot, query SQLite for any parties with `active` status and reconstruct their in-memory state (including `duration_ticks` and last-known `playback_state`) and WebSocket hub entries, with zero connected clients. This lets parties survive a container restart — participants reconnect and receive a fresh authoritative snapshot rather than the party being silently orphaned.
+
+## Canonical Units
+
+All server-side playback positions are represented as **Emby `PositionTicks`, `int64`, 100-nanosecond units** (`1 second = 10,000,000 ticks`). Browser media-element time (seconds, float) is converted to/from ticks only at the client boundary — never mix float-seconds and ticks in server-side logic.
+
+> **▶ As built — one addition, not a divergence.** The transcoded-playback offset calibration described above (Media Delivery Architecture) added a second conversion layer client-side (`itemPositionTicks`/`videoSeconds` helpers in `player.js`), since `video.currentTime` for a mid-item transcode session isn't simply `position_ticks / 10,000,000` anymore — it needs the calibrated offset applied first. For direct play/stream this offset is always 0 and the conversion is unchanged from what this section originally specified.
+
+## Synchronization Protocol
+
+This is the core of the project — get this right and tested before touching UI polish.
+
+- **Model: the server is authoritative for party playback state.** The host is the only participant authorized to *issue* playback control commands (`play`, `pause`, `seek`) — but the host's client is not itself the source of truth. The server validates, timestamps, sequences, applies, and broadcasts those commands to all participants. Authorization must be enforced server-side, not only hidden/disabled in the UI.
+- **Transport:** one WebSocket connection per client, one server-side broadcast hub per active party. Every message includes a `protocol_version` field for future compatibility.
+- **Message categories** — keep these conceptually distinct in the protocol design:
+  - *Control events* (host-only, authoritative state changes): `play`, `pause`, `seek`, `host_transfer`.
+  - *Lifecycle events*: `join`, `leave`.
+  - *Transport/control frames*: `ping`/`pong`/`heartbeat`, `clock_sync`, and `snapshot` (server → client, the complete authoritative state — sent on join, on reconnect, and periodically).
+- **Every authoritative state update (including `snapshot`) includes:** `position_ticks` (int64), `is_playing`, `server_timestamp`, and a monotonically increasing per-party `sequence_number`. Clients must reject any state update with a sequence number older than their current state — this prevents out-of-order delivery (e.g. a delayed `seek` arriving after a newer `play`, or a stale snapshot arriving after a newer one) from corrupting playback. `server_timestamp` must use a time representation suitable for elapsed-time calculations that is not affected by wall-clock adjustments such as NTP corrections — document the chosen implementation in `ARCHITECTURE.md`. Note: Go's monotonic clock reading is stripped once a `time.Time` is serialized (e.g. via RFC3339 formatting), so a serialized wall-clock timestamp sent over the WebSocket is not actually monotonic regardless of how it was obtained server-side. If wall-clock serialization (e.g. RFC3339Nano) is chosen for cross-language simplicity with JavaScript's `Date`, that is an acceptable, deliberate trade-off given this project's sub-second drift thresholds and typical NTP slewing behavior — but document it in `ARCHITECTURE.md` as a conscious simplification, not as a monotonic guarantee.
+
+  > **▶ As built.** RFC3339Nano wall-clock text, exactly the deliberate simplification this paragraph pre-authorized — documented in `ARCHITECTURE.md` §1.5, and reused for every stored timestamp column for consistency, not just the wire protocol.
+
+- **Permissions:**
+  - Host can: play, pause, seek, transfer host, end party.
+  - Participant can: join, leave, receive synchronization, report their own playback progress.
+  - Non-host playback controls must be disabled in the UI **and** rejected server-side if attempted.
+- **Local vs. remote events:** client-generated player events (e.g. the `<video>` element firing its own `play`/`pause`) that were caused by a server-issued synchronization command must **not** be echoed back to the server as new authoritative commands — this prevents feedback loops between server-driven state changes and the browser's native media element events.
+- **Clock sync:** on join and periodically thereafter, perform a lightweight clock-offset handshake (client sends `t0`; server records receive time `t1` and echoes `t1` + its own send time `t2`; client records receive time `t3`) to estimate both RTT and one-way clock offset:
+  - `RTT = (t3 - t0) - (t2 - t1)`
+  - `clock_offset ≈ ((t1 - t0) + (t2 - t3)) / 2`
+
+  This is meaningfully more accurate than assuming `one_way_latency = RTT / 2`, without needing NTP-level precision.
+- **Drift calculation:** given an authoritative state (`position_ticks`, `is_playing`, `server_timestamp`), a client's expected position is `authoritative_position + (now - authoritative_timestamp)` while playing (adjusted for clock offset) — not simply "time since the message was received."
+- **Drift correction:** server periodically broadcasts an authoritative snapshot (every 3–5s) alongside event-driven updates. If calculated drift is small (default ~300ms), correct by nudging local playback rate slightly rather than hard-seeking (avoids visible jumps); if drift exceeds a hard threshold (default ~1.5s), hard-seek. Playback-rate adjustments are **temporary corrections only** — once drift falls back below the soft threshold, the rate must smoothly return to exactly `1.0`, not linger slightly off-speed. Both drift thresholds, the snapshot interval, and the max playback-rate adjustment must be **configurable via environment variables** with sensible defaults (e.g. `SYNC_SNAPSHOT_INTERVAL`, `SYNC_SOFT_DRIFT_MS`, `SYNC_HARD_DRIFT_MS`, `SYNC_MAX_RATE_ADJUSTMENT`), not hardcoded magic numbers.
+- **Late join / reconnect:** a newly joined or reconnected client must never rely on replaying historical WebSocket events. It always receives a complete `snapshot` message on connect and synchronizes directly to it.
+- **Reconnection:** WS heartbeat/ping-pong to detect drops; exponential backoff reconnect on the client.
+- **Connection state vs. intent:** distinguish `connected` / `disconnected` / `left` rather than treating any WebSocket close as a departure. A dropped connection (network hiccup, tab backgrounded) is `disconnected`, not `left` — the `party_members` row is not deleted, and reconnection should restore the participant's place in the party. `left` only occurs on explicit user action (or party end).
+- **Party lifecycle:** `created` → `active` → `ended`, irreversible once `ended`. Host disconnecting does **not** immediately end the party or transfer host. On host disconnect, enter a **20-second grace period** (`HOST_GRACE_PERIOD_SECONDS`, default 20): if the host reconnects within that window, they retain host status; otherwise, host authority transfers deterministically to the currently-connected participant with the earliest `joined_at`. **Once host authority has transferred after the grace period expires, the former host returns as an ordinary participant and does not automatically reclaim host status on reconnecting** — this prevents flapping if the original host reconnects shortly after the new host has already taken over. Document this rule plainly in the README — it must be deterministic and testable.
+- **End of media:** the server is authoritative for detecting end-of-media, consistent with the rest of this design — **the host client's `ended` event is an observation, not an authoritative command.** The server treats `position_ticks >= duration_ticks` (using the party's persisted `duration_ticks`) as the actual end condition; a spurious `ended` event from one participant's browser (e.g. a stall or player bug) must not unilaterally terminate playback for everyone else. On reaching this condition, the server transitions playback state to paused/ended, broadcasts the terminal state to all participants (who stop at the end rather than looping or erroring), and triggers `POST /Sessions/Playing/Stopped` reporting for each participant (see Emby Playback Reporting below).
+- **Browser autoplay:** the UI must handle browser autoplay restrictions. A participant whose browser blocks programmatic `video.play()` must be presented with a clear "Start Playback" interaction; subsequent synchronized commands then operate normally.
+
+  > **▶ As built — this mechanism was built, then deliberately removed.** A custom overlay/button existed for exactly this purpose. Across several rounds of real-deployment bug reports, it repeatedly ended up desynced from reality (visible over already-playing video; absorbing clicks meant for the native controls sitting underneath it). Once native `<video controls>` were enabled unconditionally for every participant (see "Beyond the original spec" below), the browser's own native play button already satisfies the "requires a real user gesture" constraint this bullet exists for, with no custom code left to get out of sync. `programmaticPlay`'s autoplay-blocked case now just resets its internal state; there's no longer a distinct UI element for this. See `ARCHITECTURE.md` §5.10.
+
+- **Observability:** behind a `LOG_LEVEL=debug` flag, log per-event sync diagnostics (party ID, user ID, sequence, authoritative vs. client position, calculated drift, RTT, clock offset, action taken). This is what makes real-world drift issues debuggable after the fact — don't skip it.
+
+## Emby Playback Reporting
+
+In addition to the party-internal sync protocol, the server must report playback progress back to **each participant's own Emby account** — not just the host — so Emby's native "Continue Watching," resume points, and played/unplayed state stay accurate for everyone in the party. Use Emby's standard Sessions playback-reporting API, always with the reporting user's own token:
+
+- `POST /Sessions/Playing` — call when a user starts/joins playback, to register an active playback session for that user (ItemId, initial PositionTicks).
+- `POST /Sessions/Playing/Progress` — call periodically during playback (Emby's own convention is roughly every 10s, configurable via `EMBY_PROGRESS_INTERVAL`) with that user's current PositionTicks and IsPaused state. **Throttle this independently of the WebSocket sync cadence** — do not fire an Emby report on every drift-correction tick or party sync event.
+- `POST /Sessions/Playing/Stopped` — call on stop/leave/party end/end-of-media with the final PositionTicks, so Emby records the correct resume point.
+- **The PositionTicks reported for each user must be derived by the server from authoritative party state and that user's synchronization timing — not taken verbatim from client-supplied data.** A browser could otherwise report an arbitrary position (e.g. `0` or the item's full duration) and corrupt that user's real Emby watch history. Client-reported position may be used for diagnostics/drift measurement, but the Emby-facing report must be server-derived.
+- Emby itself decides when an item flips to "played" based on its own server-side watched-threshold setting — the app should never set played/watched status directly, only report position honestly and let Emby's existing logic handle it.
+- This must be per-user: each participant reports their own PositionTicks under their own token, even though playback is in lockstep — the goal is that everyone's individual watch history is accurate, not just the host's.
+- Treat this as a best-effort side channel: if a report to Emby fails or the Emby server is briefly unreachable, log and retry with backoff, but never block or degrade the party's playback sync over it.
+
+> **▶ As built.** Implemented as specified, using the real `PlaySessionId` captured when the browser is handed a playback URL (rather than minting a separate one purely for reporting, which would make Emby track a second phantom session). Backoff is a simple per-`(party, user)` skip-tick counter capped at 5 consecutive ticks — not exponential, but bounded, and never able to block or degrade sync since it's fully decoupled from the WebSocket hub via a subscribed event channel.
+
+## Non-Functional Requirements
+
+- Graceful shutdown on SIGTERM (drain WebSocket connections, flush in-memory party state to SQLite before exit) — this matters specifically for Podman quadlet deployments where systemd sends SIGTERM on stop/restart.
+- Structured logging (structured/JSON, not free-text) with request IDs where reasonable.
+- All config via environment variables; ship a `.env.example`.
+- No secrets in the image or in version control.
+- `/healthz` endpoint for container orchestration health checks.
+
+## Deliverables
+
+1. `Dockerfile` (multi-stage, OCI-compliant, minimal final image) — done.
+2. `docker-compose.yml` **and** an example Podman quadlet `.container` file — done (`watchparty.container`).
+3. `.env.example` (including `EMBY_SERVER_URL`, `TOKEN_ENCRYPTION_KEY`, `SESSION_IDLE_TIMEOUT`, `SESSION_MAX_AGE`, `HOST_GRACE_PERIOD_SECONDS`, sync tuning vars, `EMBY_PROGRESS_INTERVAL`) — done, plus variables this list didn't anticipate: `EMBY_PUBLIC_URL`, `PARTY_INACTIVITY_TIMEOUT`, `PUID`, `PGID` (see "Beyond the original spec").
+4. Database migration files (versioned up/down SQL, applied via `golang-migrate` or equivalent — never edit a past migration after it's shipped) — done (`internal/dbx/migrations`).
+5. README covering: setup, required Emby permissions, the documented Emby playback-URL/CORS mechanism and its deployment prerequisites, environment variables, architecture overview, host-transfer/party-lifecycle rules, and the drift-correction approach in plain language — done.
+6. Test coverage:
+   - **Unit tests:** drift calculation, clock-offset/latency estimation, state reconciliation, sequence-number ordering, stale-event/stale-snapshot rejection, host authorization, host transfer selection, host grace-period behavior — done, plus config/cryptox/session/embyreport/privdrop unit tests this list didn't separately call out.
+   - **Integration tests:** at minimum — host connects, participant connects, host plays, participant receives play, host seeks, participant seeks, host pauses, participant pauses, participant disconnects, participant reconnects and receives a correct snapshot; plus rapid-succession command ordering (e.g. seek immediately followed by play; pause immediately followed by seek) to confirm participants land on the correct final state via sequence numbers — done, against the real party actor (`internal/party/party_test.go`).
+
+**✗ Not implemented / unresolved:** the spec calls this project "open-source" throughout, but no license has actually been chosen — the README says so explicitly ("Add a license of your choice before publishing this publicly — none is specified yet."). Not a code gap, but worth flagging before any public release.
+
+## Suggested Build Order (do this in phases, not all at once)
+
+0. **Emby playback proof-of-concept, before any application code.** As a standalone throwaway Go program (not part of the main application): authenticate with the Emby server, request a playable URL for a media item using the resulting `AccessToken`, and determine whether that URL is temporary, whether it embeds a short-lived token, and how it behaves for both Direct Play and transcoded/HLS content. Render a minimal static HTML page with a `<video>` tag pointing at the URL to confirm it actually plays in a browser, paying close attention to any CORS failures. Record the findings as the first entry in `ARCHITECTURE.md` before writing any real Emby integration code.
+
+   > **▶ As built.** No live proof-of-concept ran — see the Project Overview note above. Findings were recorded as originally specified (`ARCHITECTURE.md` §0), just sourced from documentation research instead of a live throwaway program, with the operator's explicit agreement given the sandbox's network restriction.
+
+1. Scaffold Go module, project structure, `/healthz`, config loading
+2. Emby auth proxy + session handling (opaque cookie session, encrypted token storage)
+3. SQLite schema + migrations, data access layer
+4. WebSocket hub + sync protocol — sequence numbers, server-authoritative state, clock-offset handshake — get this solid and tested with a crude client before touching UI
+5. Minimal frontend: login, create/join party, video player pointed directly at Emby (after investigating and documenting the actual Emby playback-URL mechanism), wired to WS events
+6. Drift correction tuning + reconnection + late-join snapshot handling + host grace period
+7. Per-user Emby playback progress reporting (server-derived position, throttled, best-effort)
+8. Dockerfile + compose/quadlet examples
+9. README + docs pass
+
+Do not start with a polished frontend. Prove the synchronization engine works reliably (play/pause/seek/reconnect/late-join/host-transfer all correctly synced) with a bare-bones client first — the UI is comparatively easy once that's solid.
+
+> **▶ As built — a phase 10 happened that this build order didn't anticipate.** Phases 0–9 were followed in order, and the sync engine really was proven with a bare-bones frontend first (plain forms, no styling) before any visual design work — exactly as instructed. Afterward, once real-deployment use surfaced and fixed a series of playback bugs (§5 of `ARCHITECTURE.md`), a full visual redesign followed a supplied mockup: a dark, sidebar-navigated dashboard (login → home → party). This was requested and scoped after the initial build, not part of this spec's original deliverables — see "Beyond the original spec" below for what it did and didn't include.
+
+---
+
+## Beyond the original spec
+
+Everything in this section was built in response to real deployment experience or explicit follow-up requests, not called for anywhere above. Listed here rather than woven into the sections above so it's clear at a glance what grew past the original scope.
+
+- **Container privilege model (`PUID`/`PGID`).** The original spec's Dockerfile guidance (`distroless/static`/`scratch`, no shell) is silent on the common self-hosted convention of letting an operator choose the UID/GID the process runs as, to match a bind-mounted host directory's ownership. `internal/privdrop` adds this without giving up the no-shell property: the process starts as root only to `chown` its data directory and then permanently drops privileges (via `syscall.AllThreadsSyscall`, applied across every OS thread — a naive single-thread drop is a well-known Go footgun) to `PUID`/`PGID` (default `65532`, matching the image's old hardcoded value) before opening the database or listening on anything. See `ARCHITECTURE.md` §6.
+- **Automatic party self-destruct.** Nothing in the spec's party lifecycle covers a party nobody ever explicitly ends (everyone closes their tab; the host's browser dies). `Hub.SweepInactiveParties`, run on a 15-minute ticker, ends any party whose last playback control or member (re)connection is older than `PARTY_INACTIVITY_TIMEOUT` (default 48h). See `ARCHITECTURE.md` §8.
+- **Static asset cache-control.** Not a spec requirement, but a real deploy hit it: with no cache-busting filename hashing (a consequence of the "no build pipeline" constraint) and Go's `http.FileServer` sending no cache-lifetime header, some CDNs applied their own heuristic caching by file extension — two shipped bug fixes appeared not to work because a stale `player.js` was still being served. Every static asset and server-rendered page now gets `Cache-Control: no-cache` (revalidate-before-reuse, not `no-store`). See `ARCHITECTURE.md` §1.7.
+- **Frontend dashboard redesign.** A dark, sidebar-navigated dashboard (Space Grotesk/Inter/JetBrains Mono, vendored as WOFF2 — no CDN font loading) replaced the original bare-bones forms, following a supplied mockup. Two mockup sections were built for real (Active Parties, Your Parties — the data was already available from the hub, just needed a listing endpoint); most of the rest render with real visual chrome but are marked and inert.
+
+  **✗ Not implemented — visible in the UI as "coming soon," not actually built:** a chat panel, and browsable Parties/History/Settings destinations beyond Home. These exist in the supplied mockup this redesign followed, not in this spec — they're stubbed with a `.coming-soon-badge` and `pointer-events: none` rather than omitted (to avoid looking broken) or faked (to avoid misleading). See `ARCHITECTURE.md` §7.
+- **Native `<video controls>` instead of a custom transport bar.** The original spec didn't mandate custom UI, but the mockup this redesign followed implied one. After the custom "Start Playback" overlay mechanism (see above) repeatedly caused real bugs, native controls were enabled unconditionally for every participant instead — a deliberate trade of UI polish for removing an entire recurring bug class. See `ARCHITECTURE.md` §5.5, §5.8, §5.10.
