@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -157,6 +158,32 @@ func (c *testClient) do(method, path string, body any, csrf bool) (*http.Respons
 	return resp, out
 }
 
+// createPartyWithCurrentItem drives the multi-step flow that replaced the
+// old single-request "create with item_id" design: create a party by name,
+// add itemID to its (now-empty-at-creation) playlist, and select it as the
+// current item. Returns the new party's id.
+func createPartyWithCurrentItem(t *testing.T, c *testClient, name, itemID string) string {
+	t.Helper()
+	resp, created := c.do("POST", "/api/parties", map[string]string{"name": name}, true)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create party: status = %d body=%v", resp.StatusCode, created)
+	}
+	partyID, ok := created["party_id"].(string)
+	if !ok {
+		t.Fatalf("create party: missing party_id in response: %v", created)
+	}
+	resp2, added := c.do("POST", "/api/parties/"+partyID+"/playlist", map[string]string{"item_id": itemID}, true)
+	if resp2.StatusCode != http.StatusCreated {
+		t.Fatalf("add playlist item: status = %d body=%v", resp2.StatusCode, added)
+	}
+	playlistItemID := int64(added["id"].(float64))
+	resp3, playBody := c.do("POST", fmt.Sprintf("/api/parties/%s/playlist/%d/play", partyID, playlistItemID), nil, true)
+	if resp3.StatusCode != http.StatusNoContent {
+		t.Fatalf("select playlist item: status = %d body=%v", resp3.StatusCode, playBody)
+	}
+	return partyID
+}
+
 func TestLogin_Success(t *testing.T) {
 	_, srv := newTestApp(t)
 	c := newTestClientFor(t, srv)
@@ -214,7 +241,7 @@ func TestMe_WithValidSession(t *testing.T) {
 func TestCSRF_RejectedWithoutToken(t *testing.T) {
 	_, srv := newTestApp(t)
 	c := loginTestClient(t, srv)
-	resp, body := c.do("POST", "/api/parties", map[string]string{"item_id": "item1"}, false /* no csrf header */)
+	resp, body := c.do("POST", "/api/parties", map[string]string{"name": "Movie Night"}, false /* no csrf header */)
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("status = %d, body = %v, want 403", resp.StatusCode, body)
 	}
@@ -223,7 +250,7 @@ func TestCSRF_RejectedWithoutToken(t *testing.T) {
 func TestCSRF_AcceptedWithValidToken(t *testing.T) {
 	_, srv := newTestApp(t)
 	c := loginTestClient(t, srv)
-	resp, body := c.do("POST", "/api/parties", map[string]string{"item_id": "item1"}, true)
+	resp, body := c.do("POST", "/api/parties", map[string]string{"name": "Movie Night"}, true)
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("status = %d, body = %v", resp.StatusCode, body)
 	}
@@ -248,10 +275,12 @@ func TestLogout_InvalidatesSession(t *testing.T) {
 }
 
 func TestCreateAndGetParty_Roundtrip(t *testing.T) {
+	// A party now starts with a user-chosen name and an empty playlist --
+	// no Emby item is required (or possible) at creation time anymore.
 	_, srv := newTestApp(t)
 	c := loginTestClient(t, srv)
 
-	resp, created := c.do("POST", "/api/parties", map[string]string{"item_id": "item1"}, true)
+	resp, created := c.do("POST", "/api/parties", map[string]string{"name": "Movie Night"}, true)
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("create status = %d", resp.StatusCode)
 	}
@@ -261,19 +290,18 @@ func TestCreateAndGetParty_Roundtrip(t *testing.T) {
 	if resp2.StatusCode != http.StatusOK {
 		t.Fatalf("get status = %d body=%v", resp2.StatusCode, got)
 	}
-	if got["item_id"] != "item1" {
-		t.Errorf("got = %v", got)
+	if got["name"] != "Movie Night" {
+		t.Errorf("name = %v, want %q", got["name"], "Movie Night")
 	}
-	if got["duration_ticks"].(float64) != 1200000000 {
-		t.Errorf("duration_ticks = %v", got["duration_ticks"])
+	if got["item_id"] != "" && got["item_id"] != nil {
+		t.Errorf("item_id = %v, want empty (idle, nothing loaded yet)", got["item_id"])
 	}
 }
 
 func TestPlaybackURL_UsesRequestingUsersOwnToken(t *testing.T) {
 	_, srv := newTestApp(t)
 	c := loginTestClient(t, srv)
-	_, created := c.do("POST", "/api/parties", map[string]string{"item_id": "item1"}, true)
-	partyID := created["party_id"].(string)
+	partyID := createPartyWithCurrentItem(t, c, "Movie Night", "item1")
 
 	resp, got := c.do("GET", "/api/parties/"+partyID+"/playback-url", nil, false)
 	if resp.StatusCode != http.StatusOK {
@@ -305,8 +333,7 @@ func TestPlaybackURL_StartsAtPartysCurrentPosition(t *testing.T) {
 	app, srv := newTestAppWithEmby(t, emby.NewClient(fakeEmbySrv.URL))
 
 	c := loginTestClient(t, srv)
-	_, created := c.do("POST", "/api/parties", map[string]string{"item_id": "item1"}, true)
-	partyID := created["party_id"].(string)
+	partyID := createPartyWithCurrentItem(t, c, "Movie Night", "item1")
 
 	p, ok := app.Hub.Get(partyID)
 	if !ok {
@@ -331,11 +358,101 @@ func TestPlaybackURL_StartsAtPartysCurrentPosition(t *testing.T) {
 	}
 }
 
+// TestPlaybackURL_ReAuthorizedPerCurrentItem covers the playlist-era
+// version of "media authorization must be re-validated per participant":
+// unlike the old single-item design, the current item can change after
+// join, so this re-check must fire again at handlePlaybackURL every time
+// it does -- and it must be per-participant, not party-wide. Alice (the
+// host) is denied Emby access to the new item; Bob, who joined earlier and
+// has separate access, must be unaffected.
+func TestPlaybackURL_ReAuthorizedPerCurrentItem(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/Users/AuthenticateByName", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"AccessToken": "fake-token",
+			"User":        map[string]string{"Id": "user-alice", "Name": "Alice"},
+		})
+	})
+	mux.HandleFunc("/Users/user-alice/Items/item1", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"Id": "item1", "Name": "Movie", "RunTimeTicks": int64(1200000000)})
+	})
+	mux.HandleFunc("/Users/user-alice/Items/item2", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"Id": "item2", "Name": "Show", "RunTimeTicks": int64(600000000)})
+	})
+	mux.HandleFunc("/Items/item1/PlaybackInfo", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"PlaySessionId": "sess1",
+			"MediaSources":  []map[string]any{{"Id": "src1", "Container": "mp4", "SupportsDirectStream": true}},
+		})
+	})
+	mux.HandleFunc("/Items/item2/PlaybackInfo", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Emby-Token") == "fake-token" {
+			// Alice specifically cannot access item2 (parental control,
+			// per-user library restriction, etc).
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"PlaySessionId": "sess2",
+			"MediaSources":  []map[string]any{{"Id": "src2", "Container": "mp4", "SupportsDirectStream": true}},
+		})
+	})
+	mux.HandleFunc("/Sessions/Playing", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) })
+	fakeEmbySrv := httptest.NewServer(mux)
+	t.Cleanup(fakeEmbySrv.Close)
+
+	app, appSrv := newTestAppWithEmby(t, emby.NewClient(fakeEmbySrv.URL))
+	alice := loginTestClient(t, appSrv)
+	partyID := createPartyWithCurrentItem(t, alice, "Movie Night", "item1")
+
+	if resp, got := alice.do("GET", "/api/parties/"+partyID+"/playback-url", nil, false); resp.StatusCode != http.StatusOK {
+		t.Fatalf("alice item1 playback-url: status = %d body=%v", resp.StatusCode, got)
+	}
+
+	bobToken, err := app.TokenCipher.Encrypt("bob-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Store.UpsertUser(context.Background(), "user-bob", "Bob", bobToken, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	bob := newTestClientFor(t, appSrv)
+	rec := httptest.NewRecorder()
+	fakeReq := httptest.NewRequest("POST", "/", nil)
+	sess, err := app.Sessions.Create(context.Background(), rec, fakeReq, "user-bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ck := range rec.Result().Cookies() {
+		bob.http.Jar.SetCookies(nil, []*http.Cookie{ck})
+	}
+	bob.csrfToken = sess.CSRFToken
+
+	// Host switches the party's current item to item2.
+	respAdd, added := alice.do("POST", "/api/parties/"+partyID+"/playlist", map[string]string{"item_id": "item2"}, true)
+	if respAdd.StatusCode != http.StatusCreated {
+		t.Fatalf("add item2: status = %d body=%v", respAdd.StatusCode, added)
+	}
+	playlistItemID := int64(added["id"].(float64))
+	respPlay, playBody := alice.do("POST", fmt.Sprintf("/api/parties/%s/playlist/%d/play", partyID, playlistItemID), nil, true)
+	if respPlay.StatusCode != http.StatusNoContent {
+		t.Fatalf("select item2: status = %d body=%v", respPlay.StatusCode, playBody)
+	}
+
+	// Alice is now denied for the new current item...
+	if resp, got := alice.do("GET", "/api/parties/"+partyID+"/playback-url", nil, false); resp.StatusCode == http.StatusOK {
+		t.Errorf("alice should be denied playback of item2, got 200: %v", got)
+	}
+	// ...but Bob, who has separate access, still gets a real playback URL.
+	if resp, got := bob.do("GET", "/api/parties/"+partyID+"/playback-url", nil, false); resp.StatusCode != http.StatusOK {
+		t.Fatalf("bob item2 playback-url: status = %d body=%v", resp.StatusCode, got)
+	}
+}
+
 func TestListParties_ReturnsActivePartySummary(t *testing.T) {
 	_, srv := newTestApp(t)
 	c := loginTestClient(t, srv)
-	_, created := c.do("POST", "/api/parties", map[string]string{"item_id": "item1"}, true)
-	partyID := created["party_id"].(string)
+	partyID := createPartyWithCurrentItem(t, c, "Movie Night", "item1")
 
 	resp, got := c.do("GET", "/api/parties", nil, false)
 	if resp.StatusCode != http.StatusOK {
@@ -369,7 +486,7 @@ func TestListParties_ReturnsActivePartySummary(t *testing.T) {
 func TestListParties_EndedPartyExcluded(t *testing.T) {
 	_, srv := newTestApp(t)
 	c := loginTestClient(t, srv)
-	_, created := c.do("POST", "/api/parties", map[string]string{"item_id": "item1"}, true)
+	_, created := c.do("POST", "/api/parties", map[string]string{"name": "Movie Night"}, true)
 	partyID := created["party_id"].(string)
 
 	if resp, body := c.do("POST", "/api/parties/"+partyID+"/end", nil, true); resp.StatusCode != http.StatusNoContent {
@@ -414,8 +531,7 @@ func TestGetParty_IncludesItemTitle(t *testing.T) {
 	// own access check, at no extra Emby round trip.
 	_, srv := newTestApp(t)
 	c := loginTestClient(t, srv)
-	_, created := c.do("POST", "/api/parties", map[string]string{"item_id": "item1"}, true)
-	partyID := created["party_id"].(string)
+	partyID := createPartyWithCurrentItem(t, c, "Movie Night", "item1")
 
 	resp, got := c.do("GET", "/api/parties/"+partyID, nil, false)
 	if resp.StatusCode != http.StatusOK {
@@ -441,7 +557,7 @@ func TestGetParty_UnknownID_404(t *testing.T) {
 func TestEndParty_OnlyHostAllowed(t *testing.T) {
 	app, srv := newTestApp(t)
 	c := loginTestClient(t, srv)
-	_, created := c.do("POST", "/api/parties", map[string]string{"item_id": "item1"}, true)
+	_, created := c.do("POST", "/api/parties", map[string]string{"name": "Movie Night"}, true)
 	partyID := created["party_id"].(string)
 
 	// seed a second user directly and issue them a session to simulate a
@@ -469,10 +585,201 @@ func TestEndParty_OnlyHostAllowed(t *testing.T) {
 	}
 }
 
+// bobSession creates a second user directly (bypassing the fake Emby's
+// alice-only login) and returns a testClient authenticated as them, for
+// tests that need a non-host participant.
+func bobSession(t *testing.T, app *App, srv *httptest.Server) *testClient {
+	t.Helper()
+	if err := app.Store.UpsertUser(context.Background(), "user-bob", "Bob", "enc", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	c := newTestClientFor(t, srv)
+	rec := httptest.NewRecorder()
+	fakeReq := httptest.NewRequest("POST", "/", nil)
+	sess, err := app.Sessions.Create(context.Background(), rec, fakeReq, "user-bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ck := range rec.Result().Cookies() {
+		c.http.Jar.SetCookies(nil, []*http.Cookie{ck})
+	}
+	c.csrfToken = sess.CSRFToken
+	return c
+}
+
+func TestCreateParty_SettingsDefaultWhenOmitted(t *testing.T) {
+	_, srv := newTestApp(t)
+	c := loginTestClient(t, srv)
+	resp, created := c.do("POST", "/api/parties", map[string]string{"name": "Movie Night"}, true)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create status = %d body=%v", resp.StatusCode, created)
+	}
+	partyID := created["party_id"].(string)
+
+	resp2, got := c.do("GET", "/api/parties/"+partyID, nil, false)
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("get status = %d body=%v", resp2.StatusCode, got)
+	}
+	if got["auto_advance"] != true || got["show_next_dialog"] != true || got["autoplay_enabled"] != true {
+		t.Errorf("default settings not all true: %v", got)
+	}
+	if got["autoplay_delay_seconds"].(float64) != 5 {
+		t.Errorf("autoplay_delay_seconds = %v, want 5", got["autoplay_delay_seconds"])
+	}
+}
+
+func TestCreateParty_SettingsRespectedWhenProvided(t *testing.T) {
+	_, srv := newTestApp(t)
+	c := loginTestClient(t, srv)
+	resp, created := c.do("POST", "/api/parties", map[string]any{
+		"name": "Movie Night", "auto_advance": false, "show_next_dialog": false,
+		"autoplay_enabled": false, "autoplay_delay_seconds": 12,
+	}, true)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create status = %d body=%v", resp.StatusCode, created)
+	}
+	partyID := created["party_id"].(string)
+
+	resp2, got := c.do("GET", "/api/parties/"+partyID, nil, false)
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("get status = %d body=%v", resp2.StatusCode, got)
+	}
+	if got["auto_advance"] != false || got["show_next_dialog"] != false || got["autoplay_enabled"] != false {
+		t.Errorf("provided settings not respected: %v", got)
+	}
+	if got["autoplay_delay_seconds"].(float64) != 12 {
+		t.Errorf("autoplay_delay_seconds = %v, want 12", got["autoplay_delay_seconds"])
+	}
+}
+
+func TestUpdatePartySettings_OnlyHostAllowed(t *testing.T) {
+	app, srv := newTestApp(t)
+	alice := loginTestClient(t, srv)
+	resp, created := alice.do("POST", "/api/parties", map[string]string{"name": "Movie Night"}, true)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create: status = %d", resp.StatusCode)
+	}
+	partyID := created["party_id"].(string)
+	bob := bobSession(t, app, srv)
+
+	body := map[string]any{
+		"name": "Bob's Name", "auto_advance": false, "show_next_dialog": false,
+		"autoplay_enabled": false, "autoplay_delay_seconds": 3,
+	}
+	if resp, respBody := bob.do("PUT", "/api/parties/"+partyID+"/settings", body, true); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("bob update settings: status = %d body=%v, want 403", resp.StatusCode, respBody)
+	}
+
+	body["name"] = "Alice's Name"
+	if resp, respBody := alice.do("PUT", "/api/parties/"+partyID+"/settings", body, true); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("alice update settings: status = %d body=%v", resp.StatusCode, respBody)
+	}
+
+	resp2, got := alice.do("GET", "/api/parties/"+partyID, nil, false)
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("get status = %d body=%v", resp2.StatusCode, got)
+	}
+	if got["name"] != "Alice's Name" {
+		t.Errorf("name = %v, want %q", got["name"], "Alice's Name")
+	}
+	if got["auto_advance"] != false || got["autoplay_delay_seconds"].(float64) != 3 {
+		t.Errorf("settings not applied: %v", got)
+	}
+}
+
+func TestUpdatePartySettings_RejectsNonPositiveDelay(t *testing.T) {
+	_, srv := newTestApp(t)
+	c := loginTestClient(t, srv)
+	_, created := c.do("POST", "/api/parties", map[string]string{"name": "Movie Night"}, true)
+	partyID := created["party_id"].(string)
+
+	body := map[string]any{
+		"name": "Movie Night", "auto_advance": true, "show_next_dialog": true,
+		"autoplay_enabled": true, "autoplay_delay_seconds": 0,
+	}
+	resp, got := c.do("PUT", "/api/parties/"+partyID+"/settings", body, true)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%v, want 400", resp.StatusCode, got)
+	}
+}
+
+func TestPlaylistMutation_OnlyHostAllowed(t *testing.T) {
+	app, srv := newTestApp(t)
+	alice := loginTestClient(t, srv)
+	resp, created := alice.do("POST", "/api/parties", map[string]string{"name": "Movie Night"}, true)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create: status = %d", resp.StatusCode)
+	}
+	partyID := created["party_id"].(string)
+	bob := bobSession(t, app, srv)
+
+	// Non-host cannot add.
+	if resp, body := bob.do("POST", "/api/parties/"+partyID+"/playlist", map[string]string{"item_id": "item1"}, true); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("bob add: status = %d body=%v, want 403", resp.StatusCode, body)
+	}
+
+	// Host adds two items.
+	resp2, itemA := alice.do("POST", "/api/parties/"+partyID+"/playlist", map[string]string{"item_id": "item1"}, true)
+	if resp2.StatusCode != http.StatusCreated {
+		t.Fatalf("alice add: status = %d body=%v", resp2.StatusCode, itemA)
+	}
+	itemAID := int64(itemA["id"].(float64))
+
+	// Non-host cannot select what plays.
+	if resp, body := bob.do("POST", fmt.Sprintf("/api/parties/%s/playlist/%d/play", partyID, itemAID), nil, true); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("bob select: status = %d body=%v, want 403", resp.StatusCode, body)
+	}
+
+	// Non-host cannot reorder.
+	if resp, body := bob.do("PUT", "/api/parties/"+partyID+"/playlist/order", map[string]any{"ordered_ids": []int64{itemAID}}, true); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("bob reorder: status = %d body=%v, want 403", resp.StatusCode, body)
+	}
+
+	// Non-host cannot remove.
+	if resp, body := bob.do("DELETE", fmt.Sprintf("/api/parties/%s/playlist/%d", partyID, itemAID), nil, true); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("bob remove: status = %d body=%v, want 403", resp.StatusCode, body)
+	}
+
+	// Host can do all of the above.
+	if resp, body := alice.do("POST", fmt.Sprintf("/api/parties/%s/playlist/%d/play", partyID, itemAID), nil, true); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("alice select: status = %d body=%v", resp.StatusCode, body)
+	}
+
+	// Removing the now-current item is rejected regardless of who asks.
+	if resp, body := alice.do("DELETE", fmt.Sprintf("/api/parties/%s/playlist/%d", partyID, itemAID), nil, true); resp.StatusCode != http.StatusConflict {
+		t.Fatalf("remove current item: status = %d body=%v, want 409", resp.StatusCode, body)
+	}
+}
+
+func TestGetPlaylist_ListsResolvedItems(t *testing.T) {
+	_, srv := newTestApp(t)
+	c := loginTestClient(t, srv)
+	partyID := createPartyWithCurrentItem(t, c, "Movie Night", "item1")
+
+	resp, got := c.do("GET", "/api/parties/"+partyID+"/playlist", nil, false)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d body=%v", resp.StatusCode, got)
+	}
+	items, ok := got["items"].([]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("items = %v, want exactly one entry", got["items"])
+	}
+	entry := items[0].(map[string]any)
+	if entry["title"] != "Movie" {
+		t.Errorf("title = %v, want %q", entry["title"], "Movie")
+	}
+	if entry["is_current"] != true {
+		t.Errorf("is_current = %v, want true (this item was selected as current)", entry["is_current"])
+	}
+	if entry["restricted"] != false {
+		t.Errorf("restricted = %v, want false", entry["restricted"])
+	}
+}
+
 func TestWebSocket_OriginRejected(t *testing.T) {
 	_, srv := newTestApp(t)
 	c := loginTestClient(t, srv)
-	_, created := c.do("POST", "/api/parties", map[string]string{"item_id": "item1"}, true)
+	_, created := c.do("POST", "/api/parties", map[string]string{"name": "Movie Night"}, true)
 	partyID := created["party_id"].(string)
 
 	wsURL := strings.Replace(srv.URL, "http://", "http://", 1) + "/ws/parties/" + partyID

@@ -272,3 +272,120 @@ The original frontend (§1.6-era) was deliberately minimal — plain forms, no s
 **Why no new database column.** Both signals above were already being persisted for unrelated reasons (sync protocol state, member-list UI) — `Hub.lastActivityAt` just reads them back and takes the max, rather than introducing a dedicated `last_activity_at` tracked separately. This also makes the mechanism restart-safe for free: since it's computed from already-persisted, already-recovered data rather than an in-memory-only timer, a container restart can't accidentally reset an already-nearly-stale party's clock back to zero.
 
 **Where the sweep runs.** `Hub.SweepInactiveParties(ctx, maxIdle)` iterates every party the `Hub` currently holds, computes each one's last activity, and calls the existing `Hub.EndParty` (the same path a host's own "End party" click goes through — no separate/parallel termination logic to keep in sync) for anything past `maxIdle`. `cmd/server/main.go` runs this on a plain `time.Ticker` loop (`partyInactivitySweepInterval`, 15 minutes — deliberately not itself configurable, since 15 minutes of imprecision against a multi-hour timeout is immaterial) alongside the existing per-user Emby-progress-reporting loop, both stopped via the same shutdown-context pattern. `PARTY_INACTIVITY_TIMEOUT` (default `48h`) is the operator-configurable threshold.
+
+---
+
+## 9. Playlist-based parties
+
+**The decision to make.** The original design locked a party to exactly one Emby item, chosen at creation and fixed for the party's whole lifetime (`parties.item_id`/`duration_ticks`, immutable fields on the party actor). The requested change — create a party by name only, add media afterward through a browsable playlist, advance automatically at end-of-media — touches three of this project's hard invariants at once: server-authoritative playback state (an item change is itself an authoritative state transition, not a side detail), per-participant Emby re-authorization (written under "one fixed item," which a playlist breaks), and "no shared token, ever" (a new library-browsing surface needs its own answer to who's making Emby calls with what token). Five things were decided; each is covered below.
+
+### 9.1 End-of-media → playlist advance, reusing the existing actor/sequence machinery
+
+`party.Party` used to expose `ItemID`/`DurationTicks` as fields set once in `newParty` and never touched again. They're gone; in their place, the actor carries **do()-serialized mutable state** exactly like `state State` already was — a `current *currentItem` (nil means idle: nothing loaded) and a `playlist []dbx.PlaylistItem` cache (loaded at construction/recovery, mutated by the new playlist actor methods, mirrored to `playlist_items`).
+
+`checkEndOfMedia` used to do `state = {PositionTicks: DurationTicks, IsPlaying: false, ...}` and broadcast a `pause`. It now looks up `nextPlaylistItemAfter(current.PlaylistItemID)`:
+- **Found** → advance: new `current`, `state = {0, true, seq+1, now, nil, system}`. Deliberately auto-continues playing rather than requiring the host to press play again per item — a playlist is a queue that plays through, and this is still entirely server-decided (`ClientTypeSystem`), consistent with "the host client's `ended` event is an observation, not an authoritative command."
+- **Not found (queue exhausted)** → idle: `current = nil`, `state = {0, false, seq+1, now, nil, system}`. No new "ended" status was needed: idle is already the state a freshly-created, empty-playlist party starts in under the new create flow, so end-of-playlist just returns to it.
+
+Both paths go through one new helper, `transitionCurrent(next *currentItem, playing bool, byUserID *string, clientType dbx.ClientType)`, shared with the host-explicit case (`SelectCurrentItem`, §9.3) — one code path for every way the current item can change, not three. It broadcasts a full `snapshot` (not `broadcastControl`) since `ItemID`/`DurationTicks` only live on `SnapshotPayload`, and — critically — bumps the *same* `state.SequenceNumber` counter every other authoritative change uses. This was the one design question worth pausing on: does an item transition need its own numbering/staleness scheme? No — because it's still just another mutation of `p.state`, the existing client-side `IsStale` rejection (delayed message with an older sequence number is dropped) already protects a delayed pre-transition snapshot from clobbering a newer item transition, for free.
+
+**Removing the currently-playing item is rejected outright** (`ErrCannotRemoveCurrentItem`), not implicitly resolved by auto-advancing or going idle — the host must explicitly choose what happens next. A smaller, more predictable surface than guessing what the host wanted.
+
+### 9.2 Media re-authorization: the check already lives at the right place, it just needed to fire more often
+
+The old join-time check (`handleGetParty`/`handleWebSocket` calling `Emby.GetItem` against the party's one fixed item) assumed there was nothing to re-check later. With a playlist, the current item changes after join — but the natural re-validation point already existed and needed zero new authorization code: **`handlePlaybackURL`**, which every client already calls, per-user, with that user's own token, any time it needs a stream URL — on join, on reconnect, and now on every item transition too, since a new item always needs a new URL. `Emby.GetPlaybackURL` → `PlaybackInfo` already rejects an item a user can't see; that rejection now surfaces per participant, per item, exactly at the moment it matters, with no party-wide side effect — one participant being denied item B doesn't touch anyone else still watching it.
+
+The join-time gate didn't disappear — `handleGetParty`/`handleWebSocket` still run it — but it's now conditional on `snap.ItemID != ""`. An idle party (nothing loaded, true of every party immediately after creation now) has nothing to authorize against yet; the check simply resumes mattering once there is a current item.
+
+**Playlist metadata is a smaller privacy question, decided the same way `handleListParties` already decided it.** `GET /api/parties/{id}/playlist` resolves each item's title/poster using the *requesting viewer's own token*. An item that viewer can't access is shown as a generic "Restricted item" placeholder rather than its real title (a metadata leak about content they're not authorized to know exists) or silently omitted (an unexplained gap in the queue's order).
+
+### 9.3 Playlist mutation authorization: host-only
+
+Presented to the operator as a real decision (add-only-by-anyone and fully-open alternatives were both on the table) rather than assumed. **Decided: host-only**, for add/remove/reorder alike, plus `SelectCurrentItem` ("play this now") as an extension of existing play-authority. This adds zero new authorization concepts — `AddPlaylistItem`/`RemovePlaylistItem`/`ReorderPlaylist`/`SelectCurrentItem` are gated exactly like `HandleControl`/`HandleHostTransfer` already were (`ErrNotHost` if `userID != p.hostUserID`), rather than introducing a "participant may mutate shared state" tier that doesn't exist anywhere else in this codebase. The HTTP handler for adding an item checks host status *before* decrypting a token or calling Emby (`handleAddPlaylistItem`), not just inside the actor — a non-host's request shouldn't cost a round trip it's going to be rejected regardless of.
+
+Unlike `HandleControl`/`HandleHostTransfer`, `AddPlaylistItem`/`RemovePlaylistItem`/`ReorderPlaylist` need a SQLite write to complete (to hand back an assigned id/position, or to prevent an in-memory cache update from outrunning a write that ends up failing) — but the codebase's rule that party-state mutation never blocks on synchronous IO still applies just as much to an occasional playlist edit as it does to the hot play/pause/seek path. Each of these methods dispatches through the actor **twice**: once (fast, IO-free) to authorize, then the SQLite write happens in the calling goroutine outside `do()`, then a second fast dispatch applies the result to `p.playlist` and broadcasts. This leaves a small, harmless window where the party could end or the host could change between the two dispatches — the same order of imprecision this codebase already accepts around `CurrentPositionTicks` — in exchange for never letting a disk write stall sync broadcasts for everyone else in the party.
+
+### 9.4 The library browser: backend endpoint, not direct-to-Emby — a deliberate departure from the playback-URL pattern
+
+The existing design has exactly one case where the browser talks to Emby directly: the constructed media stream URL, for two specific reasons (§0.2, §5) — a `<video src>`/hls.js request can't set custom headers (forcing query-param `api_key` auth), and proxying media *bytes* would mean reimplementing Range/HLS-manifest passthrough, precisely the complexity the "no proxy" invariant exists to avoid.
+
+**Neither reason applies to a JSON search/browse call.** A `fetch()` can set headers freely; item metadata responses are tiny. So `GET /api/emby/items` goes through the Go backend, using the requester's own decrypted token — the same shape as `GetItem`/`PlaybackInfo`/`Sessions/Playing*`, all of which already go through the backend. The library browser is architecturally closer to `GetItem` than to the stream URL; treating it like the stream URL would only widen the one CORS surface this project has already spent five bug-fix rounds getting right (§5.1–§5.9) for no benefit, and would duplicate Emby API knowledge (pagination, filter mapping) into vanilla JS with no build step, which §1.6 already declined to do for anything beyond ~150 lines of stable sync math.
+
+**Poster images are the deliberate exception, and they follow the stream-URL pattern on purpose.** An `<img src>` has the same "no custom headers" constraint a `<video src>` does, and a thumbnail JPEG isn't what the "no proxy" invariant is protecting (that invariant is about streaming/Range/transcoding, not a few KB of poster art). So `GET /api/emby/items` returns a ready-to-use, `api_key`-bearing poster URL per item (`emby.Client.ImageURL`, built the same way `GetPlaybackURL` builds a stream URL, via `publicBaseURL`), and `<img>` tags hit Emby directly for the bytes — consistent with the existing design, not a deviation from it.
+
+`emby.ItemsQuery`/`ListItems` cover the four browser tabs (`IncludeItemTypes=Movie`/`Series`, `SortBy=DateCreated&SortOrder=Descending` for Recently Added, `Filters=IsFavorite` for Favorites) plus free-text search (`SearchTerm`). Endpoint shape is new, unverified-against-a-live-server research, in the same spirit as the rest of `internal/emby` (§0) — treat it accordingly until confirmed.
+
+### 9.5 Schema
+
+```sql
+CREATE TABLE playlist_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    party_id TEXT NOT NULL REFERENCES parties(id) ON DELETE CASCADE,
+    item_id TEXT NOT NULL,              -- Emby ItemId
+    duration_ticks INTEGER NOT NULL,    -- fetched from Emby at add-time, authoritative
+    position INTEGER NOT NULL,          -- 0-based order within the party's queue
+    added_by_user_id TEXT NOT NULL REFERENCES users(id),
+    added_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX idx_playlist_items_party_position ON playlist_items(party_id, position);
+
+ALTER TABLE parties ADD COLUMN name TEXT NOT NULL DEFAULT '';
+ALTER TABLE parties ADD COLUMN current_playlist_item_id INTEGER REFERENCES playlist_items(id) ON DELETE SET NULL;
+ALTER TABLE parties DROP COLUMN item_id;
+ALTER TABLE parties DROP COLUMN duration_ticks;
+```
+
+`parties.item_id`/`duration_ticks` are dropped outright, not left vestigial — "current item" lives solely as `current_playlist_item_id` pointing into `playlist_items` (which also carries that item's own `duration_ticks`, fetched once at add-time), so there's exactly one source of truth instead of two that could drift apart. `playlist_items.id` is a plain autoincrement integer, not a crypto-random ID like party/session IDs: it's never used unguessably on its own (always scoped under `/api/parties/{partyID}/playlist/{id}`, which already requires party membership to reach), so the extra randomness `idgen` provides elsewhere buys nothing here. `ReorderPlaylistItems` writes new positions through a temporary negative range first (`UPDATE ... SET position = -(i+1)`, then `= i`) rather than directly — `idx_playlist_items_party_position`'s unique index isn't deferrable in SQLite, so writing final positions one row at a time would collide with whatever row currently holds the destination position on anything but an append (a plain two-item swap is enough to trigger it).
+
+**Wire protocol.** A new `wsproto.MsgPlaylistUpdated` message is broadcast on add/remove/reorder (current-item changes already go through the existing `snapshot` broadcast, which already carries `ItemID`/`DurationTicks`). Its payload is deliberately just the raw ordered `{id, item_id, position}` rows — the party actor has no Emby access, by design, so it can't resolve titles itself. Clients treat it as an invalidation signal and re-`GET /api/parties/{id}/playlist`, which resolves human-facing metadata under the *viewer's own* token (§9.2) — simpler than diffing/optimizing client-side, and appropriate at this project's scale.
+
+### 9.6 Frontend
+
+`player.js` used to fetch a playback URL exactly once, at page load, on the assumption that the item never changes. It now tracks `currentItemId` and re-fetches (`loadCurrentItem`) whenever a snapshot's `item_id` differs from what's currently loaded — including the idle case (`item_id === ""`), which shows a placeholder over the video element rather than leaving a frozen or empty `<video>`. One consequence worth flagging: `recalibrateAndReseek`'s `{ once: true }` `loadedmetadata`/`canplay` listeners (§5.8 — deliberately one-shot, since `canplay` refires on every stall recovery and re-arming per stall caused a real reseek-loop bug) have to be re-armed on every new item load now, not registered once at module scope — `attachSource` re-registers them each call, since each new item's stream needs its own calibration pass.
+
+A new `playlist.js` module owns the Playlist section (list rendering, host-only play/remove buttons) and its "Add to playlist" browse dialog (search box, Movies/TV Shows/Recently Added/Favorites tabs, poster grid pulled from `GET /api/emby/items`), imported by `player.js` the same way `ws-client.js`/`sync.js` already are.
+
+---
+
+## 10. Party Settings: the end-of-media countdown
+
+**The decision to make.** §9 made end-of-media advance straight to the next playlist item. A follow-up request added four host-configurable settings around that: whether it auto-advances at all (`auto_advance`), whether a "next item in…" dialog is shown (`show_next_dialog`), whether the next item autoplays or just loads paused (`autoplay_enabled`), and how long to wait first (`autoplay_delay_seconds`). The one real design question — not "what are the settings" but "how does a multi-second countdown, visible to every participant, stay correct" — is covered here; everything else follows the same host-only, actor-owned patterns §9 already established.
+
+**Server-authoritative, like everything else.** Independent per-client JS timers would drift relative to each other and could race to trigger the transition themselves — exactly the failure mode the whole sync engine exists to avoid. So the countdown is actor state, communicated the same way every other authoritative change already is: no new message type, just more fields folded into the existing `snapshot`/`sequence_number` broadcast (`wsproto.SnapshotPayload` gained `PendingTransition *PendingTransition` — `{deadline, autoplay}`, an absolute RFC3339Nano timestamp, not a relative "seconds left" — plus the four settings fields themselves, `AutoAdvance`/`ShowNextDialog`/`AutoplayEnabled`/`AutoplayDelaySeconds`, and `Name`, promoted from an HTTP-response-only field to the snapshot proper so a host rename now propagates live to everyone connected instead of only the next page load). Because `buildSnapshot()` already assembles every field fresh from live actor state on every call, a client joining or reconnecting mid-countdown gets the exact same absolute deadline as everyone else, automatically — there is no separate "resume the countdown for latecomers" code path to get wrong.
+
+**`checkEndOfMedia` (party.go) branches on settings, not just on whether a next item exists:**
+```go
+if !p.settings.AutoAdvance || p.nextPlaylistItemAfter(p.current.PlaylistItemID) == nil {
+    p.transitionCurrent(nil, false, nil, dbx.ClientTypeSystem) // idle, immediately
+    return
+}
+p.enterPendingTransition()
+```
+`auto_advance: false` always goes idle immediately, even when a next item genuinely is queued — the setting's confirmed meaning is "don't auto-advance," full stop, not "advance but skip the countdown." Reaching the end with nothing queued also skips straight to idle rather than counting down to nothing.
+
+**Entering the countdown clamps state, it doesn't leave it stale.** `enterPendingTransition` sets `p.state` to paused-at-duration (exactly what the pre-Party-Settings end-of-media pause already did) before starting the timer, rather than leaving `IsPlaying: true` for the length of the countdown. This isn't cosmetic: `CurrentPositionTicks()` extrapolates forward from `p.state` while `IsPlaying` is true, so an unclamped state would keep climbing past the item's real duration for as long as the countdown ran — and `handlePlaybackURL` hands that number to Emby as `StartTimeTicks` for anyone who (re)joins mid-countdown, i.e. a real bug, not a theoretical one, caught by reasoning through the existing `CurrentPositionTicks` contract rather than by observation. Clamping also means embyreport's next periodic tick correctly reports `IsPaused: true` at the true final position with no special-casing on its end.
+
+**"What's next" is resolved at the deadline, not when the countdown starts.** `pendingTransition` deliberately carries only `{Deadline, Autoplay}` — no item reference. `onPendingTransitionFired` calls `nextPlaylistItemAfter` fresh when the timer actually fires:
+```go
+func (p *Party) onPendingTransitionFired() {
+    pending := p.pending
+    p.pending, p.pendingTimer = nil, nil
+    next := p.nextPlaylistItemAfter(p.current.PlaylistItemID)
+    if next == nil {
+        p.transitionCurrent(nil, false, nil, dbx.ClientTypeSystem)
+        return
+    }
+    p.transitionCurrent(&currentItem{...}, pending.Autoplay, nil, dbx.ClientTypeSystem)
+}
+```
+The alternative — capture "next" when the countdown starts — would need its own invalidation story for every playlist edit that could happen during those few seconds (an item removed, reordered, or added ahead of it). Resolving fresh sidesteps all of that: a host editing the queue mid-countdown just works, and `RemovePlaylistItem` needs no new guard for "is this the pending target" the way it already guards the *current* item. The cost is that the dialog can't name the upcoming title — acceptable, since the confirmed dialog text ("Next item in…" / "Playback pauses in…") never names an item to begin with.
+
+**Cancellation.** `transitionCurrent` clears any pending transition unconditionally at its start — covers a host explicitly picking a different item mid-countdown (`SelectCurrentItem`), and makes `onPendingTransitionFired`'s own call into it a harmless no-op re-clear. `HandleControl` (play/pause/seek) does the same at its start: a host command during the countdown is a manual-control signal (most commonly, replaying or seeking within the item that just ended) and cancels it. Because `pending_transition` only lives on the full `SnapshotPayload` shape, not the narrower `AuthoritativeState` shape `broadcastControl` normally sends, a `HandleControl` call that had to cancel a pending transition broadcasts a full snapshot instead — the only place this distinction matters. `End()` cancels any pending transition too, so `onPendingTransitionFired` can never fire against an already-ended party (`run()`'s select loop rebuilds its timer channel as nil from `p.pendingTimer` on every iteration, so clearing it inside `End()`'s `do()` dispatch permanently disables that case on every later iteration — no separate `p.ended` check needed inside the handler itself).
+
+**Timer mechanics.** `Party.run()`'s `select` loop gains a case sourced from a nil-able channel, rebuilt from `p.pendingTimer` every iteration — the standard Go idiom for a cancelable one-shot timer inside a `select` (a nil channel simply never becomes ready, so the case just doesn't fire until a real timer is installed). A dedicated `time.Timer`, not the existing `snapshotTicker`, is what's needed here: `autoplay_delay_seconds` can be shorter than the snapshot broadcast interval, so piggybacking on that ticker would make short countdowns visibly late.
+
+**Not persisted across a restart.** `p.pending`/`p.pendingTimer` are in-memory-only actor fields, like `hostDisconnectedAt` already was. Because `enterPendingTransition` already clamps and persists `p.state` to paused-at-duration, a restart mid-countdown recovers cleanly into "paused at the end of the last item" — `checkEndOfMedia`'s `!p.state.IsPlaying` guard means it won't spontaneously re-fire, so a host has to act (replay, or pick something from the playlist) to move on. Reconstructing a partial countdown's remaining time across a restart would be meaningfully more machinery for a rare edge case with a perfectly reasonable fallback already available.
+
+**Authorization and settings mutation.** `Party.UpdateSettings(ctx, userID, name string, settings Settings)` is host-only, gated by the same `checkHostAuthorized` helper §9.3's playlist mutations use, and follows the identical two-phase pattern: authorize (fast, IO-free), write to SQLite outside `do()`, then apply-and-broadcast inside a second `do()` — never blocking the actor goroutine on disk IO. It broadcasts a full snapshot on success so already-connected participants see a host's rename or settings change immediately, not just on their next reconnect.
+
+**Frontend.** `settingsForm.js` is a small shared module (imported by both `app.js` and `player.js`, which are otherwise two fully independent page entry points with no component system between them) wiring the four fields' interdependence — `show_next_dialog` and the autoplay controls disable whenever `auto_advance` is off, and the delay input additionally disables whenever "Auto-play after" itself is unchecked — plus `read()`/`write()` helpers so the create-party dialog and the party page's post-creation settings dialog (opened via a new cog button in the topbar, host-only visible) share one implementation of the field logic instead of two. `player.js` renders the countdown as a small pill-shaped banner overlaid on the video (not a blocking modal — the party keeps playing/showing normally underneath), computing remaining time from the snapshot's absolute `deadline` against `Date.now() + clockOffsetMs` — reusing the clock offset the existing clock-sync handshake already maintains, not new client-side clock logic. The banner's label switches between "Next item in…" and "Playback pauses in…" based on the snapshot's `pending_transition.autoplay`, and disappears the moment a snapshot arrives without a `pending_transition` (fired or canceled) — the client never decides for itself when the countdown ends.

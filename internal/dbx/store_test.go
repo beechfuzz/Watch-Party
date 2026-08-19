@@ -104,8 +104,8 @@ func TestPartyAndPlaybackStateRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	party := Party{
-		ID: "party1", HostUserID: "host1", ItemID: "item123",
-		DurationTicks: 72000000000, CreatedAt: now, Status: PartyStatusCreated,
+		ID: "party1", HostUserID: "host1", Name: "Movie Night",
+		CreatedAt: now, Status: PartyStatusCreated,
 	}
 	if err := s.CreateParty(ctx, party); err != nil {
 		t.Fatalf("CreateParty: %v", err)
@@ -173,5 +173,82 @@ func TestPartyAndPlaybackStateRoundTrip(t *testing.T) {
 	gotState2, _ := s.GetPlaybackState(ctx, "party1")
 	if gotState2.PositionTicks != 1000 {
 		t.Errorf("stale write was applied: PositionTicks = %d, want unchanged 1000", gotState2.PositionTicks)
+	}
+}
+
+func TestPlaylistItemsRoundTrip(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	if err := s.UpsertUser(ctx, "host1", "Host", "tok", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateParty(ctx, Party{ID: "party1", HostUserID: "host1", Name: "Movie Night", CreatedAt: now, Status: PartyStatusActive}); err != nil {
+		t.Fatal(err)
+	}
+
+	a, err := s.AddPlaylistItem(ctx, "party1", "item-a", 100, "host1", now)
+	if err != nil {
+		t.Fatalf("AddPlaylistItem: %v", err)
+	}
+	if a.Position != 0 {
+		t.Errorf("first item Position = %d, want 0", a.Position)
+	}
+	b, err := s.AddPlaylistItem(ctx, "party1", "item-b", 200, "host1", now)
+	if err != nil {
+		t.Fatalf("AddPlaylistItem: %v", err)
+	}
+	if b.Position != 1 {
+		t.Errorf("second item Position = %d, want 1", b.Position)
+	}
+
+	items, err := s.ListPlaylistItems(ctx, "party1")
+	if err != nil {
+		t.Fatalf("ListPlaylistItems: %v", err)
+	}
+	if len(items) != 2 || items[0].ItemID != "item-a" || items[1].ItemID != "item-b" {
+		t.Fatalf("ListPlaylistItems = %+v, want [item-a, item-b] in order", items)
+	}
+
+	// Reorder: swap b before a. This specifically exercises the temporary
+	// negative-position staging ReorderPlaylistItems uses -- writing final
+	// positions directly, one row at a time, would collide with
+	// idx_playlist_items_party_position's unique constraint on a swap.
+	if err := s.ReorderPlaylistItems(ctx, "party1", []int64{b.ID, a.ID}); err != nil {
+		t.Fatalf("ReorderPlaylistItems: %v", err)
+	}
+	reordered, err := s.ListPlaylistItems(ctx, "party1")
+	if err != nil {
+		t.Fatalf("ListPlaylistItems (after reorder): %v", err)
+	}
+	if len(reordered) != 2 || reordered[0].ItemID != "item-b" || reordered[1].ItemID != "item-a" {
+		t.Fatalf("ListPlaylistItems after reorder = %+v, want [item-b, item-a]", reordered)
+	}
+
+	if err := s.UpdatePartyCurrentItem(ctx, "party1", &a.ID); err != nil {
+		t.Fatalf("UpdatePartyCurrentItem: %v", err)
+	}
+	got, err := s.GetParty(ctx, "party1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CurrentPlaylistItemID == nil || *got.CurrentPlaylistItemID != a.ID {
+		t.Errorf("CurrentPlaylistItemID = %v, want %d", got.CurrentPlaylistItemID, a.ID)
+	}
+
+	if err := s.RemovePlaylistItem(ctx, b.ID); err != nil {
+		t.Fatalf("RemovePlaylistItem: %v", err)
+	}
+	remaining, err := s.ListPlaylistItems(ctx, "party1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != 1 || remaining[0].ItemID != "item-a" {
+		t.Errorf("remaining = %+v, want only item-a", remaining)
+	}
+
+	if _, err := s.GetPlaylistItem(ctx, b.ID); err != ErrNotFound {
+		t.Errorf("GetPlaylistItem(removed) err = %v, want ErrNotFound", err)
 	}
 }

@@ -92,12 +92,47 @@ func testTuning() Tuning {
 	}
 }
 
+// testSettings matches the Party Settings form's own defaults (all three
+// checkboxes checked, 5-second delay) — a short delay is overridden per test
+// where the countdown itself is what's being exercised.
+func testSettings() Settings {
+	return Settings{AutoAdvance: true, ShowNextDialog: true, AutoplayEnabled: true, AutoplayDelaySeconds: 5}
+}
+
 func newTestHub(t *testing.T) *Hub {
 	t.Helper()
 	store := testStore(t)
 	h := NewHub(store, testTuning(), testLogger())
 	t.Cleanup(func() { h.Shutdown(context.Background()) })
 	return h
+}
+
+// createPartyWithItem creates a party via the hub, adds one playlist item,
+// and seeds it directly as the current item at sequence 0 (bypassing
+// transitionCurrent's broadcast/autoplay side effects) — reproducing the
+// old single-item design's initial state (idle position 0, paused,
+// sequence 0) for tests that only care about play/pause/seek/host-transfer
+// behavior on an already-loaded item. Playlist mechanics themselves
+// (advance, add/remove/reorder, select) get their own tests.
+func createPartyWithItem(t *testing.T, hub *Hub, partyID, itemID string, durationTicks int64, hostUserID string) *Party {
+	t.Helper()
+	return createPartyWithItemAndSettings(t, hub, partyID, itemID, durationTicks, hostUserID, testSettings())
+}
+
+func createPartyWithItemAndSettings(t *testing.T, hub *Hub, partyID, itemID string, durationTicks int64, hostUserID string, settings Settings) *Party {
+	t.Helper()
+	p, err := hub.CreateParty(context.Background(), partyID, "Test Party", settings, hostUserID)
+	if err != nil {
+		t.Fatalf("CreateParty: %v", err)
+	}
+	added, err := p.AddPlaylistItem(context.Background(), hostUserID, itemID, durationTicks)
+	if err != nil {
+		t.Fatalf("AddPlaylistItem: %v", err)
+	}
+	p.do(func() {
+		p.current = &currentItem{PlaylistItemID: added.ID, EmbyItemID: added.ItemID, DurationTicks: added.DurationTicks}
+	})
+	return p
 }
 
 func seedUser(t *testing.T, store *dbx.Store, id, name string) {
@@ -133,17 +168,14 @@ func TestHandleControl_NonHostRejected(t *testing.T) {
 	seedUser(t, store, "host", "Host")
 	seedUser(t, store, "guest", "Guest")
 
-	p, err := hub.CreateParty(context.Background(), "party1", "item1", 100*10_000_000, "host")
-	if err != nil {
-		t.Fatal(err)
-	}
+	p := createPartyWithItem(t, hub, "party1", "item1", 100*10_000_000, "host")
 	_, _ = p.Join("host", "Host")
 	_, _ = p.Join("guest", "Guest")
 
 	guestConn := &fakeConn{}
 	p.AttachConn("guest", guestConn)
 
-	err = p.HandleControl("guest", wsproto.MsgPlay, 0)
+	err := p.HandleControl("guest", wsproto.MsgPlay, 0)
 	if err != ErrNotHost {
 		t.Fatalf("err = %v, want ErrNotHost", err)
 	}
@@ -157,7 +189,7 @@ func TestHandleControl_NonHostRejected(t *testing.T) {
 func TestHandleControl_HostAllowed(t *testing.T) {
 	hub := newTestHub(t)
 	seedUser(t, hub.store, "host", "Host")
-	p, _ := hub.CreateParty(context.Background(), "party1", "item1", 100*10_000_000, "host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 100*10_000_000, "host")
 	_, _ = p.Join("host", "Host")
 	hostConn := &fakeConn{}
 	p.AttachConn("host", hostConn)
@@ -179,7 +211,7 @@ func TestHandleControl_HostAllowed(t *testing.T) {
 func TestCurrentPositionTicks_ExtrapolatesWhilePlaying(t *testing.T) {
 	hub := newTestHub(t)
 	seedUser(t, hub.store, "host", "Host")
-	p, _ := hub.CreateParty(context.Background(), "party1", "item1", 1_000*10_000_000, "host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1_000*10_000_000, "host")
 	_, _ = p.Join("host", "Host")
 
 	if err := p.HandleControl("host", wsproto.MsgPlay, 5*10_000_000); err != nil {
@@ -206,7 +238,7 @@ func TestCurrentPositionTicks_ExtrapolatesWhilePlaying(t *testing.T) {
 func TestCurrentPositionTicks_DoesNotAdvanceWhilePaused(t *testing.T) {
 	hub := newTestHub(t)
 	seedUser(t, hub.store, "host", "Host")
-	p, _ := hub.CreateParty(context.Background(), "party1", "item1", 1_000*10_000_000, "host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1_000*10_000_000, "host")
 	_, _ = p.Join("host", "Host")
 
 	if err := p.HandleControl("host", wsproto.MsgPause, 5*10_000_000); err != nil {
@@ -227,10 +259,7 @@ func TestIntegration_PlaySeekPausePropagateToParticipant(t *testing.T) {
 	seedUser(t, hub.store, "host", "Host")
 	seedUser(t, hub.store, "p1", "Participant")
 
-	p, err := hub.CreateParty(context.Background(), "party1", "item1", 1000*10_000_000, "host")
-	if err != nil {
-		t.Fatal(err)
-	}
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
 	if _, err := p.Join("host", "Host"); err != nil {
 		t.Fatal(err)
 	}
@@ -304,7 +333,7 @@ func TestIntegration_DisconnectReconnectReceivesCorrectSnapshot(t *testing.T) {
 	seedUser(t, hub.store, "host", "Host")
 	seedUser(t, hub.store, "p1", "Participant")
 
-	p, _ := hub.CreateParty(context.Background(), "party1", "item1", 1000*10_000_000, "host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
 	_, _ = p.Join("host", "Host")
 	p.AttachConn("host", &fakeConn{})
 	_, _ = p.Join("p1", "Participant")
@@ -350,7 +379,7 @@ func TestIntegration_DisconnectReconnectReceivesCorrectSnapshot(t *testing.T) {
 func TestIntegration_RapidSeekThenPlay_FinalStateConsistent(t *testing.T) {
 	hub := newTestHub(t)
 	seedUser(t, hub.store, "host", "Host")
-	p, _ := hub.CreateParty(context.Background(), "party1", "item1", 1000*10_000_000, "host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
 	_, _ = p.Join("host", "Host")
 	conn := &fakeConn{}
 	p.AttachConn("host", conn)
@@ -374,7 +403,7 @@ func TestIntegration_RapidSeekThenPlay_FinalStateConsistent(t *testing.T) {
 func TestIntegration_RapidPauseThenSeek_FinalStateConsistent(t *testing.T) {
 	hub := newTestHub(t)
 	seedUser(t, hub.store, "host", "Host")
-	p, _ := hub.CreateParty(context.Background(), "party1", "item1", 1000*10_000_000, "host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
 	_, _ = p.Join("host", "Host")
 	p.AttachConn("host", &fakeConn{})
 
@@ -400,7 +429,7 @@ func TestHostGracePeriod_ReconnectRetainsHost(t *testing.T) {
 	hub := newTestHub(t)
 	seedUser(t, hub.store, "host", "Host")
 	seedUser(t, hub.store, "p1", "Participant")
-	p, _ := hub.CreateParty(context.Background(), "party1", "item1", 1000*10_000_000, "host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
 	_, _ = p.Join("host", "Host")
 	_, _ = p.Join("p1", "Participant")
 	p.AttachConn("p1", &fakeConn{})
@@ -423,7 +452,7 @@ func TestHostGracePeriod_ExpiresAndTransfersToEarliestJoined(t *testing.T) {
 	seedUser(t, hub.store, "host", "Host")
 	seedUser(t, hub.store, "early", "Early")
 	seedUser(t, hub.store, "late", "Late")
-	p, _ := hub.CreateParty(context.Background(), "party1", "item1", 1000*10_000_000, "host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
 	_, _ = p.Join("host", "Host")
 	_, _ = p.Join("early", "Early")
 	p.AttachConn("early", &fakeConn{})
@@ -449,7 +478,7 @@ func TestHostGracePeriod_FormerHostDoesNotReclaimOnReconnect(t *testing.T) {
 	hub := newTestHub(t)
 	seedUser(t, hub.store, "host", "Host")
 	seedUser(t, hub.store, "successor", "Successor")
-	p, _ := hub.CreateParty(context.Background(), "party1", "item1", 1000*10_000_000, "host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
 	_, _ = p.Join("host", "Host")
 	_, _ = p.Join("successor", "Successor")
 	p.AttachConn("successor", &fakeConn{})
@@ -484,7 +513,7 @@ func TestHostLeave_TransfersImmediately(t *testing.T) {
 	hub := newTestHub(t)
 	seedUser(t, hub.store, "host", "Host")
 	seedUser(t, hub.store, "p1", "Participant")
-	p, _ := hub.CreateParty(context.Background(), "party1", "item1", 1000*10_000_000, "host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
 	_, _ = p.Join("host", "Host")
 	_, _ = p.Join("p1", "Participant")
 	p.AttachConn("p1", &fakeConn{})
@@ -498,11 +527,15 @@ func TestHostLeave_TransfersImmediately(t *testing.T) {
 
 // --- end of media detection ---
 
-func TestEndOfMedia_ServerDetectsAndBroadcastsPause(t *testing.T) {
+// TestEndOfMedia_EndOfPlaylistGoesIdle covers the single-item case: reaching
+// the end of the party's only playlist item, with nothing queued after it,
+// transitions the party to idle (paused, no current item) rather than just
+// pausing at the last frame — see checkEndOfMedia/transitionCurrent.
+func TestEndOfMedia_EndOfPlaylistGoesIdle(t *testing.T) {
 	hub := newTestHub(t)
 	seedUser(t, hub.store, "host", "Host")
 	durationTicks := int64(1) * 10_000_000 // 1 second item
-	p, _ := hub.CreateParty(context.Background(), "party1", "item1", durationTicks, "host")
+	p := createPartyWithItem(t, hub, "party1", "item1", durationTicks, "host")
 	_, _ = p.Join("host", "Host")
 	conn := &fakeConn{}
 	p.AttachConn("host", conn)
@@ -518,12 +551,447 @@ func TestEndOfMedia_ServerDetectsAndBroadcastsPause(t *testing.T) {
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		snap := p.Snapshot()
-		if !snap.IsPlaying && snap.PositionTicks >= durationTicks {
+		if !snap.IsPlaying && snap.ItemID == "" {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatal("server did not detect end-of-media within deadline")
+	t.Fatal("server did not detect end-of-playlist and go idle within deadline")
+}
+
+// TestEndOfMedia_AdvancesToNextPlaylistItem covers the multi-item case:
+// reaching the end of the current item enters a (short, 1s) pending
+// transition, then advances to the next queued item and keeps playing
+// (autoplay_enabled: true) once the countdown fires — rather than stopping.
+func TestEndOfMedia_AdvancesToNextPlaylistItem(t *testing.T) {
+	hub := newTestHub(t)
+	seedUser(t, hub.store, "host", "Host")
+	durationTicks := int64(1) * 10_000_000 // 1 second item
+	settings := testSettings()
+	settings.AutoplayDelaySeconds = 1
+	p := createPartyWithItemAndSettings(t, hub, "party1", "item1", durationTicks, "host", settings)
+	if _, err := p.AddPlaylistItem(context.Background(), "host", "item2", 1000*10_000_000); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = p.Join("host", "Host")
+	conn := &fakeConn{}
+	p.AttachConn("host", conn)
+
+	if err := p.HandleControl("host", wsproto.MsgPlay, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(4 * time.Second)
+	for time.Now().Before(deadline) {
+		snap := p.Snapshot()
+		if snap.ItemID == "item2" {
+			if !snap.IsPlaying {
+				t.Errorf("advanced to item2 but not playing: %+v", snap)
+			}
+			if snap.PositionTicks != 0 {
+				t.Errorf("advanced item should start at position 0, got %d", snap.PositionTicks)
+			}
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("server did not advance to the next playlist item within deadline")
+}
+
+// --- Party Settings: the pending-transition countdown ---
+
+func waitForPendingTransition(t *testing.T, p *Party, deadline time.Time) wsproto.SnapshotPayload {
+	t.Helper()
+	for time.Now().Before(deadline) {
+		snap := p.Snapshot()
+		if snap.PendingTransition != nil {
+			return snap
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("pending transition never entered within deadline")
+	return wsproto.SnapshotPayload{}
+}
+
+// TestPendingTransition_EnteredThenFires covers the full happy path: a
+// 1-item queue behind the current one, auto_advance on, reaching the end
+// enters a pending transition (state clamped to paused-at-duration, snapshot
+// carries PendingTransition) rather than advancing immediately, and firing
+// lands on the queued item playing (autoplay_enabled: true).
+func TestPendingTransition_EnteredThenFires(t *testing.T) {
+	hub := newTestHub(t)
+	seedUser(t, hub.store, "host", "Host")
+	durationTicks := int64(1) * 10_000_000
+	settings := testSettings()
+	settings.AutoplayDelaySeconds = 1
+	p := createPartyWithItemAndSettings(t, hub, "party1", "item1", durationTicks, "host", settings)
+	if _, err := p.AddPlaylistItem(context.Background(), "host", "item2", 1000*10_000_000); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = p.Join("host", "Host")
+	if err := p.HandleControl("host", wsproto.MsgPlay, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	snap := waitForPendingTransition(t, p, time.Now().Add(3*time.Second))
+	if snap.IsPlaying {
+		t.Errorf("state should be clamped to paused while pending, got IsPlaying=true")
+	}
+	if snap.PositionTicks != durationTicks {
+		t.Errorf("PositionTicks = %d, want clamped to duration %d", snap.PositionTicks, durationTicks)
+	}
+	if snap.ItemID != "item1" {
+		t.Errorf("current item should still be item1 during the countdown, got %q", snap.ItemID)
+	}
+	if !snap.PendingTransition.Autoplay {
+		t.Errorf("PendingTransition.Autoplay = false, want true (autoplay_enabled is on)")
+	}
+	if _, err := time.Parse(time.RFC3339Nano, snap.PendingTransition.Deadline); err != nil {
+		t.Errorf("PendingTransition.Deadline not valid RFC3339Nano: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		snap := p.Snapshot()
+		if snap.ItemID == "item2" {
+			if !snap.IsPlaying {
+				t.Errorf("fired transition should be playing (autoplay_enabled), got paused")
+			}
+			if snap.PendingTransition != nil {
+				t.Errorf("PendingTransition should be cleared once fired")
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("pending transition never fired within deadline")
+}
+
+// TestPendingTransition_AutoplayDisabled_FiresPaused covers
+// autoplay_enabled: false — the next item loads but does not start playing.
+func TestPendingTransition_AutoplayDisabled_FiresPaused(t *testing.T) {
+	hub := newTestHub(t)
+	seedUser(t, hub.store, "host", "Host")
+	durationTicks := int64(1) * 10_000_000
+	settings := testSettings()
+	settings.AutoplayDelaySeconds = 1
+	settings.AutoplayEnabled = false
+	p := createPartyWithItemAndSettings(t, hub, "party1", "item1", durationTicks, "host", settings)
+	if _, err := p.AddPlaylistItem(context.Background(), "host", "item2", 1000*10_000_000); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = p.Join("host", "Host")
+	if err := p.HandleControl("host", wsproto.MsgPlay, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	snap := waitForPendingTransition(t, p, time.Now().Add(3*time.Second))
+	if snap.PendingTransition.Autoplay {
+		t.Errorf("PendingTransition.Autoplay = true, want false (autoplay_enabled is off)")
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		snap := p.Snapshot()
+		if snap.ItemID == "item2" {
+			if snap.IsPlaying {
+				t.Errorf("fired transition should be paused (autoplay_enabled off), got playing")
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("pending transition never fired within deadline")
+}
+
+// TestPendingTransition_AutoAdvanceOff_SkipsCountdownEvenWithQueuedItem
+// covers the explicit spec requirement: auto_advance off means end-of-media
+// always goes idle immediately, even when a next item IS queued — no
+// countdown to nothing, no countdown at all.
+func TestPendingTransition_AutoAdvanceOff_SkipsCountdownEvenWithQueuedItem(t *testing.T) {
+	hub := newTestHub(t)
+	seedUser(t, hub.store, "host", "Host")
+	durationTicks := int64(1) * 10_000_000
+	settings := testSettings()
+	settings.AutoAdvance = false
+	p := createPartyWithItemAndSettings(t, hub, "party1", "item1", durationTicks, "host", settings)
+	if _, err := p.AddPlaylistItem(context.Background(), "host", "item2", 1000*10_000_000); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = p.Join("host", "Host")
+	if err := p.HandleControl("host", wsproto.MsgPlay, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		snap := p.Snapshot()
+		if !snap.IsPlaying && snap.ItemID == "" {
+			return // idle, straight away -- no PendingTransition ever observed
+		}
+		if snap.PendingTransition != nil {
+			t.Fatal("auto_advance is off, should never enter a pending transition")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("server did not go idle within deadline")
+}
+
+// TestPendingTransition_HostCommandCancelsCountdown covers cancellation: a
+// host command during the countdown (here, a seek back into the ending
+// item) takes precedence and clears the pending transition rather than
+// letting it fire underneath the command.
+func TestPendingTransition_HostCommandCancelsCountdown(t *testing.T) {
+	hub := newTestHub(t)
+	seedUser(t, hub.store, "host", "Host")
+	durationTicks := int64(1) * 10_000_000
+	settings := testSettings()
+	settings.AutoplayDelaySeconds = 2
+	p := createPartyWithItemAndSettings(t, hub, "party1", "item1", durationTicks, "host", settings)
+	if _, err := p.AddPlaylistItem(context.Background(), "host", "item2", 1000*10_000_000); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = p.Join("host", "Host")
+	conn := &fakeConn{}
+	p.AttachConn("host", conn)
+	if err := p.HandleControl("host", wsproto.MsgPlay, 0); err != nil {
+		t.Fatal(err)
+	}
+	waitForPendingTransition(t, p, time.Now().Add(3*time.Second))
+
+	if err := p.HandleControl("host", wsproto.MsgSeek, 5*10_000_000); err != nil {
+		t.Fatal(err)
+	}
+	snap := p.Snapshot()
+	if snap.PendingTransition != nil {
+		t.Fatal("host command should have canceled the pending transition")
+	}
+	if snap.ItemID != "item1" || snap.PositionTicks != 5*10_000_000 {
+		t.Errorf("snap = %+v, want the seek applied to item1", snap)
+	}
+
+	// Confirm it really is canceled, not just momentarily cleared: item2
+	// must not appear even after the original countdown would have fired.
+	time.Sleep(2500 * time.Millisecond)
+	if got := p.Snapshot().ItemID; got != "item1" {
+		t.Errorf("ItemID = %q after the original countdown's deadline passed, want item1 (canceled, not just delayed)", got)
+	}
+}
+
+// TestPendingTransition_ResolvesNextAtFireTimeNotEntryTime proves the
+// design choice that "what's next" is re-resolved when the deadline fires,
+// not fixed when the countdown starts: reordering the playlist during the
+// countdown changes what actually plays.
+func TestPendingTransition_ResolvesNextAtFireTimeNotEntryTime(t *testing.T) {
+	hub := newTestHub(t)
+	seedUser(t, hub.store, "host", "Host")
+	durationTicks := int64(1) * 10_000_000
+	settings := testSettings()
+	settings.AutoplayDelaySeconds = 1
+	p := createPartyWithItemAndSettings(t, hub, "party1", "item1", durationTicks, "host", settings)
+	itemB, err := p.AddPlaylistItem(context.Background(), "host", "item-b", 1000*10_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	itemC, err := p.AddPlaylistItem(context.Background(), "host", "item-c", 1000*10_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = p.Join("host", "Host")
+	if err := p.HandleControl("host", wsproto.MsgPlay, 0); err != nil {
+		t.Fatal(err)
+	}
+	waitForPendingTransition(t, p, time.Now().Add(3*time.Second))
+
+	// item-b was next when the countdown started; remove it mid-countdown.
+	// If "next" were captured at entry time, this would have no effect on
+	// what fires. It should instead fire on item-c.
+	if err := p.RemovePlaylistItem(context.Background(), "host", itemB.ID); err != nil {
+		t.Fatal(err)
+	}
+	_ = itemC
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		snap := p.Snapshot()
+		if snap.ItemID != "" && snap.ItemID != "item1" {
+			if snap.ItemID != "item-c" {
+				t.Errorf("ItemID = %q, want item-c (item-b was removed mid-countdown)", snap.ItemID)
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("pending transition never fired within deadline")
+}
+
+// TestPendingTransition_LateJoinerGetsSameDeadline covers the plan's
+// server-authoritative-countdown requirement: a client joining mid-countdown
+// must see the same absolute deadline as one already connected, not a fresh
+// full delay -- proving the countdown is driven by shared actor state
+// (read fresh by buildSnapshot on every Join), not a per-connection timer.
+func TestPendingTransition_LateJoinerGetsSameDeadline(t *testing.T) {
+	hub := newTestHub(t)
+	seedUser(t, hub.store, "host", "Host")
+	seedUser(t, hub.store, "late", "Late")
+	durationTicks := int64(1) * 10_000_000
+	settings := testSettings()
+	settings.AutoplayDelaySeconds = 3
+	p := createPartyWithItemAndSettings(t, hub, "party1", "item1", durationTicks, "host", settings)
+	if _, err := p.AddPlaylistItem(context.Background(), "host", "item2", 1000*10_000_000); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = p.Join("host", "Host")
+	if err := p.HandleControl("host", wsproto.MsgPlay, 0); err != nil {
+		t.Fatal(err)
+	}
+	firstSnap := waitForPendingTransition(t, p, time.Now().Add(3*time.Second))
+
+	time.Sleep(300 * time.Millisecond) // let some of the countdown elapse
+	lateSnap, err := p.Join("late", "Late")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lateSnap.PendingTransition == nil {
+		t.Fatal("late joiner's snapshot should include the in-progress pending transition")
+	}
+	if lateSnap.PendingTransition.Deadline != firstSnap.PendingTransition.Deadline {
+		t.Errorf("late joiner's deadline = %q, want the same deadline as the first client (%q), not a restarted delay",
+			lateSnap.PendingTransition.Deadline, firstSnap.PendingTransition.Deadline)
+	}
+}
+
+// TestUpdateSettings_NonHostRejected mirrors the existing host-only
+// enforcement pattern for every other party mutation.
+func TestUpdateSettings_NonHostRejected(t *testing.T) {
+	hub := newTestHub(t)
+	seedUser(t, hub.store, "host", "Host")
+	seedUser(t, hub.store, "guest", "Guest")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
+
+	err := p.UpdateSettings(context.Background(), "guest", "New Name", testSettings())
+	if err != ErrNotHost {
+		t.Errorf("err = %v, want ErrNotHost", err)
+	}
+}
+
+func TestUpdateSettings_HostAppliesAndBroadcasts(t *testing.T) {
+	hub := newTestHub(t)
+	seedUser(t, hub.store, "host", "Host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
+	_, _ = p.Join("host", "Host")
+	conn := &fakeConn{}
+	p.AttachConn("host", conn)
+
+	newSettings := Settings{AutoAdvance: false, ShowNextDialog: false, AutoplayEnabled: false, AutoplayDelaySeconds: 10}
+	if err := p.UpdateSettings(context.Background(), "host", "Renamed Party", newSettings); err != nil {
+		t.Fatal(err)
+	}
+
+	if p.Name != "Renamed Party" {
+		t.Errorf("Name = %q, want %q", p.Name, "Renamed Party")
+	}
+	snap := p.Snapshot()
+	if snap.AutoAdvance || snap.ShowNextDialog || snap.AutoplayEnabled || snap.AutoplayDelaySeconds != 10 {
+		t.Errorf("snapshot settings not updated: %+v", snap)
+	}
+	env, ok := conn.last()
+	if !ok || env.Type != wsproto.MsgSnapshot {
+		t.Fatalf("expected a snapshot broadcast after settings update, got %+v (ok=%v)", env, ok)
+	}
+}
+
+// --- playlist mutation: host-only, and the removal/reorder edge cases ---
+
+func TestAddPlaylistItem_NonHostRejected(t *testing.T) {
+	hub := newTestHub(t)
+	seedUser(t, hub.store, "host", "Host")
+	seedUser(t, hub.store, "guest", "Guest")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
+
+	if _, err := p.AddPlaylistItem(context.Background(), "guest", "item2", 500*10_000_000); err != ErrNotHost {
+		t.Errorf("err = %v, want ErrNotHost", err)
+	}
+}
+
+func TestRemovePlaylistItem_CurrentItemRejected(t *testing.T) {
+	hub := newTestHub(t)
+	seedUser(t, hub.store, "host", "Host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
+
+	// The playlist item createPartyWithItem seeded as current -- read it
+	// back via the actor's own listing rather than assuming its id.
+	snap := p.Snapshot()
+	if snap.ItemID != "item1" {
+		t.Fatalf("precondition failed: current item = %q, want item1", snap.ItemID)
+	}
+	var currentID int64
+	p.do(func() { currentID = p.current.PlaylistItemID })
+
+	if err := p.RemovePlaylistItem(context.Background(), "host", currentID); err != ErrCannotRemoveCurrentItem {
+		t.Errorf("err = %v, want ErrCannotRemoveCurrentItem", err)
+	}
+}
+
+func TestRemovePlaylistItem_NonHostRejected(t *testing.T) {
+	hub := newTestHub(t)
+	seedUser(t, hub.store, "host", "Host")
+	seedUser(t, hub.store, "guest", "Guest")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
+	added, err := p.AddPlaylistItem(context.Background(), "host", "item2", 500*10_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := p.RemovePlaylistItem(context.Background(), "guest", added.ID); err != ErrNotHost {
+		t.Errorf("err = %v, want ErrNotHost", err)
+	}
+}
+
+func TestReorderPlaylist_MismatchedSetRejected(t *testing.T) {
+	hub := newTestHub(t)
+	seedUser(t, hub.store, "host", "Host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
+	if _, err := p.AddPlaylistItem(context.Background(), "host", "item2", 500*10_000_000); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := p.ReorderPlaylist(context.Background(), "host", []int64{999}); err != ErrInvalidReorder {
+		t.Errorf("err = %v, want ErrInvalidReorder", err)
+	}
+}
+
+func TestSelectCurrentItem_NonHostRejected(t *testing.T) {
+	hub := newTestHub(t)
+	seedUser(t, hub.store, "host", "Host")
+	seedUser(t, hub.store, "guest", "Guest")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
+	added, err := p.AddPlaylistItem(context.Background(), "host", "item2", 500*10_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := p.SelectCurrentItem("guest", added.ID); err != ErrNotHost {
+		t.Errorf("err = %v, want ErrNotHost", err)
+	}
+}
+
+func TestSelectCurrentItem_StartsPlayingFromZero(t *testing.T) {
+	hub := newTestHub(t)
+	seedUser(t, hub.store, "host", "Host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
+	added, err := p.AddPlaylistItem(context.Background(), "host", "item2", 500*10_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := p.SelectCurrentItem("host", added.ID); err != nil {
+		t.Fatal(err)
+	}
+	snap := p.Snapshot()
+	if snap.ItemID != "item2" || !snap.IsPlaying || snap.PositionTicks != 0 {
+		t.Errorf("snap = %+v, want item2 playing from position 0", snap)
+	}
 }
 
 // --- stale/late join gets full snapshot, not replayed history ---
@@ -532,7 +1000,7 @@ func TestLateJoin_ReceivesFullSnapshotNotHistory(t *testing.T) {
 	hub := newTestHub(t)
 	seedUser(t, hub.store, "host", "Host")
 	seedUser(t, hub.store, "late", "Late")
-	p, _ := hub.CreateParty(context.Background(), "party1", "item1", 1000*10_000_000, "host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
 	_, _ = p.Join("host", "Host")
 	p.AttachConn("host", &fakeConn{})
 
@@ -561,7 +1029,7 @@ func TestExplicitHostTransfer(t *testing.T) {
 	hub := newTestHub(t)
 	seedUser(t, hub.store, "host", "Host")
 	seedUser(t, hub.store, "p1", "Participant")
-	p, _ := hub.CreateParty(context.Background(), "party1", "item1", 1000*10_000_000, "host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
 	_, _ = p.Join("host", "Host")
 	_, _ = p.Join("p1", "Participant")
 	p.AttachConn("p1", &fakeConn{})
@@ -586,7 +1054,7 @@ func TestExplicitHostTransfer_NonHostRejected(t *testing.T) {
 	hub := newTestHub(t)
 	seedUser(t, hub.store, "host", "Host")
 	seedUser(t, hub.store, "p1", "Participant")
-	p, _ := hub.CreateParty(context.Background(), "party1", "item1", 1000*10_000_000, "host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
 	_, _ = p.Join("host", "Host")
 	_, _ = p.Join("p1", "Participant")
 
@@ -600,7 +1068,7 @@ func TestExplicitHostTransfer_NonHostRejected(t *testing.T) {
 func TestPartyEnd_IsTerminalAndClosesConnections(t *testing.T) {
 	hub := newTestHub(t)
 	seedUser(t, hub.store, "host", "Host")
-	p, _ := hub.CreateParty(context.Background(), "party1", "item1", 1000*10_000_000, "host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
 	_, _ = p.Join("host", "Host")
 	conn := &fakeConn{}
 	p.AttachConn("host", conn)
@@ -644,9 +1112,16 @@ func TestHub_RecoverActiveParties(t *testing.T) {
 
 	now := time.Now()
 	if err := store.CreateParty(ctx, dbx.Party{
-		ID: "party1", HostUserID: "host", ItemID: "item1",
-		DurationTicks: 1000 * 10_000_000, CreatedAt: now, Status: dbx.PartyStatusActive,
+		ID: "party1", HostUserID: "host", Name: "Test Party",
+		CreatedAt: now, Status: dbx.PartyStatusActive,
 	}); err != nil {
+		t.Fatal(err)
+	}
+	item, err := store.AddPlaylistItem(ctx, "party1", "item1", 1000*10_000_000, "host", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdatePartyCurrentItem(ctx, "party1", &item.ID); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.UpsertPlaybackState(ctx, dbx.PlaybackState{
@@ -711,8 +1186,8 @@ func TestSweepInactiveParties_EndsPartyIdleLongerThanTimeout(t *testing.T) {
 
 	staleTime := time.Now().Add(-50 * time.Hour)
 	if err := store.CreateParty(ctx, dbx.Party{
-		ID: "stale-party", HostUserID: "host", ItemID: "item1",
-		DurationTicks: 1000 * 10_000_000, CreatedAt: staleTime, Status: dbx.PartyStatusActive,
+		ID: "stale-party", HostUserID: "host", Name: "Stale Party",
+		CreatedAt: staleTime, Status: dbx.PartyStatusActive,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -767,8 +1242,8 @@ func TestSweepInactiveParties_RecentMemberActivityKeepsPartyAlive(t *testing.T) 
 	staleTime := time.Now().Add(-50 * time.Hour)
 	recentTime := time.Now().Add(-1 * time.Hour)
 	if err := store.CreateParty(ctx, dbx.Party{
-		ID: "recently-active-party", HostUserID: "host", ItemID: "item1",
-		DurationTicks: 1000 * 10_000_000, CreatedAt: staleTime, Status: dbx.PartyStatusActive,
+		ID: "recently-active-party", HostUserID: "host", Name: "Recently Active Party",
+		CreatedAt: staleTime, Status: dbx.PartyStatusActive,
 	}); err != nil {
 		t.Fatal(err)
 	}

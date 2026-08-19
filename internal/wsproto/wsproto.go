@@ -27,6 +27,17 @@ const (
 	MsgClockSync MessageType = "clock_sync"
 	MsgSnapshot  MessageType = "snapshot"
 
+	// Server -> client: the party's playlist (queue) changed (add/remove/
+	// reorder). Does NOT cover a change of *current* item — that's an
+	// authoritative state change and goes through the existing snapshot
+	// broadcast (ItemID/DurationTicks live on SnapshotPayload already).
+	// Carries only the raw ordered rows: the party actor has no Emby access
+	// (by design), so it cannot resolve titles/posters itself — clients
+	// treat this as an invalidation signal and re-fetch
+	// GET /api/parties/{id}/playlist to resolve metadata under their own
+	// token (same per-viewer-resolution pattern used elsewhere).
+	MsgPlaylistUpdated MessageType = "playlist_updated"
+
 	// Server -> client informational.
 	MsgError MessageType = "error"
 )
@@ -77,10 +88,41 @@ type MemberInfo struct {
 type SnapshotPayload struct {
 	AuthoritativeState
 	PartyID       string       `json:"party_id"`
+	Name          string       `json:"name"`
 	ItemID        string       `json:"item_id"`
 	DurationTicks int64        `json:"duration_ticks"`
 	HostUserID    string       `json:"host_user_id"`
 	Members       []MemberInfo `json:"members"`
+
+	// Party Settings (see ARCHITECTURE.md's Party Settings section) —
+	// folded into the snapshot rather than a separate broadcast, so any
+	// already-connected client always has the current values without a new
+	// message type: buildSnapshot() already assembles these fresh from live
+	// actor state on every call, the same way it does for ItemID/Members.
+	AutoAdvance          bool `json:"auto_advance"`
+	ShowNextDialog       bool `json:"show_next_dialog"`
+	AutoplayEnabled      bool `json:"autoplay_enabled"`
+	AutoplayDelaySeconds int  `json:"autoplay_delay_seconds"`
+
+	// PendingTransition is non-nil while the party is counting down to an
+	// automatic playlist advance (or idle) at the end of the current item —
+	// nil the rest of the time. See ARCHITECTURE.md's Party Settings
+	// section: this deliberately doesn't identify which item is next (that's
+	// resolved fresh at the deadline, not fixed when the countdown starts),
+	// only when the countdown ends and what happens then.
+	PendingTransition *PendingTransition `json:"pending_transition,omitempty"`
+}
+
+// PendingTransition describes an in-progress end-of-media countdown.
+// Deadline is an absolute server timestamp (RFC3339Nano, same convention as
+// AuthoritativeState.ServerTimestamp) rather than a relative "seconds left"
+// — clients compute remaining time against it using the clock offset they
+// already maintain, so a late-joining or reconnecting client (which gets
+// this on its own snapshot, same as anyone else) naturally sees the correct
+// remaining time without any special-cased "resume the countdown" logic.
+type PendingTransition struct {
+	Deadline string `json:"deadline"`
+	Autoplay bool   `json:"autoplay"`
 }
 
 // ClockSyncPing is sent client -> server to begin the handshake. Beyond t0,
@@ -107,6 +149,21 @@ type ClockSyncPong struct {
 	T0 int64 `json:"t0"` // echoed back unchanged
 	T1 int64 `json:"t1"` // server receive time, ms since Unix epoch
 	T2 int64 `json:"t2"` // server send time, ms since Unix epoch
+}
+
+// PlaylistItemRef is one entry in a MsgPlaylistUpdated broadcast — just
+// enough to identify and order items; no Emby-resolved metadata (see
+// MsgPlaylistUpdated's doc comment).
+type PlaylistItemRef struct {
+	ID       int64  `json:"id"`
+	ItemID   string `json:"item_id"`
+	Position int    `json:"position"`
+}
+
+// PlaylistUpdatedPayload is the complete current queue, broadcast whenever
+// it changes (add/remove/reorder).
+type PlaylistUpdatedPayload struct {
+	Items []PlaylistItemRef `json:"items"`
 }
 
 type JoinPayload struct {

@@ -5,6 +5,8 @@
 // single source of truth; this file is a thin renderer of it.
 import { api } from "./api.js";
 import { PartyConnection } from "./ws-client.js";
+import { initPlaylist, loadPlaylist } from "./playlist.js";
+import { wireSettingsForm } from "./settingsForm.js";
 import {
   TICKS_PER_SECOND,
   estimateClockOffset,
@@ -17,6 +19,7 @@ import {
 
 const partyId = window.WATCH_PARTY_ID;
 const video = document.getElementById("video");
+const playerIdleEl = document.getElementById("player-idle");
 const partyTitleEl = document.getElementById("party-title");
 const partySubtitleEl = document.getElementById("party-subtitle");
 const syncBadge = document.getElementById("sync-badge");
@@ -32,6 +35,20 @@ const endBtn = document.getElementById("end-btn");
 const leaveBtn = document.getElementById("leave-btn");
 const errorEl = document.getElementById("error");
 
+const partySettingsBtn = document.getElementById("party-settings-btn");
+const partySettingsDialog = document.getElementById("party-settings-dialog");
+const partySettingsForm = document.getElementById("party-settings-form");
+const partySettingsError = document.getElementById("party-settings-error");
+const cancelPartySettingsBtn = document.getElementById("cancel-party-settings-btn");
+const settingsPartyNameInput = document.getElementById("settings-party-name");
+const partySettingsFields = wireSettingsForm({
+  autoAdvance: "settings-auto-advance", showNextDialog: "settings-show-next-dialog",
+  autoplayEnabled: "settings-autoplay-enabled", autoplayDelay: "settings-autoplay-delay",
+});
+
+const nextItemBanner = document.getElementById("next-item-banner");
+const nextItemBannerText = document.getElementById("next-item-banner-text");
+
 // Sync tuning: defaults match the server's, but the server is the actual
 // authority — these only govern this client's own correction behavior and
 // are safe to keep as sane client-side constants rather than plumbing them
@@ -41,10 +58,14 @@ const thresholds = { softDriftMs: 300, hardDriftMs: 1500, maxRateAdjustment: 0.0
 
 let me = null;
 let hostUserId = null;
+let currentItemId = ""; // "" means idle: nothing currently loaded
 let currentSeq = -1;
 let currentState = null; // { positionTicks, isPlaying, serverTimestampMs }
 let clockOffsetMs = 0;
 let conn = null;
+let currentPartySettings = { auto_advance: true, show_next_dialog: true, autoplay_enabled: true, autoplay_delay_seconds: 5 };
+let pendingDeadlineMs = null; // null when no countdown is running
+let countdownRenderTimer = null;
 let suppress = { play: false, pause: false, seeking: false };
 
 // A transcoded stream that starts mid-item (the common case: anyone but the
@@ -148,6 +169,7 @@ function ticksToSeconds(ticks) {
 // vendor/README.md and ARCHITECTURE.md §5) to demux and feed it in via
 // Media Source Extensions.
 function attachSource(url, isTranscoded) {
+  armRecalibration();
   if (!isTranscoded) {
     video.src = url;
     return;
@@ -233,8 +255,14 @@ function recalibrateAndReseek() {
     programmaticSeek(videoSeconds(expected));
   }
 }
-video.addEventListener("loadedmetadata", recalibrateAndReseek, { once: true });
-video.addEventListener("canplay", recalibrateAndReseek, { once: true });
+// Armed fresh by attachSource on every item load (initial and every
+// subsequent playlist item change) rather than registered once here at
+// module scope -- a party's current item now changes over its lifetime, and
+// each new item's stream needs its own calibration pass.
+function armRecalibration() {
+  video.addEventListener("loadedmetadata", recalibrateAndReseek, { once: true });
+  video.addEventListener("canplay", recalibrateAndReseek, { once: true });
+}
 
 fullscreenBtn.addEventListener("click", () => {
   if (video.requestFullscreen) {
@@ -287,6 +315,31 @@ leaveBtn.addEventListener("click", async () => {
   window.location.href = "/";
 });
 
+partySettingsBtn.addEventListener("click", () => {
+  partySettingsError.hidden = true;
+  settingsPartyNameInput.value = partyTitleEl.textContent;
+  partySettingsFields.write(currentPartySettings);
+  partySettingsDialog.showModal();
+});
+cancelPartySettingsBtn.addEventListener("click", () => partySettingsDialog.close());
+partySettingsForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  partySettingsError.hidden = true;
+  try {
+    await api(`/api/parties/${encodeURIComponent(partyId)}/settings`, {
+      method: "PUT",
+      body: { name: settingsPartyNameInput.value, ...partySettingsFields.read() },
+    });
+    // The resulting snapshot broadcast (see Party.UpdateSettings) updates
+    // partyTitleEl/currentPartySettings for every connected client,
+    // including this one -- no need to apply the new values locally here.
+    partySettingsDialog.close();
+  } catch (err) {
+    partySettingsError.textContent = err.message;
+    partySettingsError.hidden = false;
+  }
+});
+
 function initials(name) {
   return (name || "?").trim().slice(0, 1).toUpperCase();
 }
@@ -336,13 +389,67 @@ function renderMembers(members) {
     }
     membersEl.appendChild(row);
   }
-  hostControls.hidden = !isHost();
+  updateIdleVisibility();
   // Ending the party is host-only, enforced server-side (a non-host's
   // request 403s — see ARCHITECTURE.md §3/handleEndParty), but there's no
   // reason to show a participant a button that can only ever error out for
   // them. Leaving, unlike ending, is available to everyone and stays
-  // unconditionally visible.
+  // unconditionally visible. Party Settings edits are host-only too, same
+  // reasoning.
   endBtn.hidden = !isHost();
+  partySettingsBtn.hidden = !isHost();
+}
+
+// The party can be idle -- freshly created (playlist not started yet) or
+// having just run out of queued items -- not just playing/paused. The
+// player shows a placeholder instead of an empty/frozen <video> element,
+// and host controls (which have nothing to act on) hide along with it.
+function updateIdleVisibility() {
+  const idle = !currentItemId;
+  playerIdleEl.hidden = !idle;
+  video.hidden = idle;
+  hostControls.hidden = !isHost() || idle;
+}
+
+// The end-of-media countdown banner: server-driven (see
+// ARCHITECTURE.md's Party Settings section) -- this only *renders* against
+// an absolute deadline the server already computed, using the same
+// clockOffsetMs the clock-sync handshake already maintains elsewhere in
+// this file. It never decides when the transition happens; the next
+// snapshot (the actual fired transition, or a host command that canceled
+// the countdown) is what clears it, not a client-side timeout guess.
+let pendingAutoplay = false;
+
+function updateNextItemBanner(snap) {
+  const pending = snap.pending_transition;
+  if (!pending || !snap.show_next_dialog) {
+    hideNextItemBanner();
+    return;
+  }
+  pendingDeadlineMs = Date.parse(pending.deadline);
+  pendingAutoplay = pending.autoplay;
+  if (!countdownRenderTimer) {
+    countdownRenderTimer = setInterval(renderCountdown, 250);
+  }
+  renderCountdown();
+}
+
+function hideNextItemBanner() {
+  pendingDeadlineMs = null;
+  if (countdownRenderTimer) {
+    clearInterval(countdownRenderTimer);
+    countdownRenderTimer = null;
+  }
+  nextItemBanner.hidden = true;
+}
+
+function renderCountdown() {
+  if (pendingDeadlineMs === null) return;
+  const remainingMs = pendingDeadlineMs - (Date.now() + clockOffsetMs);
+  const remainingSeconds = Math.max(0, Math.ceil(remainingMs / 1000));
+  const label = pendingAutoplay ? "Next item in" : "Playback pauses in";
+  nextItemBannerText.innerHTML = `${label} <strong>${remainingSeconds}s</strong>…`;
+  nextItemBanner.hidden = false;
 }
 
 function handleSnapshotOrControl(env) {
@@ -358,13 +465,55 @@ function handleSnapshotOrControl(env) {
 
   if (env.type === "snapshot") {
     hostUserId = p.host_user_id;
+    itemDurationTicks = p.duration_ticks || 0;
+    partyTitleEl.textContent = p.name;
+    currentPartySettings = {
+      auto_advance: p.auto_advance, show_next_dialog: p.show_next_dialog,
+      autoplay_enabled: p.autoplay_enabled, autoplay_delay_seconds: p.autoplay_delay_seconds,
+    };
+    updateNextItemBanner(p);
     renderMembers(p.members || []);
+    // The current item can change after join now (playlist advance, end of
+    // playlist, or a host selecting something else) -- not just at load
+    // time. A changed item_id means a new stream entirely: re-fetch (or
+    // clear) the playback URL, which is also the point this participant's
+    // access to the NEW item gets re-validated (see handlePlaybackURL and
+    // ARCHITECTURE.md's Playlist section) -- and refresh the playlist
+    // panel so its "Now playing" badge follows along.
+    if (p.item_id !== currentItemId) {
+      currentItemId = p.item_id;
+      updateIdleVisibility();
+      loadCurrentItem(currentItemId);
+      loadPlaylist();
+    }
     applyAuthoritativeState(state, { hardSeek: true });
   } else if (env.type === "seek") {
     applyAuthoritativeState(state, { hardSeek: true });
   } else {
     applyAuthoritativeState(state, { hardSeek: false });
   }
+}
+
+// Fetches (or clears, if itemId is empty -- idle) the playback URL for
+// whatever's currently loaded and points <video> at it. Used both for the
+// party's initial current item (from main()) and every subsequent item
+// change (see handleSnapshotOrControl).
+async function loadCurrentItem(itemId) {
+  video.pause();
+  video.removeAttribute("src");
+  video.load();
+  if (!itemId) return;
+
+  let playback;
+  try {
+    playback = await api(`/api/parties/${encodeURIComponent(partyId)}/playback-url`);
+  } catch (err) {
+    showError("Could not get a playback URL from Emby: " + err.message);
+    return;
+  }
+  requestedStartPositionTicks = playback.start_position_ticks || 0;
+  playbackOffsetTicks = requestedStartPositionTicks;
+  attachSource(playback.url, playback.is_transcoded);
 }
 
 // Last-computed diagnostics, piggybacked onto the next clock_sync ping so
@@ -423,29 +572,31 @@ async function main() {
   }
   hostUserId = partyInfo.host_user_id;
   itemDurationTicks = partyInfo.duration_ticks || 0;
-  partyTitleEl.textContent = partyInfo.item_title || partyInfo.item_id;
+  currentItemId = partyInfo.item_id || "";
+  partyTitleEl.textContent = partyInfo.name;
+  currentPartySettings = {
+    auto_advance: partyInfo.auto_advance, show_next_dialog: partyInfo.show_next_dialog,
+    autoplay_enabled: partyInfo.autoplay_enabled, autoplay_delay_seconds: partyInfo.autoplay_delay_seconds,
+  };
+  updateNextItemBanner(partyInfo); // in case the page loads mid-countdown (e.g. a refresh)
   const hostMember = (partyInfo.members || []).find((m) => m.is_host);
   partySubtitleEl.textContent = hostMember ? `Hosted by ${hostMember.display_name}` : "";
   renderMembers(partyInfo.members || []);
 
-  let playback;
-  try {
-    playback = await api(`/api/parties/${encodeURIComponent(partyId)}/playback-url`);
-  } catch (err) {
-    syncBadge.classList.add("is-disconnected");
-    syncText.textContent = err.message;
-    showError("Could not get a playback URL from Emby: " + err.message);
-    return;
-  }
+  initPlaylist(partyId, isHost);
+  loadPlaylist();
+
   // See the requestedStartPositionTicks/playbackOffsetTicks declarations
   // above: 0 for direct play/stream, and for transcoded playback the item
   // offset Emby was *asked* to start this transcode session at (the
   // party's position at the moment this request was made). playbackOffsetTicks
   // starts equal to this as a best guess and gets corrected once the real
-  // stream loads — see calibratePlaybackOffset.
-  requestedStartPositionTicks = playback.start_position_ticks || 0;
-  playbackOffsetTicks = requestedStartPositionTicks;
-  attachSource(playback.url, playback.is_transcoded);
+  // stream loads — see calibratePlaybackOffset. A freshly-created party (or
+  // one whose playlist just ran out) has no current item at all yet --
+  // loadCurrentItem no-ops in that case and the idle placeholder (already
+  // shown by updateIdleVisibility, called from renderMembers above) stands
+  // in for the player.
+  await loadCurrentItem(currentItemId);
 
   conn = new PartyConnection(
     partyId,
@@ -456,6 +607,9 @@ async function main() {
         case "pause":
         case "seek":
           handleSnapshotOrControl(env);
+          break;
+        case "playlist_updated":
+          loadPlaylist();
           break;
         case "clock_sync": {
           const p = env.payload;

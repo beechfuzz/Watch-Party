@@ -20,6 +20,7 @@ import (
 
 type recordedCall struct {
 	path          string
+	itemID        string
 	positionTicks int64
 	isPaused      bool
 }
@@ -34,7 +35,8 @@ func newFakeEmbyReportServer(t *testing.T) (*httptest.Server, *sync.Mutex, *[]re
 		mu.Lock()
 		pos, _ := body["PositionTicks"].(float64)
 		paused, _ := body["IsPaused"].(bool)
-		calls = append(calls, recordedCall{path: r.URL.Path, positionTicks: int64(pos), isPaused: paused})
+		itemID, _ := body["ItemId"].(string)
+		calls = append(calls, recordedCall{path: r.URL.Path, itemID: itemID, positionTicks: int64(pos), isPaused: paused})
 		mu.Unlock()
 		w.WriteHeader(204)
 	}))
@@ -90,7 +92,7 @@ func mustEncrypt(t *testing.T, c *cryptox.TokenCipher, plaintext string) string 
 func TestRecordPlaySession_SendsStartReport(t *testing.T) {
 	rp, hub, _, mu, calls := setupReporter(t)
 	ctx := context.Background()
-	p, err := hub.CreateParty(ctx, "party1", "item1", 1000*10_000_000, "user1")
+	p, err := hub.CreateParty(ctx, "party1", "Test Party", party.Settings{AutoAdvance: true, ShowNextDialog: true, AutoplayEnabled: true, AutoplayDelaySeconds: 5}, "user1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +126,7 @@ func TestRecordPlaySession_SendsStartReport(t *testing.T) {
 func TestPeriodicProgress_ReportsServerDerivedPosition(t *testing.T) {
 	rp, hub, _, mu, calls := setupReporter(t)
 	ctx := context.Background()
-	p, err := hub.CreateParty(ctx, "party1", "item1", 1000*10_000_000, "user1")
+	p, err := hub.CreateParty(ctx, "party1", "Test Party", party.Settings{AutoAdvance: true, ShowNextDialog: true, AutoplayEnabled: true, AutoplayDelaySeconds: 5}, "user1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +172,7 @@ func TestPeriodicProgress_ReportsServerDerivedPosition(t *testing.T) {
 func TestPartyEnd_TriggersStopReport(t *testing.T) {
 	rp, hub, _, mu, calls := setupReporter(t)
 	ctx := context.Background()
-	p, err := hub.CreateParty(ctx, "party1", "item1", 1000*10_000_000, "user1")
+	p, err := hub.CreateParty(ctx, "party1", "Test Party", party.Settings{AutoAdvance: true, ShowNextDialog: true, AutoplayEnabled: true, AutoplayDelaySeconds: 5}, "user1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,4 +205,61 @@ func TestPartyEnd_TriggersStopReport(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("expected a Sessions/Playing/Stopped report after party end")
+}
+
+// TestItemChanged_TriggersStopReportForOutgoingItem covers the playlist
+// advance case: when the party's current item changes, the reporter must
+// send a Stopped report for the OUTGOING item (not the new one) -- a report
+// tagging the wrong item's Emby resume point/watch history would be exactly
+// the kind of corruption the spec's server-derived-position rule exists to
+// prevent.
+func TestItemChanged_TriggersStopReportForOutgoingItem(t *testing.T) {
+	rp, hub, _, mu, calls := setupReporter(t)
+	ctx := context.Background()
+	p, err := hub.CreateParty(ctx, "party1", "Test Party", party.Settings{AutoAdvance: true, ShowNextDialog: true, AutoplayEnabled: true, AutoplayDelaySeconds: 5}, "user1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	itemA, err := p.AddPlaylistItem(ctx, "user1", "item-a", 1000*10_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	itemB, err := p.AddPlaylistItem(ctx, "user1", "item-b", 1000*10_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Join("user1", "Alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SelectCurrentItem("user1", itemA.ID); err != nil {
+		t.Fatal(err)
+	}
+	rp.RecordPlaySession(ctx, "party1", "user1", "src-a", "sess-a", "DirectStream")
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go rp.Run(runCtx)
+
+	// Host explicitly switches to item B -- item A should be stop-reported.
+	if err := p.SelectCurrentItem("user1", itemB.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		for _, c := range *calls {
+			if c.path == "/Sessions/Playing/Stopped" {
+				gotItemID := c.itemID
+				mu.Unlock()
+				if gotItemID != "item-a" {
+					t.Fatalf("Stopped report itemID = %q, want %q (the outgoing item)", gotItemID, "item-a")
+				}
+				return
+			}
+		}
+		mu.Unlock()
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("expected a Sessions/Playing/Stopped report for the outgoing item after an item change")
 }
