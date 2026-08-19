@@ -252,3 +252,75 @@ func TestPlaylistItemsRoundTrip(t *testing.T) {
 		t.Errorf("GetPlaylistItem(removed) err = %v, want ErrNotFound", err)
 	}
 }
+
+func TestAddPlaylistItems_SequentialPositionsFromExistingMax(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	if err := s.UpsertUser(ctx, "host1", "Host", "tok", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateParty(ctx, Party{ID: "party1", HostUserID: "host1", Name: "Movie Night", CreatedAt: now, Status: PartyStatusActive}); err != nil {
+		t.Fatal(err)
+	}
+
+	// One item already queued (position 0) before the batch lands.
+	if _, err := s.AddPlaylistItem(ctx, "party1", "item-0", 50, "host1", now); err != nil {
+		t.Fatal(err)
+	}
+
+	added, err := s.AddPlaylistItems(ctx, "party1", []NewPlaylistItem{
+		{ItemID: "item-a", DurationTicks: 100},
+		{ItemID: "item-b", DurationTicks: 200},
+		{ItemID: "item-c", DurationTicks: 300},
+	}, "host1", now)
+	if err != nil {
+		t.Fatalf("AddPlaylistItems: %v", err)
+	}
+	if len(added) != 3 {
+		t.Fatalf("added = %+v, want 3 rows", added)
+	}
+	for i, want := range []string{"item-a", "item-b", "item-c"} {
+		if added[i].ItemID != want || added[i].Position != i+1 {
+			t.Errorf("added[%d] = %+v, want ItemID=%s Position=%d (continuing after the existing item at position 0)", i, added[i], want, i+1)
+		}
+	}
+
+	items, err := s.ListPlaylistItems(ctx, "party1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 4 {
+		t.Fatalf("ListPlaylistItems = %+v, want 4 rows total", items)
+	}
+}
+
+func TestAddPlaylistItems_AtomicOnFailure(t *testing.T) {
+	// A batch that fails partway (here: a party_id that doesn't exist,
+	// violating the playlist_items foreign key) must leave no rows behind --
+	// the whole point of doing this in one transaction instead of N separate
+	// inserts.
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	if err := s.UpsertUser(ctx, "host1", "Host", "tok", now); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.AddPlaylistItems(ctx, "no-such-party", []NewPlaylistItem{
+		{ItemID: "item-a", DurationTicks: 100},
+		{ItemID: "item-b", DurationTicks: 200},
+	}, "host1", now); err == nil {
+		t.Fatal("expected an error inserting playlist items for a nonexistent party (party_id foreign key)")
+	}
+
+	items, err := s.ListPlaylistItems(ctx, "no-such-party")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 0 {
+		t.Errorf("ListPlaylistItems = %+v, want no rows persisted after a failed batch", items)
+	}
+}

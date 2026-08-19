@@ -57,6 +57,14 @@ type PlaylistItem struct {
 	AddedAt       time.Time
 }
 
+// NewPlaylistItem is one item to insert via Store.AddPlaylistItems — the
+// batch counterpart to AddPlaylistItem's individual itemID/durationTicks
+// args.
+type NewPlaylistItem struct {
+	ItemID        string
+	DurationTicks int64
+}
+
 type ConnectionStatus string
 
 const (

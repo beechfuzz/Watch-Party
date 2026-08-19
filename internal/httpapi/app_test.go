@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -47,6 +48,9 @@ func newFakeEmby(t *testing.T, capturePlaybackInfoBody *map[string]any) *httptes
 	mux.HandleFunc("/Users/user-alice/Items/item1", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{"Id": "item1", "Name": "Movie", "RunTimeTicks": int64(1200000000)})
 	})
+	mux.HandleFunc("/Users/user-alice/Items", bulkItemsHandler(map[string]map[string]any{
+		"item1": {"Id": "item1", "Name": "Movie", "RunTimeTicks": int64(1200000000)},
+	}))
 	mux.HandleFunc("/Items/item1/PlaybackInfo", func(w http.ResponseWriter, r *http.Request) {
 		if capturePlaybackInfoBody != nil {
 			json.NewDecoder(r.Body).Decode(capturePlaybackInfoBody)
@@ -62,6 +66,25 @@ func newFakeEmby(t *testing.T, capturePlaybackInfoBody *map[string]any) *httptes
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// bulkItemsHandler serves GET /Users/{userId}/Items?Ids=... — the endpoint
+// emby.Client.GetItems uses for the playlist batch-add handler — from a
+// small item registry. Only requested ids present in items come back,
+// exactly like a real Emby server would omit an id the requester can't see;
+// tests simulate "one of the selected items is inaccessible" by simply not
+// including it in the map.
+func bulkItemsHandler(items map[string]map[string]any) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ids := strings.Split(r.URL.Query().Get("Ids"), ",")
+		out := make([]map[string]any, 0, len(ids))
+		for _, id := range ids {
+			if it, ok := items[id]; ok {
+				out = append(out, it)
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"Items": out})
+	}
 }
 
 func newTestApp(t *testing.T) (*App, *httptest.Server) {
@@ -158,6 +181,28 @@ func (c *testClient) do(method, path string, body any, csrf bool) (*http.Respons
 	return resp, out
 }
 
+// addPlaylistItemViaBatch adds a single item through
+// POST /api/parties/{id}/playlist/batch and unwraps the one resulting item
+// from its {"items": [...]} response — the single-item POST
+// /api/parties/{id}/playlist endpoint this replaced was removed once the
+// browse dialog's checkbox → batch-add flow became the only production
+// caller of playlist adds (see the plan's "Remove handleAddPlaylistItem"
+// note), so this helper keeps test call sites for the common single-item
+// case simple.
+func addPlaylistItemViaBatch(t *testing.T, c *testClient, partyID, itemID string) (*http.Response, map[string]any) {
+	t.Helper()
+	resp, body := c.do("POST", "/api/parties/"+partyID+"/playlist/batch", map[string]any{"item_ids": []string{itemID}}, true)
+	if resp.StatusCode != http.StatusCreated {
+		return resp, body
+	}
+	items, ok := body["items"].([]any)
+	if !ok || len(items) == 0 {
+		t.Fatalf("batch add response missing items: %v", body)
+	}
+	first, _ := items[0].(map[string]any)
+	return resp, first
+}
+
 // createPartyWithCurrentItem drives the multi-step flow that replaced the
 // old single-request "create with item_id" design: create a party by name,
 // add itemID to its (now-empty-at-creation) playlist, and select it as the
@@ -172,7 +217,7 @@ func createPartyWithCurrentItem(t *testing.T, c *testClient, name, itemID string
 	if !ok {
 		t.Fatalf("create party: missing party_id in response: %v", created)
 	}
-	resp2, added := c.do("POST", "/api/parties/"+partyID+"/playlist", map[string]string{"item_id": itemID}, true)
+	resp2, added := addPlaylistItemViaBatch(t, c, partyID, itemID)
 	if resp2.StatusCode != http.StatusCreated {
 		t.Fatalf("add playlist item: status = %d body=%v", resp2.StatusCode, added)
 	}
@@ -379,6 +424,10 @@ func TestPlaybackURL_ReAuthorizedPerCurrentItem(t *testing.T) {
 	mux.HandleFunc("/Users/user-alice/Items/item2", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{"Id": "item2", "Name": "Show", "RunTimeTicks": int64(600000000)})
 	})
+	mux.HandleFunc("/Users/user-alice/Items", bulkItemsHandler(map[string]map[string]any{
+		"item1": {"Id": "item1", "Name": "Movie", "RunTimeTicks": int64(1200000000)},
+		"item2": {"Id": "item2", "Name": "Show", "RunTimeTicks": int64(600000000)},
+	}))
 	mux.HandleFunc("/Items/item1/PlaybackInfo", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"PlaySessionId": "sess1",
@@ -429,7 +478,7 @@ func TestPlaybackURL_ReAuthorizedPerCurrentItem(t *testing.T) {
 	bob.csrfToken = sess.CSRFToken
 
 	// Host switches the party's current item to item2.
-	respAdd, added := alice.do("POST", "/api/parties/"+partyID+"/playlist", map[string]string{"item_id": "item2"}, true)
+	respAdd, added := addPlaylistItemViaBatch(t, alice, partyID, "item2")
 	if respAdd.StatusCode != http.StatusCreated {
 		t.Fatalf("add item2: status = %d body=%v", respAdd.StatusCode, added)
 	}
@@ -714,12 +763,12 @@ func TestPlaylistMutation_OnlyHostAllowed(t *testing.T) {
 	bob := bobSession(t, app, srv)
 
 	// Non-host cannot add.
-	if resp, body := bob.do("POST", "/api/parties/"+partyID+"/playlist", map[string]string{"item_id": "item1"}, true); resp.StatusCode != http.StatusForbidden {
+	if resp, body := bob.do("POST", "/api/parties/"+partyID+"/playlist/batch", map[string]any{"item_ids": []string{"item1"}}, true); resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("bob add: status = %d body=%v, want 403", resp.StatusCode, body)
 	}
 
 	// Host adds two items.
-	resp2, itemA := alice.do("POST", "/api/parties/"+partyID+"/playlist", map[string]string{"item_id": "item1"}, true)
+	resp2, itemA := addPlaylistItemViaBatch(t, alice, partyID, "item1")
 	if resp2.StatusCode != http.StatusCreated {
 		t.Fatalf("alice add: status = %d body=%v", resp2.StatusCode, itemA)
 	}
@@ -773,6 +822,206 @@ func TestGetPlaylist_ListsResolvedItems(t *testing.T) {
 	}
 	if entry["restricted"] != false {
 		t.Errorf("restricted = %v, want false", entry["restricted"])
+	}
+}
+
+// newBulkFakeEmby is a minimal fake Emby server for tests that only need
+// auth plus the bulk Items?Ids=... endpoint (batch playlist-add tests) --
+// lighter than newFakeEmby, which also wires up PlaybackInfo/Sessions
+// endpoints these tests don't exercise.
+func newBulkFakeEmby(t *testing.T, items map[string]map[string]any) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/Users/AuthenticateByName", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"AccessToken": "fake-token",
+			"User":        map[string]string{"Id": "user-alice", "Name": "Alice"},
+		})
+	})
+	mux.HandleFunc("/Users/user-alice/Items", bulkItemsHandler(items))
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestHandleBatchAddPlaylistItems_HostOnly(t *testing.T) {
+	app, srv := newTestApp(t)
+	alice := loginTestClient(t, srv)
+	_, created := alice.do("POST", "/api/parties", map[string]string{"name": "Movie Night"}, true)
+	partyID := created["party_id"].(string)
+	bob := bobSession(t, app, srv)
+
+	resp, body := bob.do("POST", "/api/parties/"+partyID+"/playlist/batch", map[string]any{"item_ids": []string{"item1"}}, true)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d body=%v, want 403", resp.StatusCode, body)
+	}
+}
+
+func TestHandleBatchAddPlaylistItems_Atomicity(t *testing.T) {
+	// item-b is deliberately omitted from the fake Emby server's registry --
+	// simulating an item the requester can't see (or that doesn't exist),
+	// which a real Emby Items?Ids=... call would simply omit rather than
+	// error on.
+	fakeSrv := newBulkFakeEmby(t, map[string]map[string]any{
+		"item-a": {"Id": "item-a", "Name": "A", "RunTimeTicks": int64(100)},
+	})
+	_, srv := newTestAppWithEmby(t, emby.NewClient(fakeSrv.URL))
+	c := loginTestClient(t, srv)
+	_, created := c.do("POST", "/api/parties", map[string]string{"name": "Movie Night"}, true)
+	partyID := created["party_id"].(string)
+
+	resp, body := c.do("POST", "/api/parties/"+partyID+"/playlist/batch", map[string]any{"item_ids": []string{"item-a", "item-b"}}, true)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%v, want 400 (whole batch rejected when one item is inaccessible)", resp.StatusCode, body)
+	}
+
+	listResp, listBody := c.do("GET", "/api/parties/"+partyID+"/playlist", nil, false)
+	if listResp.StatusCode != http.StatusOK {
+		t.Fatalf("list playlist: status = %d", listResp.StatusCode)
+	}
+	items, _ := listBody["items"].([]any)
+	if len(items) != 0 {
+		t.Errorf("playlist = %v, want empty (no partial add on a rejected batch)", items)
+	}
+}
+
+func TestHandleBatchAddPlaylistItems_Order(t *testing.T) {
+	fakeSrv := newBulkFakeEmby(t, map[string]map[string]any{
+		"item-a": {"Id": "item-a", "Name": "A", "RunTimeTicks": int64(100)},
+		"item-b": {"Id": "item-b", "Name": "B", "RunTimeTicks": int64(200)},
+	})
+	_, srv := newTestAppWithEmby(t, emby.NewClient(fakeSrv.URL))
+	c := loginTestClient(t, srv)
+	_, created := c.do("POST", "/api/parties", map[string]string{"name": "Movie Night"}, true)
+	partyID := created["party_id"].(string)
+
+	resp, body := c.do("POST", "/api/parties/"+partyID+"/playlist/batch", map[string]any{"item_ids": []string{"item-b", "item-a"}}, true)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d body=%v", resp.StatusCode, body)
+	}
+	items, ok := body["items"].([]any)
+	if !ok || len(items) != 2 {
+		t.Fatalf("items = %v, want 2", body["items"])
+	}
+	first := items[0].(map[string]any)
+	second := items[1].(map[string]any)
+	if first["item_id"] != "item-b" || second["item_id"] != "item-a" {
+		t.Errorf("order = [%v, %v], want [item-b, item-a] (the caller's request order)", first["item_id"], second["item_id"])
+	}
+}
+
+func TestHandleBatchAddPlaylistItems_SingleEmbyCall(t *testing.T) {
+	var callCount int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/Users/AuthenticateByName", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"AccessToken": "fake-token",
+			"User":        map[string]string{"Id": "user-alice", "Name": "Alice"},
+		})
+	})
+	itemsHandler := bulkItemsHandler(map[string]map[string]any{
+		"item-a": {"Id": "item-a", "Name": "A", "RunTimeTicks": int64(100)},
+		"item-b": {"Id": "item-b", "Name": "B", "RunTimeTicks": int64(200)},
+		"item-c": {"Id": "item-c", "Name": "C", "RunTimeTicks": int64(300)},
+	})
+	mux.HandleFunc("/Users/user-alice/Items", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&callCount, 1)
+		itemsHandler(w, r)
+	})
+	fakeSrv := httptest.NewServer(mux)
+	defer fakeSrv.Close()
+
+	_, srv := newTestAppWithEmby(t, emby.NewClient(fakeSrv.URL))
+	c := loginTestClient(t, srv)
+	_, created := c.do("POST", "/api/parties", map[string]string{"name": "Movie Night"}, true)
+	partyID := created["party_id"].(string)
+
+	resp, body := c.do("POST", "/api/parties/"+partyID+"/playlist/batch", map[string]any{"item_ids": []string{"item-a", "item-b", "item-c"}}, true)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d body=%v", resp.StatusCode, body)
+	}
+	if got := atomic.LoadInt32(&callCount); got != 1 {
+		t.Errorf("Emby Items calls = %d, want exactly 1 for a 3-item batch (not N)", got)
+	}
+}
+
+func TestHandleListSeasons(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/Users/AuthenticateByName", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"AccessToken": "fake-token",
+			"User":        map[string]string{"Id": "user-alice", "Name": "Alice"},
+		})
+	})
+	mux.HandleFunc("/Shows/series-1/Seasons", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"Items": []map[string]any{
+			{"Id": "season-1", "Name": "Season 1", "IndexNumber": 1, "SeriesName": "Andor"},
+		}})
+	})
+	fakeSrv := httptest.NewServer(mux)
+	defer fakeSrv.Close()
+
+	_, srv := newTestAppWithEmby(t, emby.NewClient(fakeSrv.URL))
+	c := loginTestClient(t, srv)
+
+	resp, body := c.do("GET", "/api/emby/series/series-1/seasons", nil, false)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d body=%v", resp.StatusCode, body)
+	}
+	seasons, ok := body["seasons"].([]any)
+	if !ok || len(seasons) != 1 {
+		t.Fatalf("seasons = %v, want exactly 1", body["seasons"])
+	}
+	season := seasons[0].(map[string]any)
+	if season["id"] != "season-1" || season["series_name"] != "Andor" {
+		t.Errorf("season = %v", season)
+	}
+}
+
+func TestHandleListEpisodes(t *testing.T) {
+	var gotSeasonID string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/Users/AuthenticateByName", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"AccessToken": "fake-token",
+			"User":        map[string]string{"Id": "user-alice", "Name": "Alice"},
+		})
+	})
+	mux.HandleFunc("/Shows/series-1/Episodes", func(w http.ResponseWriter, r *http.Request) {
+		gotSeasonID = r.URL.Query().Get("seasonId")
+		json.NewEncoder(w).Encode(map[string]any{"Items": []map[string]any{
+			{"Id": "ep-1", "Name": "Episode One", "IndexNumber": 1, "ParentIndexNumber": 1, "SeriesName": "Andor", "RunTimeTicks": int64(360000000)},
+		}})
+	})
+	fakeSrv := httptest.NewServer(mux)
+	defer fakeSrv.Close()
+
+	_, srv := newTestAppWithEmby(t, emby.NewClient(fakeSrv.URL))
+	c := loginTestClient(t, srv)
+
+	resp, body := c.do("GET", "/api/emby/seasons/season-1/episodes?series_id=series-1", nil, false)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d body=%v", resp.StatusCode, body)
+	}
+	if gotSeasonID != "season-1" {
+		t.Errorf("seasonId query param sent to Emby = %q, want season-1", gotSeasonID)
+	}
+	episodes, ok := body["episodes"].([]any)
+	if !ok || len(episodes) != 1 {
+		t.Fatalf("episodes = %v, want exactly 1", body["episodes"])
+	}
+	ep := episodes[0].(map[string]any)
+	if ep["run_time_ticks"].(float64) != 360000000 {
+		t.Errorf("run_time_ticks = %v, want 360000000 (from the listing response directly, no extra call)", ep["run_time_ticks"])
+	}
+}
+
+func TestHandleListEpisodes_RequiresSeriesID(t *testing.T) {
+	_, srv := newTestApp(t)
+	c := loginTestClient(t, srv)
+	resp, body := c.do("GET", "/api/emby/seasons/season-1/episodes", nil, false)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%v, want 400 when series_id is omitted", resp.StatusCode, body)
 	}
 }
 

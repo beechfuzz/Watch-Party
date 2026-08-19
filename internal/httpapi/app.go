@@ -50,12 +50,14 @@ func RegisterRoutes(mux *http.ServeMux, app *App) {
 	mux.HandleFunc("PUT /api/parties/{id}/settings", app.withAuth(app.withCSRF(app.handleUpdatePartySettings)))
 
 	mux.HandleFunc("GET /api/parties/{id}/playlist", app.withAuth(app.handleGetPlaylist))
-	mux.HandleFunc("POST /api/parties/{id}/playlist", app.withAuth(app.withCSRF(app.handleAddPlaylistItem)))
+	mux.HandleFunc("POST /api/parties/{id}/playlist/batch", app.withAuth(app.withCSRF(app.handleBatchAddPlaylistItems)))
 	mux.HandleFunc("DELETE /api/parties/{id}/playlist/{itemId}", app.withAuth(app.withCSRF(app.handleRemovePlaylistItem)))
 	mux.HandleFunc("PUT /api/parties/{id}/playlist/order", app.withAuth(app.withCSRF(app.handleReorderPlaylist)))
 	mux.HandleFunc("POST /api/parties/{id}/playlist/{itemId}/play", app.withAuth(app.withCSRF(app.handleSelectPlaylistItem)))
 
 	mux.HandleFunc("GET /api/emby/items", app.withAuth(app.handleBrowseEmbyItems))
+	mux.HandleFunc("GET /api/emby/series/{id}/seasons", app.withAuth(app.handleListSeasons))
+	mux.HandleFunc("GET /api/emby/seasons/{id}/episodes", app.withAuth(app.handleListEpisodes))
 
 	mux.HandleFunc("GET /ws/parties/{id}", app.handleWebSocket) // auth + origin validated inside (cookie-based; see ws.go)
 

@@ -283,6 +283,51 @@ func (s *Store) AddPlaylistItem(ctx context.Context, partyID, itemID string, dur
 	}, nil
 }
 
+// AddPlaylistItems inserts multiple playlist entries at the end of the
+// party's queue in one transaction — the batch counterpart to
+// AddPlaylistItem, used by the "Add N Selected Item(s)" flow so a large
+// selection is one atomic write (and, at the party actor level, one
+// playlist_updated broadcast) instead of N. Positions are assigned
+// sequentially starting after the current max, preserving items' order.
+func (s *Store) AddPlaylistItems(ctx context.Context, partyID string, items []NewPlaylistItem, addedByUserID string, addedAt time.Time) ([]PlaylistItem, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("dbx: add playlist items: %w", err)
+	}
+	defer tx.Rollback()
+
+	var nextPos int
+	row := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(position) + 1, 0) FROM playlist_items WHERE party_id = ?`, partyID)
+	if err := row.Scan(&nextPos); err != nil {
+		return nil, fmt.Errorf("dbx: add playlist items: compute position: %w", err)
+	}
+
+	out := make([]PlaylistItem, 0, len(items))
+	for i, item := range items {
+		pos := nextPos + i
+		res, err := tx.ExecContext(ctx, `
+			INSERT INTO playlist_items (party_id, item_id, duration_ticks, position, added_by_user_id, added_at)
+			VALUES (?, ?, ?, ?, ?, ?)
+		`, partyID, item.ItemID, item.DurationTicks, pos, addedByUserID, timeStr(addedAt))
+		if err != nil {
+			return nil, fmt.Errorf("dbx: add playlist items: %w", err)
+		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			return nil, fmt.Errorf("dbx: add playlist items: %w", err)
+		}
+		out = append(out, PlaylistItem{
+			ID: id, PartyID: partyID, ItemID: item.ItemID, DurationTicks: item.DurationTicks,
+			Position: pos, AddedByUserID: addedByUserID, AddedAt: addedAt,
+		})
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("dbx: add playlist items: %w", err)
+	}
+	return out, nil
+}
+
 // ListPlaylistItems returns a party's queue in order.
 func (s *Store) ListPlaylistItems(ctx context.Context, partyID string) ([]PlaylistItem, error) {
 	rows, err := s.db.QueryContext(ctx, `

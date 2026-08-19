@@ -470,6 +470,123 @@ func TestReportPlaybackProgress_SendsPositionAndPauseState(t *testing.T) {
 	}
 }
 
+func TestListSeasons_ParsesResponse(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		if r.URL.Query().Get("userId") != "user-1" {
+			t.Errorf("userId = %q", r.URL.Query().Get("userId"))
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"Items": []map[string]any{
+				{"Id": "season1", "Name": "Season 1", "IndexNumber": 1, "SeriesName": "Andor"},
+				{"Id": "season2", "Name": "Season 2", "IndexNumber": 2, "SeriesName": "Andor", "ImageTags": map[string]string{"Primary": "tag123"}},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	seasons, err := c.ListSeasons(context.Background(), "tok", "user-1", "series-1")
+	if err != nil {
+		t.Fatalf("ListSeasons: %v", err)
+	}
+	if gotPath != "/Shows/series-1/Seasons" {
+		t.Errorf("path = %q", gotPath)
+	}
+	if len(seasons) != 2 {
+		t.Fatalf("seasons = %+v, want 2", seasons)
+	}
+	if seasons[0].SeriesID != "series-1" {
+		t.Errorf("SeriesID = %q, want the caller's own input (series-1), not trusted from the response", seasons[0].SeriesID)
+	}
+	if seasons[1].PosterURL == "" {
+		t.Error("expected PosterURL to be set when ImageTags.Primary is present")
+	}
+}
+
+func TestListEpisodes_RunTimeTicksFromListingResponse_NoExtraCall(t *testing.T) {
+	// Emby's episode listing already includes RunTimeTicks per item -- this
+	// pins that ListEpisodes reads it straight from that response and never
+	// issues a follow-up GetItem call per episode (which would be an N+1
+	// round trip for a large season).
+	var callCount int
+	var gotPath, gotSeasonID string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		gotPath = r.URL.Path
+		gotSeasonID = r.URL.Query().Get("seasonId")
+		json.NewEncoder(w).Encode(map[string]any{
+			"Items": []map[string]any{
+				{"Id": "ep1", "Name": "Episode One", "IndexNumber": 1, "ParentIndexNumber": 1, "SeriesName": "Andor", "RunTimeTicks": int64(360000000)},
+				{"Id": "ep2", "Name": "Episode Two", "IndexNumber": 2, "ParentIndexNumber": 1, "SeriesName": "Andor", "RunTimeTicks": int64(372000000)},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	episodes, err := c.ListEpisodes(context.Background(), "tok", "user-1", "series-1", "season-1")
+	if err != nil {
+		t.Fatalf("ListEpisodes: %v", err)
+	}
+	if callCount != 1 {
+		t.Errorf("callCount = %d, want exactly 1 (no per-episode follow-up call)", callCount)
+	}
+	if gotPath != "/Shows/series-1/Episodes" {
+		t.Errorf("path = %q", gotPath)
+	}
+	if gotSeasonID != "season-1" {
+		t.Errorf("seasonId query param = %q, want season-1", gotSeasonID)
+	}
+	if len(episodes) != 2 {
+		t.Fatalf("episodes = %+v, want 2", episodes)
+	}
+	if episodes[0].RunTimeTicks != 360000000 || episodes[1].RunTimeTicks != 372000000 {
+		t.Errorf("RunTimeTicks not read from listing response: %+v", episodes)
+	}
+	if episodes[0].SeasonIndexNumber != 1 {
+		t.Errorf("SeasonIndexNumber = %d, want 1 (from Emby's ParentIndexNumber field)", episodes[0].SeasonIndexNumber)
+	}
+	if episodes[0].SeriesID != "series-1" || episodes[0].SeasonID != "season-1" {
+		t.Errorf("episode = %+v, want SeriesID/SeasonID set from the caller's own input", episodes[0])
+	}
+}
+
+func TestGetItems_CommaJoinedIdsAndPartialResponse(t *testing.T) {
+	var gotIds string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/Users/user-1/Items" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		gotIds = r.URL.Query().Get("Ids")
+		// Simulate one of the three requested ids being inaccessible to this
+		// user: Emby simply omits it from the response, rather than erroring.
+		json.NewEncoder(w).Encode(map[string]any{
+			"Items": []map[string]any{
+				{"Id": "item-a", "Name": "A", "RunTimeTicks": int64(100)},
+				{"Id": "item-c", "Name": "C", "RunTimeTicks": int64(300)},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	items, err := c.GetItems(context.Background(), "tok", "user-1", []string{"item-a", "item-b", "item-c"})
+	if err != nil {
+		t.Fatalf("GetItems: %v", err)
+	}
+	if gotIds != "item-a,item-b,item-c" {
+		t.Errorf("Ids query param = %q, want comma-joined request order", gotIds)
+	}
+	if len(items) != 2 {
+		t.Fatalf("items = %+v, want exactly the 2 accessible items (caller must detect the gap itself)", items)
+	}
+	if items[0].ID != "item-a" || items[1].ID != "item-c" {
+		t.Errorf("items = %+v", items)
+	}
+}
+
 func TestGetItem_ParsesRunTimeTicks(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/Users/user-1/Items/item7" {

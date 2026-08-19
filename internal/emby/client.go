@@ -247,6 +247,156 @@ func (c *Client) ListItems(ctx context.Context, accessToken, userID string, q It
 	return out, nil
 }
 
+// SeasonSummary is one season entry from a series' season listing, used by
+// the Playlist browser's series drill-down (checking/browsing a series'
+// seasons without adding the whole show as one item).
+type SeasonSummary struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	IndexNumber int    `json:"index_number"`
+	SeriesID    string `json:"series_id"`
+	SeriesName  string `json:"series_name"`
+	PosterURL   string `json:"poster_url,omitempty"`
+}
+
+// ListSeasons lists a series' seasons — GET /Shows/{seriesID}/Seasons. This
+// is the standard Emby/Jellyfin-family endpoint for the purpose, but — like
+// ListItems was at first — it has not been confirmed against a live Emby
+// server from this codebase; treat the shape as unverified until it has
+// been (see the package doc comment above).
+func (c *Client) ListSeasons(ctx context.Context, accessToken, userID, seriesID string) ([]SeasonSummary, error) {
+	vals := url.Values{}
+	vals.Set("userId", userID)
+	vals.Set("Fields", "SeriesName")
+	vals.Set("ImageTypeLimit", "1")
+	u := fmt.Sprintf("%s/Shows/%s/Seasons?%s", c.baseURL, url.PathEscape(seriesID), vals.Encode())
+	var parsed struct {
+		Items []struct {
+			ID          string `json:"Id"`
+			Name        string `json:"Name"`
+			IndexNumber int    `json:"IndexNumber"`
+			SeriesName  string `json:"SeriesName"`
+			ImageTags   struct {
+				Primary string `json:"Primary"`
+			} `json:"ImageTags"`
+		} `json:"Items"`
+	}
+	if err := c.getJSON(ctx, u, accessToken, &parsed); err != nil {
+		return nil, err
+	}
+	out := make([]SeasonSummary, 0, len(parsed.Items))
+	for _, it := range parsed.Items {
+		// SeriesID is set from the caller's own input rather than trusted
+		// from the response: the caller already knows it (it's the path
+		// parameter that produced this listing), so there's no reason to
+		// depend on Emby echoing it back correctly.
+		s := SeasonSummary{ID: it.ID, Name: it.Name, IndexNumber: it.IndexNumber, SeriesID: seriesID, SeriesName: it.SeriesName}
+		if it.ImageTags.Primary != "" {
+			s.PosterURL = c.ImageURL(it.ID, accessToken)
+		}
+		out = append(out, s)
+	}
+	return out, nil
+}
+
+// EpisodeSummary is one episode entry from a season's episode listing, used
+// by the Playlist browser's season drill-down and by recursive
+// series/season selection. RunTimeTicks is populated straight from this
+// listing response — Emby's episode listing includes it per-item — so
+// adding a season/series's episodes never needs a separate per-episode
+// metadata call.
+type EpisodeSummary struct {
+	ID                string `json:"id"`
+	Name              string `json:"name"`
+	IndexNumber       int    `json:"index_number"`
+	SeasonID          string `json:"season_id"`
+	SeasonIndexNumber int    `json:"season_index_number"`
+	SeriesID          string `json:"series_id"`
+	SeriesName        string `json:"series_name"`
+	RunTimeTicks      int64  `json:"run_time_ticks"`
+	PosterURL         string `json:"poster_url,omitempty"`
+}
+
+// ListEpisodes lists a season's episodes — GET /Shows/{seriesID}/Episodes,
+// filtered to seasonID. Emby's episode listing is scoped under the series,
+// not the season, so seriesID is required here alongside seasonID even
+// though the caller is conceptually "browsing a season" — the frontend
+// already has it (from the SeasonSummary the season card being drilled into
+// was rendered from). Same unverified-until-confirmed-against-a-live-server
+// caveat as ListSeasons.
+func (c *Client) ListEpisodes(ctx context.Context, accessToken, userID, seriesID, seasonID string) ([]EpisodeSummary, error) {
+	vals := url.Values{}
+	vals.Set("userId", userID)
+	vals.Set("seasonId", seasonID)
+	vals.Set("Fields", "RunTimeTicks,SeriesName")
+	vals.Set("ImageTypeLimit", "1")
+	u := fmt.Sprintf("%s/Shows/%s/Episodes?%s", c.baseURL, url.PathEscape(seriesID), vals.Encode())
+	var parsed struct {
+		Items []struct {
+			ID                string `json:"Id"`
+			Name              string `json:"Name"`
+			IndexNumber       int    `json:"IndexNumber"`
+			ParentIndexNumber int    `json:"ParentIndexNumber"` // Emby's field for the season number
+			SeriesName        string `json:"SeriesName"`
+			RunTimeTicks      int64  `json:"RunTimeTicks"`
+			ImageTags         struct {
+				Primary string `json:"Primary"`
+			} `json:"ImageTags"`
+		} `json:"Items"`
+	}
+	if err := c.getJSON(ctx, u, accessToken, &parsed); err != nil {
+		return nil, err
+	}
+	out := make([]EpisodeSummary, 0, len(parsed.Items))
+	for _, it := range parsed.Items {
+		e := EpisodeSummary{
+			ID: it.ID, Name: it.Name, IndexNumber: it.IndexNumber,
+			SeasonID: seasonID, SeasonIndexNumber: it.ParentIndexNumber,
+			SeriesID: seriesID, SeriesName: it.SeriesName, RunTimeTicks: it.RunTimeTicks,
+		}
+		if it.ImageTags.Primary != "" {
+			e.PosterURL = c.ImageURL(it.ID, accessToken)
+		}
+		out = append(out, e)
+	}
+	return out, nil
+}
+
+// GetItems fetches metadata for multiple items in one round trip —
+// GET /Users/{userId}/Items?Ids=id1,id2,... — used by the playlist batch-add
+// endpoint instead of one GetItem call per item, which would be an N+1
+// round trip for a large season/series selection purely to get
+// duration/title/access-check data this single call already provides. Access
+// enforcement works the same way ListItems/GetItem already enforce it: the
+// call is scoped to the requester's own userID/token, so an item that user
+// can't see (or that doesn't exist) simply isn't present in the returned
+// slice — callers must check for that themselves (see
+// httpapi.handleBatchAddPlaylistItems). This is a direct extension of
+// ListItems' already-in-use Users/{userId}/Items call (just adding the Ids
+// filter), so lower-risk than ListSeasons/ListEpisodes, but the Ids filter
+// specifically has not been confirmed against a live Emby server either.
+func (c *Client) GetItems(ctx context.Context, accessToken, userID string, itemIDs []string) ([]ItemInfo, error) {
+	vals := url.Values{}
+	vals.Set("Ids", strings.Join(itemIDs, ","))
+	vals.Set("Fields", "RunTimeTicks")
+	u := fmt.Sprintf("%s/Users/%s/Items?%s", c.baseURL, url.PathEscape(userID), vals.Encode())
+	var parsed struct {
+		Items []struct {
+			ID           string `json:"Id"`
+			Name         string `json:"Name"`
+			RunTimeTicks int64  `json:"RunTimeTicks"`
+		} `json:"Items"`
+	}
+	if err := c.getJSON(ctx, u, accessToken, &parsed); err != nil {
+		return nil, err
+	}
+	out := make([]ItemInfo, 0, len(parsed.Items))
+	for _, it := range parsed.Items {
+		out = append(out, ItemInfo{ID: it.ID, Name: it.Name, RunTimeTicks: it.RunTimeTicks})
+	}
+	return out, nil
+}
+
 // ImageURL builds a browser-fetchable poster URL for itemID, using the same
 // query-param api_key auth as the constructed playback URL (an <img> tag
 // can't set custom headers either) — see GetPlaybackURL and
