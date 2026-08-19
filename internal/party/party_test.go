@@ -1348,3 +1348,178 @@ func TestSweepInactiveParties_RecentMemberActivityKeepsPartyAlive(t *testing.T) 
 		t.Error("party wrongly removed from hub")
 	}
 }
+
+// --- Regression tests: the end-of-media stale-broadcast window ---
+//
+// These cover the fix on top of the TestPendingTransition_* suite above:
+// closing the gap between natural end-of-media and the next periodic
+// snapshotTicker tick, during which the server's raw state still says
+// IsPlaying=true past the item's duration. See
+// checkEndOfMediaAndBroadcast's doc comment (party.go) and
+// ARCHITECTURE.md's postmortem for this bug. Each test uses a deliberately
+// long SnapshotInterval so the periodic tick cannot be what corrects state
+// within the test's deadline -- isolating whatever mechanism is actually
+// under test (the ended_hint fast path, or a passive read/broadcast
+// self-correcting) from the tick.
+
+func newTestHubWithTuning(t *testing.T, tuning Tuning) *Hub {
+	t.Helper()
+	store := testStore(t)
+	h := NewHub(store, tuning, testLogger())
+	t.Cleanup(func() { h.Shutdown(context.Background()) })
+	return h
+}
+
+func longSnapshotIntervalTuning() Tuning {
+	tuning := testTuning()
+	tuning.SnapshotInterval = 10 * time.Second
+	return tuning
+}
+
+// TestEndedHint_TriggersImmediateCheck proves the event-driven hint closes
+// the wait-up-to-SnapshotInterval window: with a deliberately long
+// SnapshotInterval, reaching the end doesn't get corrected by the periodic
+// tick before the deadline, but HandleEndedHint's immediate re-check does.
+func TestEndedHint_TriggersImmediateCheck(t *testing.T) {
+	hub := newTestHubWithTuning(t, longSnapshotIntervalTuning())
+	seedUser(t, hub.store, "host", "Host")
+	durationTicks := int64(1) * 10_000_000 // 1 second item
+	settings := testSettings()
+	settings.AutoplayDelaySeconds = 1
+	p := createPartyWithItemAndSettings(t, hub, "party1", "item1", durationTicks, "host", settings)
+	if _, err := p.AddPlaylistItem(context.Background(), "host", "item2", 1000*10_000_000); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = p.Join("host", "Host")
+	if err := p.HandleControl("host", wsproto.MsgPlay, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait past the item's real duration, then confirm the server is still
+	// sitting in the stale state -- reading p.state/p.pending directly
+	// (dispatched via p.do(), the same unexported-field-access pattern
+	// already used above for p.current) rather than through Snapshot(),
+	// since Snapshot() itself now self-corrects and would erase the very
+	// precondition this test needs to observe.
+	time.Sleep(1200 * time.Millisecond)
+	var stillStale bool
+	p.do(func() {
+		stillStale = p.state.IsPlaying && p.pending == nil
+	})
+	if !stillStale {
+		t.Fatal("expected party to still be in the stale window (IsPlaying=true, no pending transition) before HandleEndedHint -- test setup assumption violated")
+	}
+
+	p.HandleEndedHint()
+
+	// HandleEndedHint's own dispatch is synchronous (p.do blocks until the
+	// enqueued closure finishes on the actor goroutine -- see do()'s doc
+	// comment), so this is safe to read immediately: no polling loop, and
+	// critically, no wait anywhere near the 10s SnapshotInterval.
+	snap := p.Snapshot()
+	if snap.PendingTransition == nil {
+		t.Fatal("HandleEndedHint did not trigger an immediate pending-transition check")
+	}
+}
+
+// TestSnapshot_DuringStaleWindow_SelfCorrects exercises the fix through
+// Party.Snapshot() itself -- the chokepoint behind embyreport's poll,
+// handleListParties (dashboard GET), handleGetParty (a plain page
+// refresh), and the WS pre-join reauth check, all of which are thin
+// wrappers around this exact call.
+func TestSnapshot_DuringStaleWindow_SelfCorrects(t *testing.T) {
+	hub := newTestHubWithTuning(t, longSnapshotIntervalTuning())
+	seedUser(t, hub.store, "host", "Host")
+	durationTicks := int64(1) * 10_000_000
+	settings := testSettings()
+	settings.AutoplayDelaySeconds = 1
+	p := createPartyWithItemAndSettings(t, hub, "party1", "item1", durationTicks, "host", settings)
+	if _, err := p.AddPlaylistItem(context.Background(), "host", "item2", 1000*10_000_000); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = p.Join("host", "Host")
+	if err := p.HandleControl("host", wsproto.MsgPlay, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(1200 * time.Millisecond)
+
+	snap := p.Snapshot()
+	if snap.PendingTransition == nil {
+		t.Fatal("Snapshot() returned stale state (no pending transition) instead of self-correcting before building the payload")
+	}
+	if snap.IsPlaying {
+		t.Errorf("Snapshot() should reflect the corrected paused-at-duration state, got IsPlaying=true")
+	}
+}
+
+// TestJoinDuringStaleWindow_SelfCorrects covers Join()'s own independent
+// checkEndOfMedia() call (it doesn't route through Snapshot() -- the
+// caller sends the returned payload directly to the new connection).
+func TestJoinDuringStaleWindow_SelfCorrects(t *testing.T) {
+	hub := newTestHubWithTuning(t, longSnapshotIntervalTuning())
+	seedUser(t, hub.store, "host", "Host")
+	seedUser(t, hub.store, "guest", "Guest")
+	durationTicks := int64(1) * 10_000_000
+	settings := testSettings()
+	settings.AutoplayDelaySeconds = 1
+	p := createPartyWithItemAndSettings(t, hub, "party1", "item1", durationTicks, "host", settings)
+	if _, err := p.AddPlaylistItem(context.Background(), "host", "item2", 1000*10_000_000); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = p.Join("host", "Host")
+	if err := p.HandleControl("host", wsproto.MsgPlay, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(1200 * time.Millisecond)
+
+	// A second participant joining (or the host reconnecting) in the stale
+	// window must not receive a snapshot claiming the item is still playing
+	// past its own duration.
+	snap, err := p.Join("guest", "Guest")
+	if err != nil {
+		t.Fatalf("Join: %v", err)
+	}
+	if snap.PendingTransition == nil {
+		t.Fatal("Join() returned stale state (no pending transition) instead of self-correcting before building the payload")
+	}
+}
+
+// TestUpdateSettingsDuringStaleWindow_SelfCorrects covers
+// checkEndOfMediaAndBroadcast via UpdateSettings, representative of the
+// other three call sites that share that helper (onGraceTick, Leave's
+// host-successor branch, HandleHostTransfer): a passive broadcast trigger
+// landing in the stale window must not re-announce stale "still playing"
+// state to already-connected members.
+func TestUpdateSettingsDuringStaleWindow_SelfCorrects(t *testing.T) {
+	hub := newTestHubWithTuning(t, longSnapshotIntervalTuning())
+	seedUser(t, hub.store, "host", "Host")
+	durationTicks := int64(1) * 10_000_000
+	settings := testSettings()
+	settings.AutoplayDelaySeconds = 1
+	p := createPartyWithItemAndSettings(t, hub, "party1", "item1", durationTicks, "host", settings)
+	if _, err := p.AddPlaylistItem(context.Background(), "host", "item2", 1000*10_000_000); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = p.Join("host", "Host")
+	conn := &fakeConn{}
+	p.AttachConn("host", conn)
+	if err := p.HandleControl("host", wsproto.MsgPlay, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(1200 * time.Millisecond)
+
+	if err := p.UpdateSettings(context.Background(), "host", "Renamed Party", settings); err != nil {
+		t.Fatal(err)
+	}
+	env, ok := conn.last()
+	if !ok || env.Type != wsproto.MsgSnapshot {
+		t.Fatalf("expected a snapshot broadcast after settings update, got %+v (ok=%v)", env, ok)
+	}
+	broadcastSnap := decodeSnapshot(t, env)
+	if broadcastSnap.PendingTransition == nil {
+		t.Fatal("UpdateSettings broadcast stale state (no pending transition) instead of self-correcting first")
+	}
+}

@@ -16,6 +16,7 @@ import {
   isStale,
   DriftAction,
 } from "./sync.js";
+import { isRealPause } from "./playback-events.js";
 
 const partyId = window.WATCH_PARTY_ID;
 const video = document.getElementById("video");
@@ -226,11 +227,27 @@ video.addEventListener("play", () => {
 });
 video.addEventListener("pause", () => {
   if (suppress.pause) { suppress.pause = false; return; }
-  if (isHost()) sendControl("pause", video.currentTime);
+  // Reaching the natural end of the media also fires "pause" (with `ended`
+  // already true) -- that's the browser observing playback stopped, not the
+  // host asking to pause. Forwarding it as a real command used to set the
+  // server's IsPlaying to false before the server's own end-of-media
+  // detection ever ran, permanently blocking auto-advance/the next-item
+  // dialog for that item. See playback-events.js.
+  if (isHost() && isRealPause(video)) sendControl("pause", video.currentTime);
 });
 video.addEventListener("seeked", () => {
   if (suppress.seeking) { suppress.seeking = false; return; }
   if (isHost()) sendControl("seek", video.currentTime);
+});
+// The server is the sole authority for detecting end-of-media (periodic
+// snapshotTicker, see checkEndOfMedia) -- this "ended" hint never asserts
+// anything itself, it just prompts the server to run that same check
+// immediately instead of waiting up to SYNC_SNAPSHOT_INTERVAL. See
+// HandleEndedHint's doc comment and SPEC.md's Synchronization Protocol
+// section ("the host client's ended event is an observation, not an
+// authoritative command").
+video.addEventListener("ended", () => {
+  if (isHost()) conn.send("ended_hint");
 });
 
 // Recalibrate playbackOffsetTicks once the browser actually knows this

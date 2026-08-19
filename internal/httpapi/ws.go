@@ -193,6 +193,9 @@ func (a *App) dispatchWSMessage(ctx context.Context, p *party.Party, userID stri
 		}
 		_ = p.HandleControl(userID, env.Type, payload.PositionTicks)
 
+	case wsproto.MsgEndedHint:
+		p.HandleEndedHint()
+
 	case wsproto.MsgHostTransfer:
 		var payload wsproto.HostTransferPayload
 		if err := json.Unmarshal(env.Payload, &payload); err != nil {
