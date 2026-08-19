@@ -136,9 +136,11 @@ func (s *Store) DeleteExpiredSessions(ctx context.Context, now time.Time) error 
 
 func (s *Store) CreateParty(ctx context.Context, p Party) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO parties (id, host_user_id, name, current_playlist_item_id, created_at, status)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, p.ID, p.HostUserID, p.Name, p.CurrentPlaylistItemID, timeStr(p.CreatedAt), string(p.Status))
+		INSERT INTO parties (id, host_user_id, name, current_playlist_item_id, created_at, status,
+			auto_advance, show_next_dialog, autoplay_enabled, autoplay_delay_seconds)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, p.ID, p.HostUserID, p.Name, p.CurrentPlaylistItemID, timeStr(p.CreatedAt), string(p.Status),
+		p.AutoAdvance, p.ShowNextDialog, p.AutoplayEnabled, p.AutoplayDelaySeconds)
 	if err != nil {
 		return fmt.Errorf("dbx: create party: %w", err)
 	}
@@ -147,7 +149,9 @@ func (s *Store) CreateParty(ctx context.Context, p Party) error {
 
 func (s *Store) GetParty(ctx context.Context, id string) (*Party, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, host_user_id, name, current_playlist_item_id, created_at, status FROM parties WHERE id = ?
+		SELECT id, host_user_id, name, current_playlist_item_id, created_at, status,
+			auto_advance, show_next_dialog, autoplay_enabled, autoplay_delay_seconds
+		FROM parties WHERE id = ?
 	`, id)
 	return scanParty(row)
 }
@@ -156,7 +160,8 @@ func scanParty(row *sql.Row) (*Party, error) {
 	var p Party
 	var created, status string
 	var currentItemID sql.NullInt64
-	if err := row.Scan(&p.ID, &p.HostUserID, &p.Name, &currentItemID, &created, &status); err != nil {
+	if err := row.Scan(&p.ID, &p.HostUserID, &p.Name, &currentItemID, &created, &status,
+		&p.AutoAdvance, &p.ShowNextDialog, &p.AutoplayEnabled, &p.AutoplayDelaySeconds); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -201,11 +206,27 @@ func (s *Store) UpdatePartyCurrentItem(ctx context.Context, id string, playlistI
 	return nil
 }
 
+// UpdatePartySettings persists a host's edits from the Party Settings form —
+// name plus the four end-of-media settings, updated together since they
+// share one form (see ARCHITECTURE.md's Party Settings section).
+func (s *Store) UpdatePartySettings(ctx context.Context, id, name string, autoAdvance, showNextDialog, autoplayEnabled bool, autoplayDelaySeconds int) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE parties SET name = ?, auto_advance = ?, show_next_dialog = ?, autoplay_enabled = ?, autoplay_delay_seconds = ?
+		WHERE id = ?
+	`, name, autoAdvance, showNextDialog, autoplayEnabled, autoplayDelaySeconds, id)
+	if err != nil {
+		return fmt.Errorf("dbx: update party settings: %w", err)
+	}
+	return nil
+}
+
 // ListActiveParties returns every party with status='active', for startup
 // recovery: on boot the server reconstructs in-memory state for each.
 func (s *Store) ListActiveParties(ctx context.Context) ([]Party, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, host_user_id, name, current_playlist_item_id, created_at, status FROM parties WHERE status = 'active'
+		SELECT id, host_user_id, name, current_playlist_item_id, created_at, status,
+			auto_advance, show_next_dialog, autoplay_enabled, autoplay_delay_seconds
+		FROM parties WHERE status = 'active'
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("dbx: list active parties: %w", err)
@@ -216,7 +237,8 @@ func (s *Store) ListActiveParties(ctx context.Context) ([]Party, error) {
 		var p Party
 		var created, status string
 		var currentItemID sql.NullInt64
-		if err := rows.Scan(&p.ID, &p.HostUserID, &p.Name, &currentItemID, &created, &status); err != nil {
+		if err := rows.Scan(&p.ID, &p.HostUserID, &p.Name, &currentItemID, &created, &status,
+			&p.AutoAdvance, &p.ShowNextDialog, &p.AutoplayEnabled, &p.AutoplayDelaySeconds); err != nil {
 			return nil, fmt.Errorf("dbx: list active parties: %w", err)
 		}
 		t, err := parseTime(created)

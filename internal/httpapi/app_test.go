@@ -607,6 +607,102 @@ func bobSession(t *testing.T, app *App, srv *httptest.Server) *testClient {
 	return c
 }
 
+func TestCreateParty_SettingsDefaultWhenOmitted(t *testing.T) {
+	_, srv := newTestApp(t)
+	c := loginTestClient(t, srv)
+	resp, created := c.do("POST", "/api/parties", map[string]string{"name": "Movie Night"}, true)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create status = %d body=%v", resp.StatusCode, created)
+	}
+	partyID := created["party_id"].(string)
+
+	resp2, got := c.do("GET", "/api/parties/"+partyID, nil, false)
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("get status = %d body=%v", resp2.StatusCode, got)
+	}
+	if got["auto_advance"] != true || got["show_next_dialog"] != true || got["autoplay_enabled"] != true {
+		t.Errorf("default settings not all true: %v", got)
+	}
+	if got["autoplay_delay_seconds"].(float64) != 5 {
+		t.Errorf("autoplay_delay_seconds = %v, want 5", got["autoplay_delay_seconds"])
+	}
+}
+
+func TestCreateParty_SettingsRespectedWhenProvided(t *testing.T) {
+	_, srv := newTestApp(t)
+	c := loginTestClient(t, srv)
+	resp, created := c.do("POST", "/api/parties", map[string]any{
+		"name": "Movie Night", "auto_advance": false, "show_next_dialog": false,
+		"autoplay_enabled": false, "autoplay_delay_seconds": 12,
+	}, true)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create status = %d body=%v", resp.StatusCode, created)
+	}
+	partyID := created["party_id"].(string)
+
+	resp2, got := c.do("GET", "/api/parties/"+partyID, nil, false)
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("get status = %d body=%v", resp2.StatusCode, got)
+	}
+	if got["auto_advance"] != false || got["show_next_dialog"] != false || got["autoplay_enabled"] != false {
+		t.Errorf("provided settings not respected: %v", got)
+	}
+	if got["autoplay_delay_seconds"].(float64) != 12 {
+		t.Errorf("autoplay_delay_seconds = %v, want 12", got["autoplay_delay_seconds"])
+	}
+}
+
+func TestUpdatePartySettings_OnlyHostAllowed(t *testing.T) {
+	app, srv := newTestApp(t)
+	alice := loginTestClient(t, srv)
+	resp, created := alice.do("POST", "/api/parties", map[string]string{"name": "Movie Night"}, true)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create: status = %d", resp.StatusCode)
+	}
+	partyID := created["party_id"].(string)
+	bob := bobSession(t, app, srv)
+
+	body := map[string]any{
+		"name": "Bob's Name", "auto_advance": false, "show_next_dialog": false,
+		"autoplay_enabled": false, "autoplay_delay_seconds": 3,
+	}
+	if resp, respBody := bob.do("PUT", "/api/parties/"+partyID+"/settings", body, true); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("bob update settings: status = %d body=%v, want 403", resp.StatusCode, respBody)
+	}
+
+	body["name"] = "Alice's Name"
+	if resp, respBody := alice.do("PUT", "/api/parties/"+partyID+"/settings", body, true); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("alice update settings: status = %d body=%v", resp.StatusCode, respBody)
+	}
+
+	resp2, got := alice.do("GET", "/api/parties/"+partyID, nil, false)
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("get status = %d body=%v", resp2.StatusCode, got)
+	}
+	if got["name"] != "Alice's Name" {
+		t.Errorf("name = %v, want %q", got["name"], "Alice's Name")
+	}
+	if got["auto_advance"] != false || got["autoplay_delay_seconds"].(float64) != 3 {
+		t.Errorf("settings not applied: %v", got)
+	}
+}
+
+func TestUpdatePartySettings_RejectsNonPositiveDelay(t *testing.T) {
+	_, srv := newTestApp(t)
+	c := loginTestClient(t, srv)
+	_, created := c.do("POST", "/api/parties", map[string]string{"name": "Movie Night"}, true)
+	partyID := created["party_id"].(string)
+
+	body := map[string]any{
+		"name": "Movie Night", "auto_advance": true, "show_next_dialog": true,
+		"autoplay_enabled": true, "autoplay_delay_seconds": 0,
+	}
+	resp, got := c.do("PUT", "/api/parties/"+partyID+"/settings", body, true)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%v, want 400", resp.StatusCode, got)
+	}
+}
+
 func TestPlaylistMutation_OnlyHostAllowed(t *testing.T) {
 	app, srv := newTestApp(t)
 	alice := loginTestClient(t, srv)

@@ -92,7 +92,7 @@ func mustEncrypt(t *testing.T, c *cryptox.TokenCipher, plaintext string) string 
 func TestRecordPlaySession_SendsStartReport(t *testing.T) {
 	rp, hub, _, mu, calls := setupReporter(t)
 	ctx := context.Background()
-	p, err := hub.CreateParty(ctx, "party1", "Test Party", "user1")
+	p, err := hub.CreateParty(ctx, "party1", "Test Party", party.Settings{AutoAdvance: true, ShowNextDialog: true, AutoplayEnabled: true, AutoplayDelaySeconds: 5}, "user1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestRecordPlaySession_SendsStartReport(t *testing.T) {
 func TestPeriodicProgress_ReportsServerDerivedPosition(t *testing.T) {
 	rp, hub, _, mu, calls := setupReporter(t)
 	ctx := context.Background()
-	p, err := hub.CreateParty(ctx, "party1", "Test Party", "user1")
+	p, err := hub.CreateParty(ctx, "party1", "Test Party", party.Settings{AutoAdvance: true, ShowNextDialog: true, AutoplayEnabled: true, AutoplayDelaySeconds: 5}, "user1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +172,7 @@ func TestPeriodicProgress_ReportsServerDerivedPosition(t *testing.T) {
 func TestPartyEnd_TriggersStopReport(t *testing.T) {
 	rp, hub, _, mu, calls := setupReporter(t)
 	ctx := context.Background()
-	p, err := hub.CreateParty(ctx, "party1", "Test Party", "user1")
+	p, err := hub.CreateParty(ctx, "party1", "Test Party", party.Settings{AutoAdvance: true, ShowNextDialog: true, AutoplayEnabled: true, AutoplayDelaySeconds: 5}, "user1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +216,7 @@ func TestPartyEnd_TriggersStopReport(t *testing.T) {
 func TestItemChanged_TriggersStopReportForOutgoingItem(t *testing.T) {
 	rp, hub, _, mu, calls := setupReporter(t)
 	ctx := context.Background()
-	p, err := hub.CreateParty(ctx, "party1", "Test Party", "user1")
+	p, err := hub.CreateParty(ctx, "party1", "Test Party", party.Settings{AutoAdvance: true, ShowNextDialog: true, AutoplayEnabled: true, AutoplayDelaySeconds: 5}, "user1")
 	if err != nil {
 		t.Fatal(err)
 	}

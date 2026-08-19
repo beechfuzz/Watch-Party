@@ -148,6 +148,18 @@ dialog h3 { font-family: var(--font-display); font-size: 16px; font-weight: 600;
 }
 .field input::placeholder { color: var(--text-tertiary); }
 .field input:focus { border-color: var(--accent-teal); }
+
+/* Party Settings checkboxes (create-party dialog + party-page settings dialog) */
+.checkbox-field { display: flex; align-items: center; gap: 9px; font-size: 13.5px; color: var(--text-primary); cursor: pointer; }
+.checkbox-field input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent-amber); flex-shrink: 0; }
+.checkbox-field:has(input:disabled) { color: var(--text-tertiary); cursor: default; }
+.settings-subfield { margin-left: 22px; margin-top: -8px; }
+.autoplay-delay-field { display: flex; align-items: center; gap: 8px; }
+.autoplay-delay-field input[type="number"] {
+  width: 52px; background: var(--bg-input); border: 1px solid var(--border-subtle);
+  border-radius: 6px; padding: 5px 6px; color: var(--text-primary); font-size: 13px; font-family: var(--font-body);
+}
+.autoplay-delay-field input[type="number"]:disabled { color: var(--text-tertiary); }
 .login-card .btn-primary { width: 100%; justify-content: center; }
 
 .login-footnote { text-align: center; font-size: 12px; color: var(--text-tertiary); margin-top: 22px; line-height: 1.5; }
@@ -357,6 +369,15 @@ dialog h3 { font-family: var(--font-display); font-size: 16px; font-weight: 600;
 .player-idle svg { width: 28px; height: 28px; opacity: 0.5; }
 .player-idle p { margin: 0; font-size: 14px; font-weight: 500; color: var(--text-secondary); }
 .player-idle span { font-size: 12.5px; }
+
+.next-item-banner {
+  position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%);
+  background: rgba(10,13,18,0.88); backdrop-filter: blur(4px);
+  border: 1px solid var(--border-subtle); border-radius: 999px;
+  padding: 9px 18px; font-size: 12.5px; color: var(--text-primary);
+  white-space: nowrap; pointer-events: none;
+}
+.next-item-banner strong { color: var(--accent-amber); font-family: var(--font-mono); }
 
 .host-caption { font-size: 12px; color: var(--text-tertiary); margin-top: 12px; }
 .host-caption strong { color: var(--text-secondary); font-weight: 500; }

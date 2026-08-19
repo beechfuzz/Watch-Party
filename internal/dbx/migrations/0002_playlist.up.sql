@@ -14,3 +14,9 @@ ALTER TABLE parties ADD COLUMN name TEXT NOT NULL DEFAULT '';
 ALTER TABLE parties ADD COLUMN current_playlist_item_id INTEGER REFERENCES playlist_items(id) ON DELETE SET NULL;
 ALTER TABLE parties DROP COLUMN item_id;
 ALTER TABLE parties DROP COLUMN duration_ticks;
+
+-- End-of-media / playlist-advance settings (Party Settings feature).
+ALTER TABLE parties ADD COLUMN auto_advance BOOLEAN NOT NULL DEFAULT 1;
+ALTER TABLE parties ADD COLUMN show_next_dialog BOOLEAN NOT NULL DEFAULT 1;
+ALTER TABLE parties ADD COLUMN autoplay_enabled BOOLEAN NOT NULL DEFAULT 1;
+ALTER TABLE parties ADD COLUMN autoplay_delay_seconds INTEGER NOT NULL DEFAULT 5;

@@ -6,6 +6,7 @@
 import { api } from "./api.js";
 import { PartyConnection } from "./ws-client.js";
 import { initPlaylist, loadPlaylist } from "./playlist.js";
+import { wireSettingsForm } from "./settingsForm.js";
 import {
   TICKS_PER_SECOND,
   estimateClockOffset,
@@ -34,6 +35,20 @@ const endBtn = document.getElementById("end-btn");
 const leaveBtn = document.getElementById("leave-btn");
 const errorEl = document.getElementById("error");
 
+const partySettingsBtn = document.getElementById("party-settings-btn");
+const partySettingsDialog = document.getElementById("party-settings-dialog");
+const partySettingsForm = document.getElementById("party-settings-form");
+const partySettingsError = document.getElementById("party-settings-error");
+const cancelPartySettingsBtn = document.getElementById("cancel-party-settings-btn");
+const settingsPartyNameInput = document.getElementById("settings-party-name");
+const partySettingsFields = wireSettingsForm({
+  autoAdvance: "settings-auto-advance", showNextDialog: "settings-show-next-dialog",
+  autoplayEnabled: "settings-autoplay-enabled", autoplayDelay: "settings-autoplay-delay",
+});
+
+const nextItemBanner = document.getElementById("next-item-banner");
+const nextItemBannerText = document.getElementById("next-item-banner-text");
+
 // Sync tuning: defaults match the server's, but the server is the actual
 // authority — these only govern this client's own correction behavior and
 // are safe to keep as sane client-side constants rather than plumbing them
@@ -48,6 +63,9 @@ let currentSeq = -1;
 let currentState = null; // { positionTicks, isPlaying, serverTimestampMs }
 let clockOffsetMs = 0;
 let conn = null;
+let currentPartySettings = { auto_advance: true, show_next_dialog: true, autoplay_enabled: true, autoplay_delay_seconds: 5 };
+let pendingDeadlineMs = null; // null when no countdown is running
+let countdownRenderTimer = null;
 let suppress = { play: false, pause: false, seeking: false };
 
 // A transcoded stream that starts mid-item (the common case: anyone but the
@@ -297,6 +315,31 @@ leaveBtn.addEventListener("click", async () => {
   window.location.href = "/";
 });
 
+partySettingsBtn.addEventListener("click", () => {
+  partySettingsError.hidden = true;
+  settingsPartyNameInput.value = partyTitleEl.textContent;
+  partySettingsFields.write(currentPartySettings);
+  partySettingsDialog.showModal();
+});
+cancelPartySettingsBtn.addEventListener("click", () => partySettingsDialog.close());
+partySettingsForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  partySettingsError.hidden = true;
+  try {
+    await api(`/api/parties/${encodeURIComponent(partyId)}/settings`, {
+      method: "PUT",
+      body: { name: settingsPartyNameInput.value, ...partySettingsFields.read() },
+    });
+    // The resulting snapshot broadcast (see Party.UpdateSettings) updates
+    // partyTitleEl/currentPartySettings for every connected client,
+    // including this one -- no need to apply the new values locally here.
+    partySettingsDialog.close();
+  } catch (err) {
+    partySettingsError.textContent = err.message;
+    partySettingsError.hidden = false;
+  }
+});
+
 function initials(name) {
   return (name || "?").trim().slice(0, 1).toUpperCase();
 }
@@ -351,8 +394,10 @@ function renderMembers(members) {
   // request 403s — see ARCHITECTURE.md §3/handleEndParty), but there's no
   // reason to show a participant a button that can only ever error out for
   // them. Leaving, unlike ending, is available to everyone and stays
-  // unconditionally visible.
+  // unconditionally visible. Party Settings edits are host-only too, same
+  // reasoning.
   endBtn.hidden = !isHost();
+  partySettingsBtn.hidden = !isHost();
 }
 
 // The party can be idle -- freshly created (playlist not started yet) or
@@ -364,6 +409,47 @@ function updateIdleVisibility() {
   playerIdleEl.hidden = !idle;
   video.hidden = idle;
   hostControls.hidden = !isHost() || idle;
+}
+
+// The end-of-media countdown banner: server-driven (see
+// ARCHITECTURE.md's Party Settings section) -- this only *renders* against
+// an absolute deadline the server already computed, using the same
+// clockOffsetMs the clock-sync handshake already maintains elsewhere in
+// this file. It never decides when the transition happens; the next
+// snapshot (the actual fired transition, or a host command that canceled
+// the countdown) is what clears it, not a client-side timeout guess.
+let pendingAutoplay = false;
+
+function updateNextItemBanner(snap) {
+  const pending = snap.pending_transition;
+  if (!pending || !snap.show_next_dialog) {
+    hideNextItemBanner();
+    return;
+  }
+  pendingDeadlineMs = Date.parse(pending.deadline);
+  pendingAutoplay = pending.autoplay;
+  if (!countdownRenderTimer) {
+    countdownRenderTimer = setInterval(renderCountdown, 250);
+  }
+  renderCountdown();
+}
+
+function hideNextItemBanner() {
+  pendingDeadlineMs = null;
+  if (countdownRenderTimer) {
+    clearInterval(countdownRenderTimer);
+    countdownRenderTimer = null;
+  }
+  nextItemBanner.hidden = true;
+}
+
+function renderCountdown() {
+  if (pendingDeadlineMs === null) return;
+  const remainingMs = pendingDeadlineMs - (Date.now() + clockOffsetMs);
+  const remainingSeconds = Math.max(0, Math.ceil(remainingMs / 1000));
+  const label = pendingAutoplay ? "Next item in" : "Playback pauses in";
+  nextItemBannerText.innerHTML = `${label} <strong>${remainingSeconds}s</strong>…`;
+  nextItemBanner.hidden = false;
 }
 
 function handleSnapshotOrControl(env) {
@@ -380,6 +466,12 @@ function handleSnapshotOrControl(env) {
   if (env.type === "snapshot") {
     hostUserId = p.host_user_id;
     itemDurationTicks = p.duration_ticks || 0;
+    partyTitleEl.textContent = p.name;
+    currentPartySettings = {
+      auto_advance: p.auto_advance, show_next_dialog: p.show_next_dialog,
+      autoplay_enabled: p.autoplay_enabled, autoplay_delay_seconds: p.autoplay_delay_seconds,
+    };
+    updateNextItemBanner(p);
     renderMembers(p.members || []);
     // The current item can change after join now (playlist advance, end of
     // playlist, or a host selecting something else) -- not just at load
@@ -482,6 +574,11 @@ async function main() {
   itemDurationTicks = partyInfo.duration_ticks || 0;
   currentItemId = partyInfo.item_id || "";
   partyTitleEl.textContent = partyInfo.name;
+  currentPartySettings = {
+    auto_advance: partyInfo.auto_advance, show_next_dialog: partyInfo.show_next_dialog,
+    autoplay_enabled: partyInfo.autoplay_enabled, autoplay_delay_seconds: partyInfo.autoplay_delay_seconds,
+  };
+  updateNextItemBanner(partyInfo); // in case the page loads mid-countdown (e.g. a refresh)
   const hostMember = (partyInfo.members || []).find((m) => m.is_host);
   partySubtitleEl.textContent = hostMember ? `Hosted by ${hostMember.display_name}` : "";
   renderMembers(partyInfo.members || []);

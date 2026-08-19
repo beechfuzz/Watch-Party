@@ -33,6 +33,13 @@ type Party struct {
 	CurrentPlaylistItemID *int64
 	CreatedAt             time.Time
 	Status                PartyStatus
+
+	// Party Settings: govern end-of-media behavior. See ARCHITECTURE.md's
+	// Party Settings section.
+	AutoAdvance          bool // false: end-of-media always goes idle, same as an exhausted queue
+	ShowNextDialog       bool // display-only; the server-side countdown/transition happens regardless
+	AutoplayEnabled      bool // whether the next item starts playing, or just loads paused, once the countdown ends
+	AutoplayDelaySeconds int
 }
 
 // PlaylistItem is one entry in a party's queue. DurationTicks is fetched

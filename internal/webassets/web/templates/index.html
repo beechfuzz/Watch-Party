@@ -139,12 +139,24 @@
 
   <dialog id="create-party-dialog">
     <form id="create-party-form">
-      <h3>Create a party</h3>
+      <h3>Party Settings</h3>
       <div class="field">
         <label for="create-party-name">Party name</label>
         <input id="create-party-name" type="text" name="name" required placeholder="e.g. Friday movie night" maxlength="200">
       </div>
       <p class="login-footnote" style="text-align:left; margin:-6px 0 16px;">Add something to watch from the Playlist section once you're in.</p>
+
+      <div class="field">
+        <label class="checkbox-field"><input type="checkbox" id="create-auto-advance" checked><span>Auto-Advance Playlist</span></label>
+      </div>
+      <div class="field settings-subfield">
+        <label class="checkbox-field"><input type="checkbox" id="create-show-next-dialog" checked><span>Show "Next item in…" dialog</span></label>
+      </div>
+      <div class="field settings-subfield autoplay-delay-field">
+        <label class="checkbox-field"><input type="checkbox" id="create-autoplay-enabled" checked><span>Auto-play after</span></label>
+        <input type="number" id="create-autoplay-delay" min="1" max="120" value="5"> second(s)
+      </div>
+
       <p class="error" id="create-error" hidden></p>
       <div style="display:flex; gap:10px; justify-content:flex-end;">
         <button type="button" class="btn btn-ghost" id="cancel-create-btn">Cancel</button>

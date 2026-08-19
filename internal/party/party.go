@@ -130,6 +130,34 @@ type Event struct {
 	IsPlaying     bool
 }
 
+// Settings holds a party's Party Settings — the four fields the host
+// controls at creation and via the settings dialog, governing end-of-media
+// behavior. See ARCHITECTURE.md's Party Settings section.
+type Settings struct {
+	AutoAdvance          bool
+	ShowNextDialog       bool
+	AutoplayEnabled      bool
+	AutoplayDelaySeconds int
+}
+
+func settingsFromRow(p dbx.Party) Settings {
+	return Settings{
+		AutoAdvance: p.AutoAdvance, ShowNextDialog: p.ShowNextDialog,
+		AutoplayEnabled: p.AutoplayEnabled, AutoplayDelaySeconds: p.AutoplayDelaySeconds,
+	}
+}
+
+// pendingTransition represents an in-progress end-of-media countdown.
+// Deliberately does NOT capture which playlist item is next — that's
+// resolved fresh when the deadline is reached (see onPendingTransitionFired)
+// rather than fixed the moment the countdown starts, so a host reordering or
+// removing the queued-next item mid-countdown just works with no separate
+// invalidation logic anywhere. See ARCHITECTURE.md's Party Settings section.
+type pendingTransition struct {
+	Deadline time.Time
+	Autoplay bool
+}
+
 // currentItem is the actor-owned pointer to whatever playlist entry is
 // presently loaded — nil means idle (nothing loaded: a freshly-created
 // party with an empty playlist, or one whose queue just ran out). Unlike
@@ -165,15 +193,18 @@ type Party struct {
 	ended              bool
 	current            *currentItem
 	playlist           []dbx.PlaylistItem // ordered by Position; actor's in-memory cache of playlist_items
+	settings           Settings
+	pending            *pendingTransition // non-nil while counting down to an automatic advance/idle
+	pendingTimer       *time.Timer        // fires onPendingTransitionFired; nil when pending is nil
 }
 
-func newParty(id, name, hostUserID string, initial State, current *currentItem, playlist []dbx.PlaylistItem, store *dbx.Store, tuning Tuning, logger *slog.Logger, events chan<- Event) *Party {
+func newParty(id, name, hostUserID string, initial State, current *currentItem, playlist []dbx.PlaylistItem, settings Settings, store *dbx.Store, tuning Tuning, logger *slog.Logger, events chan<- Event) *Party {
 	p := &Party{
 		ID: id, Name: name,
 		store: store, tuning: tuning, logger: logger, events: events,
 		cmdCh: make(chan func()), stopCh: make(chan struct{}), stopped: make(chan struct{}),
 		state: initial, hostUserID: hostUserID, members: make(map[string]*member),
-		current: current, playlist: playlist,
+		current: current, playlist: playlist, settings: settings,
 	}
 	go p.run()
 	return p
@@ -197,6 +228,17 @@ func (p *Party) run() {
 	defer graceTicker.Stop()
 
 	for {
+		// Rebuilt fresh every iteration from p.pendingTimer, which is only
+		// ever set/cleared from inside this same goroutine (via do()) — a
+		// nil channel here just means this case never fires, which is the
+		// standard way to make a select case conditionally inactive. A
+		// dedicated timer (not snapshotTicker) is what gives the countdown
+		// second-level accuracy even when autoplay_delay_seconds is shorter
+		// than the snapshot broadcast interval.
+		var pendingCh <-chan time.Time
+		if p.pendingTimer != nil {
+			pendingCh = p.pendingTimer.C
+		}
 		select {
 		case fn, ok := <-p.cmdCh:
 			if !ok {
@@ -207,6 +249,8 @@ func (p *Party) run() {
 			p.onSnapshotTick()
 		case <-graceTicker.C:
 			p.onGraceTick()
+		case <-pendingCh:
+			p.onPendingTransitionFired()
 		case <-p.stopCh:
 			return
 		}
@@ -276,13 +320,26 @@ func (p *Party) buildSnapshot() wsproto.SnapshotPayload {
 	if p.current != nil {
 		durationTicks = p.current.DurationTicks
 	}
+	var pending *wsproto.PendingTransition
+	if p.pending != nil {
+		pending = &wsproto.PendingTransition{
+			Deadline: p.pending.Deadline.UTC().Format(time.RFC3339Nano),
+			Autoplay: p.pending.Autoplay,
+		}
+	}
 	return wsproto.SnapshotPayload{
-		AuthoritativeState: p.state.toWire(),
-		PartyID:            p.ID,
-		ItemID:             p.currentEmbyItemID(),
-		DurationTicks:      durationTicks,
-		HostUserID:         p.hostUserID,
-		Members:            members,
+		AuthoritativeState:   p.state.toWire(),
+		PartyID:              p.ID,
+		Name:                 p.Name,
+		ItemID:               p.currentEmbyItemID(),
+		DurationTicks:        durationTicks,
+		HostUserID:           p.hostUserID,
+		Members:              members,
+		AutoAdvance:          p.settings.AutoAdvance,
+		ShowNextDialog:       p.settings.ShowNextDialog,
+		AutoplayEnabled:      p.settings.AutoplayEnabled,
+		AutoplayDelaySeconds: p.settings.AutoplayDelaySeconds,
+		PendingTransition:    pending,
 	}
 }
 
@@ -361,9 +418,14 @@ func (p *Party) onSnapshotTick() {
 // uses for drift correction) rather than trusting any single participant's
 // browser `ended` event, per the spec's explicit requirement that a
 // spurious client-side ended event must not unilaterally end playback for
-// everyone. Reaching the end now advances to the next playlist item (if
-// any) instead of just pausing — see nextPlaylistItemAfter/transitionCurrent.
+// everyone. Reaching the end either goes idle immediately (auto_advance is
+// off, or nothing is queued after the current item — no countdown to
+// nothing) or enters a pending transition that counts down before advancing
+// — see enterPendingTransition/onPendingTransitionFired.
 func (p *Party) checkEndOfMedia() {
+	if p.pending != nil {
+		return // already mid-countdown; nothing new to detect
+	}
 	if !p.state.IsPlaying || p.current == nil || p.current.DurationTicks <= 0 {
 		return
 	}
@@ -371,14 +433,13 @@ func (p *Party) checkEndOfMedia() {
 	if expected < p.current.DurationTicks {
 		return
 	}
-	next := p.nextPlaylistItemAfter(p.current.PlaylistItemID)
-	if next == nil {
-		p.logger.Info("end of playlist reached", "party_id", p.ID)
+	if !p.settings.AutoAdvance || p.nextPlaylistItemAfter(p.current.PlaylistItemID) == nil {
+		p.logger.Info("end of media reached, going idle", "party_id", p.ID, "auto_advance", p.settings.AutoAdvance)
 		p.transitionCurrent(nil, false, nil, dbx.ClientTypeSystem)
 		return
 	}
-	p.logger.Info("advancing to next playlist item", "party_id", p.ID, "item_id", next.ItemID)
-	p.transitionCurrent(&currentItem{PlaylistItemID: next.ID, EmbyItemID: next.ItemID, DurationTicks: next.DurationTicks}, true, nil, dbx.ClientTypeSystem)
+	p.logger.Info("end of media reached, entering pending transition", "party_id", p.ID, "delay_seconds", p.settings.AutoplayDelaySeconds)
+	p.enterPendingTransition()
 }
 
 // nextPlaylistItemAfter returns the playlist entry immediately following
@@ -396,19 +457,85 @@ func (p *Party) nextPlaylistItemAfter(afterPlaylistItemID int64) *dbx.PlaylistIt
 	return nil
 }
 
+// enterPendingTransition starts the server-driven countdown to an automatic
+// playlist advance. It clamps p.state to paused-at-duration (the same state
+// the pre-Party-Settings end-of-media pause already used) rather than
+// leaving IsPlaying true for the length of the countdown — without this,
+// CurrentPositionTicks (still extrapolating from a stale "playing" state)
+// would climb past the item's real duration for as long as the countdown
+// runs, which handlePlaybackURL would hand to Emby as a StartTimeTicks
+// beyond the end of the file for anyone who (re)joins mid-countdown. This
+// bumps the sequence number and is durability-persisted like any other
+// state change; the countdown itself (p.pending/p.pendingTimer) is not.
+func (p *Party) enterPendingTransition() {
+	deadline := time.Now().Add(time.Duration(p.settings.AutoplayDelaySeconds) * time.Second)
+	p.pending = &pendingTransition{Deadline: deadline, Autoplay: p.settings.AutoplayEnabled}
+	p.pendingTimer = time.NewTimer(time.Until(deadline))
+	p.state = State{
+		PositionTicks: p.current.DurationTicks, IsPlaying: false,
+		SequenceNumber: p.state.SequenceNumber + 1, ServerTimestamp: time.Now(),
+		UpdatedByUserID: nil, UpdatedByClientType: dbx.ClientTypeSystem,
+	}
+	p.broadcastSnapshot()
+	p.persistStateAsync()
+}
+
+// cancelPendingTransition stops a running countdown, if any, without
+// touching current/state — callers apply whatever new state should replace
+// it. Safe to call unconditionally (a no-op when nothing is pending).
+func (p *Party) cancelPendingTransition() {
+	if p.pending == nil {
+		return
+	}
+	p.pending = nil
+	if p.pendingTimer != nil {
+		p.pendingTimer.Stop()
+		p.pendingTimer = nil
+	}
+}
+
+// onPendingTransitionFired runs when the countdown's deadline is reached
+// (dispatched from run()'s select loop, already on the actor goroutine — no
+// do() wrapping needed). It deliberately re-resolves "what's next" here
+// rather than trusting whatever was next when the countdown started, so a
+// playlist edited mid-countdown (reorder, or the queued item removed) is
+// reflected in what actually plays — see the pendingTransition doc comment.
+func (p *Party) onPendingTransitionFired() {
+	pending := p.pending
+	p.pending, p.pendingTimer = nil, nil
+	if pending == nil {
+		return // defensive; run()'s nil-channel discipline shouldn't allow this
+	}
+	next := p.nextPlaylistItemAfter(p.current.PlaylistItemID)
+	if next == nil {
+		p.logger.Info("pending transition fired, queue emptied out during countdown, going idle", "party_id", p.ID)
+		p.transitionCurrent(nil, false, nil, dbx.ClientTypeSystem)
+		return
+	}
+	p.logger.Info("pending transition fired, advancing to next playlist item", "party_id", p.ID, "item_id", next.ItemID, "autoplay", pending.Autoplay)
+	p.transitionCurrent(&currentItem{PlaylistItemID: next.ID, EmbyItemID: next.ItemID, DurationTicks: next.DurationTicks}, pending.Autoplay, nil, dbx.ClientTypeSystem)
+}
+
 // transitionCurrent is the single path every "current item changed" case
-// goes through: system auto-advance/idle (checkEndOfMedia) and an explicit
-// host selection (SelectCurrentItem). It resets playback state to the start
-// of whatever's now current (or to idle), bumping the same sequence-number
-// counter every other authoritative change uses — so a delayed pre-
-// transition snapshot is rejected by clients exactly like a stale seek
-// would be, with no separate numbering scheme needed. If there was a
-// previous current item, its final live position is captured and emitted
-// as EventItemChanged so embyreport can send that item's Stopped report
-// (see the EventItemChanged doc comment) before the new item's tracking
-// begins (which happens lazily, the same way it does on join: whenever a
-// client fetches a playback URL for it).
+// goes through: system auto-advance/idle (checkEndOfMedia, directly for the
+// no-countdown cases and via onPendingTransitionFired for the countdown
+// case) and an explicit host selection (SelectCurrentItem). It resets
+// playback state to the start of whatever's now current (or to idle),
+// bumping the same sequence-number counter every other authoritative change
+// uses — so a delayed pre-transition snapshot is rejected by clients exactly
+// like a stale seek would be, with no separate numbering scheme needed. It
+// also cancels any in-progress pending transition unconditionally: any
+// explicit current-item change (a host picking something else, or the
+// countdown's own eventual firing) supersedes whatever countdown might
+// still nominally be running. If there was a previous current item, its
+// final live position is captured and emitted as EventItemChanged so
+// embyreport can send that item's Stopped report (see the EventItemChanged
+// doc comment) before the new item's tracking begins (which happens lazily,
+// the same way it does on join: whenever a client fetches a playback URL
+// for it).
 func (p *Party) transitionCurrent(next *currentItem, playing bool, byUserID *string, clientType dbx.ClientType) {
+	p.cancelPendingTransition()
+
 	var outgoingItemID string
 	var outgoingFinalPos int64
 	hadPrevious := p.current != nil
@@ -606,6 +733,18 @@ func (p *Party) HandleControl(userID string, msgType wsproto.MessageType, positi
 			p.sendError(p.members[userID], wsproto.ErrCodeNotHost, "only the host may control playback")
 			return
 		}
+		// A host command during a pending-transition countdown is treated as
+		// the host taking manual control back (replaying/seeking within the
+		// item that just ended, most commonly) -- cancel the countdown
+		// rather than let it fire underneath the command that just ran.
+		// pending_transition only lives on the full snapshot shape, not the
+		// narrow AuthoritativeState one broadcastControl sends, so a command
+		// that had to cancel a countdown broadcasts a full snapshot instead
+		// (still carrying this command's updated play/pause/seek state) so
+		// every client learns the countdown is gone.
+		canceledPending := p.pending != nil
+		p.cancelPendingTransition()
+
 		uid := userID
 		switch msgType {
 		case wsproto.MsgPlay:
@@ -618,7 +757,11 @@ func (p *Party) HandleControl(userID string, msgType wsproto.MessageType, positi
 			outErr = fmt.Errorf("party: unsupported control message %q", msgType)
 			return
 		}
-		p.broadcastControl(msgType)
+		if canceledPending {
+			p.broadcastSnapshot()
+		} else {
+			p.broadcastControl(msgType)
+		}
 		p.persistStateAsync()
 		p.emit(Event{Type: EventStateChanged, UserID: userID, ItemID: p.currentEmbyItemID(), PositionTicks: p.state.PositionTicks, IsPlaying: p.state.IsPlaying})
 	})
@@ -694,12 +837,12 @@ func (p *Party) SelectCurrentItem(userID string, playlistItemID int64) error {
 }
 
 // checkHostAuthorized is the shared do()-dispatched authorization gate
-// every playlist mutation starts with: not ended, and userID is the current
-// host. Kept as a fast, IO-free check so the actual SQLite write (in the
-// caller, between two do() dispatches — see AddPlaylistItem for why) never
-// runs inside the actor goroutine, per this codebase's rule that party
-// state mutation never blocks on synchronous IO (internal/dbx: "the sync
-// loop must never block on a SQLite write").
+// every playlist mutation and settings edit starts with: not ended, and
+// userID is the current host. Kept as a fast, IO-free check so the actual
+// SQLite write (in the caller, between two do() dispatches — see
+// AddPlaylistItem for why) never runs inside the actor goroutine, per this
+// codebase's rule that party state mutation never blocks on synchronous IO
+// (internal/dbx: "the sync loop must never block on a SQLite write").
 func (p *Party) checkHostAuthorized(userID string) error {
 	var outErr error
 	p.do(func() {
@@ -709,7 +852,7 @@ func (p *Party) checkHostAuthorized(userID string) error {
 		}
 		if userID != p.hostUserID {
 			outErr = ErrNotHost
-			p.sendError(p.members[userID], wsproto.ErrCodeNotHost, "only the host may edit the playlist")
+			p.sendError(p.members[userID], wsproto.ErrCodeNotHost, "only the host may do that")
 		}
 	})
 	return outErr
@@ -840,6 +983,32 @@ func (p *Party) ReorderPlaylist(ctx context.Context, userID string, orderedIDs [
 	return nil
 }
 
+// UpdateSettings applies a host's edits from the Party Settings form (name
+// plus the four end-of-media settings — see the Settings doc comment).
+// Host-only, and follows the same two-phase, don't-block-the-actor-on-IO
+// pattern as AddPlaylistItem: authorize, write, then apply-and-broadcast.
+// A full snapshot is broadcast afterward (not a narrow message) since the
+// settings fields only live on SnapshotPayload — this is also what lets
+// already-connected participants pick up a host's changes immediately
+// rather than only on their next reconnect.
+func (p *Party) UpdateSettings(ctx context.Context, userID, name string, settings Settings) error {
+	if err := p.checkHostAuthorized(userID); err != nil {
+		return err
+	}
+	if err := p.store.UpdatePartySettings(ctx, p.ID, name, settings.AutoAdvance, settings.ShowNextDialog, settings.AutoplayEnabled, settings.AutoplayDelaySeconds); err != nil {
+		return err
+	}
+	p.do(func() {
+		if p.ended {
+			return
+		}
+		p.Name = name
+		p.settings = settings
+		p.broadcastSnapshot()
+	})
+	return nil
+}
+
 // Snapshot returns the current authoritative snapshot (e.g. for HTTP
 // polling / diagnostics / the Emby-reporting side channel).
 func (p *Party) Snapshot() wsproto.SnapshotPayload {
@@ -889,6 +1058,12 @@ func (p *Party) End(ctx context.Context) error {
 			return
 		}
 		p.ended = true
+		// Stop any in-progress countdown so onPendingTransitionFired can
+		// never run against an ended party -- run()'s select loop rebuilds
+		// its timer channel as nil from p.pendingTimer every iteration, so
+		// clearing it here (before this do() dispatch returns) permanently
+		// prevents that case from firing on any later iteration.
+		p.cancelPendingTransition()
 		// Captured here, synchronously inside the actor, and carried on the
 		// emitted Event below — not re-derived later by a consumer looking
 		// the party back up in the hub, since Hub.EndParty removes it

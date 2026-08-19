@@ -47,6 +47,7 @@ func RegisterRoutes(mux *http.ServeMux, app *App) {
 	mux.HandleFunc("POST /api/parties/{id}/leave", app.withAuth(app.withCSRF(app.handleLeaveParty)))
 	mux.HandleFunc("POST /api/parties/{id}/end", app.withAuth(app.withCSRF(app.handleEndParty)))
 	mux.HandleFunc("POST /api/parties/{id}/host-transfer", app.withAuth(app.withCSRF(app.handleHostTransfer)))
+	mux.HandleFunc("PUT /api/parties/{id}/settings", app.withAuth(app.withCSRF(app.handleUpdatePartySettings)))
 
 	mux.HandleFunc("GET /api/parties/{id}/playlist", app.withAuth(app.handleGetPlaylist))
 	mux.HandleFunc("POST /api/parties/{id}/playlist", app.withAuth(app.withCSRF(app.handleAddPlaylistItem)))

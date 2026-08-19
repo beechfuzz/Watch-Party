@@ -39,12 +39,16 @@ func (h *Hub) Events() <-chan Event { return h.events }
 
 // CreateParty creates a new party's DB row and in-memory actor. Parties now
 // start with an empty playlist and no current item (idle) — media is added
-// afterward through the playlist, not chosen at creation time.
-func (h *Hub) CreateParty(ctx context.Context, partyID, name, hostUserID string) (*Party, error) {
+// afterward through the playlist, not chosen at creation time. settings
+// carries the Party Settings form's four fields, already defaulted by the
+// caller (handleCreateParty) when the request omitted them.
+func (h *Hub) CreateParty(ctx context.Context, partyID, name string, settings Settings, hostUserID string) (*Party, error) {
 	now := time.Now()
 	row := dbx.Party{
 		ID: partyID, HostUserID: hostUserID, Name: name,
 		CreatedAt: now, Status: dbx.PartyStatusActive,
+		AutoAdvance: settings.AutoAdvance, ShowNextDialog: settings.ShowNextDialog,
+		AutoplayEnabled: settings.AutoplayEnabled, AutoplayDelaySeconds: settings.AutoplayDelaySeconds,
 	}
 	if err := h.store.CreateParty(ctx, row); err != nil {
 		return nil, err
@@ -61,7 +65,7 @@ func (h *Hub) CreateParty(ctx context.Context, partyID, name, hostUserID string)
 	}
 
 	h.mu.Lock()
-	p := newParty(partyID, name, hostUserID, initial, nil, nil, h.store, h.tuning, h.logger, h.events)
+	p := newParty(partyID, name, hostUserID, initial, nil, nil, settings, h.store, h.tuning, h.logger, h.events)
 	h.parties[partyID] = p
 	h.mu.Unlock()
 	return p, nil
@@ -146,7 +150,7 @@ func (h *Hub) RecoverActiveParties(ctx context.Context) error {
 		}
 
 		h.mu.Lock()
-		p := newParty(row.ID, row.Name, row.HostUserID, initial, current, playlist, h.store, h.tuning, h.logger, h.events)
+		p := newParty(row.ID, row.Name, row.HostUserID, initial, current, playlist, settingsFromRow(row), h.store, h.tuning, h.logger, h.events)
 		h.parties[row.ID] = p
 		h.mu.Unlock()
 

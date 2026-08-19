@@ -14,8 +14,46 @@ import (
 	"github.com/beechfuzz/watch-party/internal/wsproto"
 )
 
+// settingsRequest carries the Party Settings form's four end-of-media
+// fields. Pointer fields so handleCreateParty can tell "omitted" (fall back
+// to the default matching the form's own default state) from "explicitly
+// false/0". handleUpdatePartySettings, by contrast, treats every field as
+// required — that request is always a full form submission, not a partial
+// patch.
+type settingsRequest struct {
+	AutoAdvance          *bool `json:"auto_advance"`
+	ShowNextDialog       *bool `json:"show_next_dialog"`
+	AutoplayEnabled      *bool `json:"autoplay_enabled"`
+	AutoplayDelaySeconds *int  `json:"autoplay_delay_seconds"`
+}
+
+// defaultSettings matches the Party Settings form's own default state (and
+// the migration's SQL column defaults) — all three checkboxes checked, a
+// 5-second delay.
+func defaultSettings() party.Settings {
+	return party.Settings{AutoAdvance: true, ShowNextDialog: true, AutoplayEnabled: true, AutoplayDelaySeconds: 5}
+}
+
+func (r settingsRequest) toSettings() party.Settings {
+	s := defaultSettings()
+	if r.AutoAdvance != nil {
+		s.AutoAdvance = *r.AutoAdvance
+	}
+	if r.ShowNextDialog != nil {
+		s.ShowNextDialog = *r.ShowNextDialog
+	}
+	if r.AutoplayEnabled != nil {
+		s.AutoplayEnabled = *r.AutoplayEnabled
+	}
+	if r.AutoplayDelaySeconds != nil {
+		s.AutoplayDelaySeconds = *r.AutoplayDelaySeconds
+	}
+	return s
+}
+
 type createPartyRequest struct {
 	Name string `json:"name"`
+	settingsRequest
 }
 
 // partySummary is one entry in the GET /api/parties listing — enough for
@@ -101,6 +139,11 @@ func (a *App) handleCreateParty(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "name is required")
 		return
 	}
+	settings := req.settingsRequest.toSettings()
+	if settings.AutoplayDelaySeconds <= 0 {
+		writeError(w, http.StatusBadRequest, "bad_request", "autoplay_delay_seconds must be positive")
+		return
+	}
 	user := userFromContext(r.Context())
 
 	partyID, err := idgen.PartyID()
@@ -115,7 +158,7 @@ func (a *App) handleCreateParty(w http.ResponseWriter, r *http.Request) {
 	// created). The 'created' status exists in the schema for conceptual
 	// completeness with the spec's stated lifecycle but isn't a state this
 	// implementation currently passes through.
-	if _, err := a.Hub.CreateParty(r.Context(), partyID, req.Name, user.ID); err != nil {
+	if _, err := a.Hub.CreateParty(r.Context(), partyID, req.Name, settings, user.ID); err != nil {
 		a.Logger.Error("create party failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
 		return
@@ -126,6 +169,48 @@ func (a *App) handleCreateParty(w http.ResponseWriter, r *http.Request) {
 		"name":         req.Name,
 		"host_user_id": user.ID,
 	})
+}
+
+type updatePartySettingsRequest struct {
+	Name                 string `json:"name"`
+	AutoAdvance          bool   `json:"auto_advance"`
+	ShowNextDialog       bool   `json:"show_next_dialog"`
+	AutoplayEnabled      bool   `json:"autoplay_enabled"`
+	AutoplayDelaySeconds int    `json:"autoplay_delay_seconds"`
+}
+
+// handleUpdatePartySettings is the Party Settings form's post-creation save
+// path (the cog button on the party page) — host-only, like every other
+// party mutation. Unlike handleAddPlaylistItem there's no Emby round trip to
+// avoid here, so the host check lives entirely in Party.UpdateSettings
+// (still fast/IO-free before its own SQLite write — see its doc comment).
+func (a *App) handleUpdatePartySettings(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	user := userFromContext(r.Context())
+	var req updatePartySettingsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "name is required")
+		return
+	}
+	if req.AutoplayDelaySeconds <= 0 {
+		writeError(w, http.StatusBadRequest, "bad_request", "autoplay_delay_seconds must be positive")
+		return
+	}
+
+	p, ok := a.Hub.Get(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "party not found or already ended")
+		return
+	}
+	settings := party.Settings{
+		AutoAdvance: req.AutoAdvance, ShowNextDialog: req.ShowNextDialog,
+		AutoplayEnabled: req.AutoplayEnabled, AutoplayDelaySeconds: req.AutoplayDelaySeconds,
+	}
+	if err := p.UpdateSettings(r.Context(), user.ID, req.Name, settings); err != nil {
+		a.writeHostActionErr(w, err) // ErrNotHost/ErrPartyEnded mapping already covers this case
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (a *App) handleGetParty(w http.ResponseWriter, r *http.Request) {
@@ -154,7 +239,7 @@ func (a *App) handleGetParty(w http.ResponseWriter, r *http.Request) {
 		// Active-in-DB but not in the hub shouldn't normally happen (active
 		// parties are recovered at startup), but degrade gracefully rather
 		// than 500 if it ever does.
-		snap = wsproto.SnapshotPayload{PartyID: row.ID, HostUserID: row.HostUserID}
+		snap = wsproto.SnapshotPayload{PartyID: row.ID, Name: row.Name, HostUserID: row.HostUserID}
 	}
 
 	// Media authorization must be re-validated on join, not just at party
@@ -181,15 +266,16 @@ func (a *App) handleGetParty(w http.ResponseWriter, r *http.Request) {
 		itemTitle = item.Name
 	}
 
-	// Name/ItemTitle ride alongside the snapshot rather than joining
-	// wsproto.SnapshotPayload itself, since that struct is also the shape of
-	// every WS snapshot broadcast — the party actor has no Emby access (by
-	// design; see ARCHITECTURE.md §3) and so has no way to populate a title.
+	// ItemTitle rides alongside the snapshot rather than joining
+	// wsproto.SnapshotPayload itself — the party actor has no Emby access
+	// (by design; see ARCHITECTURE.md §3) and so has no way to populate a
+	// title. Name, unlike ItemTitle, IS part of SnapshotPayload (so a host
+	// rename propagates live to already-connected clients via the ordinary
+	// snapshot broadcast, not just this HTTP response).
 	writeJSON(w, http.StatusOK, struct {
 		wsproto.SnapshotPayload
-		Name      string `json:"name"`
 		ItemTitle string `json:"item_title"`
-	}{SnapshotPayload: snap, Name: row.Name, ItemTitle: itemTitle})
+	}{SnapshotPayload: snap, ItemTitle: itemTitle})
 }
 
 func (a *App) handlePlaybackURL(w http.ResponseWriter, r *http.Request) {
@@ -452,7 +538,7 @@ func (a *App) handleAddPlaylistItem(w http.ResponseWriter, r *http.Request) {
 
 	added, err := p.AddPlaylistItem(r.Context(), user.ID, req.ItemID, item.RunTimeTicks)
 	if err != nil {
-		a.writePlaylistErr(w, err)
+		a.writeHostActionErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
@@ -474,7 +560,7 @@ func (a *App) handleRemovePlaylistItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := p.RemovePlaylistItem(r.Context(), user.ID, playlistItemID); err != nil {
-		a.writePlaylistErr(w, err)
+		a.writeHostActionErr(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -498,7 +584,7 @@ func (a *App) handleReorderPlaylist(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := p.ReorderPlaylist(r.Context(), user.ID, req.OrderedIDs); err != nil {
-		a.writePlaylistErr(w, err)
+		a.writeHostActionErr(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -521,13 +607,13 @@ func (a *App) handleSelectPlaylistItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := p.SelectCurrentItem(user.ID, playlistItemID); err != nil {
-		a.writePlaylistErr(w, err)
+		a.writeHostActionErr(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (a *App) writePlaylistErr(w http.ResponseWriter, err error) {
+func (a *App) writeHostActionErr(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, party.ErrNotHost):
 		writeError(w, http.StatusForbidden, "not_host", "only the host may edit the playlist")

@@ -2,6 +2,7 @@
 // create). Server is the source of truth; this just renders whatever
 // /api/me and /api/parties say.
 import { api, setCSRFToken, clearCSRFToken } from "./api.js";
+import { wireSettingsForm } from "./settingsForm.js";
 
 const TICKS_PER_SECOND = 10_000_000;
 
@@ -19,6 +20,10 @@ const createDialog = document.getElementById("create-party-dialog");
 const createForm = document.getElementById("create-party-form");
 const createError = document.getElementById("create-error");
 const cancelCreateBtn = document.getElementById("cancel-create-btn");
+const createSettingsForm = wireSettingsForm({
+  autoAdvance: "create-auto-advance", showNextDialog: "create-show-next-dialog",
+  autoplayEnabled: "create-autoplay-enabled", autoplayDelay: "create-autoplay-delay",
+});
 
 const activeGrid = document.getElementById("active-parties-grid");
 const activeCount = document.getElementById("active-count");
@@ -196,6 +201,7 @@ logoutBtn.addEventListener("click", async () => {
 createBtn.addEventListener("click", () => {
   hideError(createError);
   createForm.reset();
+  createSettingsForm.resync();
   createDialog.showModal();
 });
 cancelCreateBtn.addEventListener("click", () => createDialog.close());
@@ -204,7 +210,10 @@ createForm.addEventListener("submit", async (e) => {
   hideError(createError);
   const formData = new FormData(createForm);
   try {
-    const result = await api("/api/parties", { method: "POST", body: { name: formData.get("name") } });
+    const result = await api("/api/parties", {
+      method: "POST",
+      body: { name: formData.get("name"), ...createSettingsForm.read() },
+    });
     window.location.href = `/party/${encodeURIComponent(result.party_id)}`;
   } catch (err) {
     showError(createError, err.message);
