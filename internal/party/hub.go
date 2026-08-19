@@ -37,12 +37,14 @@ func NewHub(store *dbx.Store, tuning Tuning, logger *slog.Logger) *Hub {
 // engine (per-user Emby playback reporting subscribes to this).
 func (h *Hub) Events() <-chan Event { return h.events }
 
-// CreateParty creates a new party's DB row and in-memory actor.
-func (h *Hub) CreateParty(ctx context.Context, partyID, itemID string, durationTicks int64, hostUserID string) (*Party, error) {
+// CreateParty creates a new party's DB row and in-memory actor. Parties now
+// start with an empty playlist and no current item (idle) — media is added
+// afterward through the playlist, not chosen at creation time.
+func (h *Hub) CreateParty(ctx context.Context, partyID, name, hostUserID string) (*Party, error) {
 	now := time.Now()
 	row := dbx.Party{
-		ID: partyID, HostUserID: hostUserID, ItemID: itemID,
-		DurationTicks: durationTicks, CreatedAt: now, Status: dbx.PartyStatusActive,
+		ID: partyID, HostUserID: hostUserID, Name: name,
+		CreatedAt: now, Status: dbx.PartyStatusActive,
 	}
 	if err := h.store.CreateParty(ctx, row); err != nil {
 		return nil, err
@@ -59,7 +61,7 @@ func (h *Hub) CreateParty(ctx context.Context, partyID, itemID string, durationT
 	}
 
 	h.mu.Lock()
-	p := newParty(partyID, itemID, durationTicks, hostUserID, initial, h.store, h.tuning, h.logger, h.events)
+	p := newParty(partyID, name, hostUserID, initial, nil, nil, h.store, h.tuning, h.logger, h.events)
 	h.parties[partyID] = p
 	h.mu.Unlock()
 	return p, nil
@@ -129,8 +131,22 @@ func (h *Hub) RecoverActiveParties(ctx context.Context) error {
 			return err
 		}
 
+		playlist, err := h.store.ListPlaylistItems(ctx, row.ID)
+		if err != nil {
+			return err
+		}
+		var current *currentItem
+		if row.CurrentPlaylistItemID != nil {
+			for _, it := range playlist {
+				if it.ID == *row.CurrentPlaylistItemID {
+					current = &currentItem{PlaylistItemID: it.ID, EmbyItemID: it.ItemID, DurationTicks: it.DurationTicks}
+					break
+				}
+			}
+		}
+
 		h.mu.Lock()
-		p := newParty(row.ID, row.ItemID, row.DurationTicks, row.HostUserID, initial, h.store, h.tuning, h.logger, h.events)
+		p := newParty(row.ID, row.Name, row.HostUserID, initial, current, playlist, h.store, h.tuning, h.logger, h.events)
 		h.parties[row.ID] = p
 		h.mu.Unlock()
 

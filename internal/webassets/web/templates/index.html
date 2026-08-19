@@ -141,9 +141,10 @@
     <form id="create-party-form">
       <h3>Create a party</h3>
       <div class="field">
-        <label for="create-item-id">Emby item ID</label>
-        <input id="create-item-id" type="text" name="item_id" required placeholder="e.g. 4f2a91b7c3...">
+        <label for="create-party-name">Party name</label>
+        <input id="create-party-name" type="text" name="name" required placeholder="e.g. Friday movie night" maxlength="200">
       </div>
+      <p class="login-footnote" style="text-align:left; margin:-6px 0 16px;">Add something to watch from the Playlist section once you're in.</p>
       <p class="error" id="create-error" hidden></p>
       <div style="display:flex; gap:10px; justify-content:flex-end;">
         <button type="button" class="btn btn-ghost" id="cancel-create-btn">Cancel</button>

@@ -98,6 +98,31 @@ func (rp *Reporter) handleEvent(ctx context.Context, evt party.Event) {
 		// the event's captured snapshot would.
 		rp.report(ctx, evt.PartyID, evt.UserID, rp.emby.ReportPlaybackStopped)
 		rp.forget(evt.PartyID, evt.UserID)
+	case party.EventItemChanged:
+		// The party's current item just changed (playlist advance, end of
+		// playlist, or a host selecting a different item) -- evt.ItemID/
+		// PositionTicks describe the OUTGOING item's final state (see the
+		// EventItemChanged doc comment), not the new one. A live report()
+		// lookup would already see the NEW item (the actor's state has
+		// already moved on by the time this event is processed), so this
+		// uses sendReport directly with the event's captured values instead
+		// -- same reason EventEnded does. Every tracked user for this party
+		// gets a Stopped report for the item that just ended, then their
+		// play-session tracking is forgotten (not the whole party, which
+		// stays active): the new item's tracking begins lazily, the same
+		// way it does on join, whenever each client fetches a playback URL
+		// for it (RecordPlaySession).
+		rp.mu.Lock()
+		members := rp.sessions[evt.PartyID]
+		userIDs := make([]string, 0, len(members))
+		for uid := range members {
+			userIDs = append(userIDs, uid)
+		}
+		rp.mu.Unlock()
+		for _, uid := range userIDs {
+			rp.sendReport(ctx, evt.PartyID, uid, evt.ItemID, evt.PositionTicks, true, rp.emby.ReportPlaybackStopped)
+			rp.forget(evt.PartyID, uid)
+		}
 	case party.EventEnded:
 		// Hub.EndParty removes the party from the hub immediately after
 		// emitting this event, so a live hub.Get() here would already miss

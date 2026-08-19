@@ -100,6 +100,29 @@ func newTestHub(t *testing.T) *Hub {
 	return h
 }
 
+// createPartyWithItem creates a party via the hub, adds one playlist item,
+// and seeds it directly as the current item at sequence 0 (bypassing
+// transitionCurrent's broadcast/autoplay side effects) — reproducing the
+// old single-item design's initial state (idle position 0, paused,
+// sequence 0) for tests that only care about play/pause/seek/host-transfer
+// behavior on an already-loaded item. Playlist mechanics themselves
+// (advance, add/remove/reorder, select) get their own tests.
+func createPartyWithItem(t *testing.T, hub *Hub, partyID, itemID string, durationTicks int64, hostUserID string) *Party {
+	t.Helper()
+	p, err := hub.CreateParty(context.Background(), partyID, "Test Party", hostUserID)
+	if err != nil {
+		t.Fatalf("CreateParty: %v", err)
+	}
+	added, err := p.AddPlaylistItem(context.Background(), hostUserID, itemID, durationTicks)
+	if err != nil {
+		t.Fatalf("AddPlaylistItem: %v", err)
+	}
+	p.do(func() {
+		p.current = &currentItem{PlaylistItemID: added.ID, EmbyItemID: added.ItemID, DurationTicks: added.DurationTicks}
+	})
+	return p
+}
+
 func seedUser(t *testing.T, store *dbx.Store, id, name string) {
 	t.Helper()
 	if err := store.UpsertUser(context.Background(), id, name, "enc-token", time.Now()); err != nil {
@@ -133,17 +156,14 @@ func TestHandleControl_NonHostRejected(t *testing.T) {
 	seedUser(t, store, "host", "Host")
 	seedUser(t, store, "guest", "Guest")
 
-	p, err := hub.CreateParty(context.Background(), "party1", "item1", 100*10_000_000, "host")
-	if err != nil {
-		t.Fatal(err)
-	}
+	p := createPartyWithItem(t, hub, "party1", "item1", 100*10_000_000, "host")
 	_, _ = p.Join("host", "Host")
 	_, _ = p.Join("guest", "Guest")
 
 	guestConn := &fakeConn{}
 	p.AttachConn("guest", guestConn)
 
-	err = p.HandleControl("guest", wsproto.MsgPlay, 0)
+	err := p.HandleControl("guest", wsproto.MsgPlay, 0)
 	if err != ErrNotHost {
 		t.Fatalf("err = %v, want ErrNotHost", err)
 	}
@@ -157,7 +177,7 @@ func TestHandleControl_NonHostRejected(t *testing.T) {
 func TestHandleControl_HostAllowed(t *testing.T) {
 	hub := newTestHub(t)
 	seedUser(t, hub.store, "host", "Host")
-	p, _ := hub.CreateParty(context.Background(), "party1", "item1", 100*10_000_000, "host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 100*10_000_000, "host")
 	_, _ = p.Join("host", "Host")
 	hostConn := &fakeConn{}
 	p.AttachConn("host", hostConn)
@@ -179,7 +199,7 @@ func TestHandleControl_HostAllowed(t *testing.T) {
 func TestCurrentPositionTicks_ExtrapolatesWhilePlaying(t *testing.T) {
 	hub := newTestHub(t)
 	seedUser(t, hub.store, "host", "Host")
-	p, _ := hub.CreateParty(context.Background(), "party1", "item1", 1_000*10_000_000, "host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1_000*10_000_000, "host")
 	_, _ = p.Join("host", "Host")
 
 	if err := p.HandleControl("host", wsproto.MsgPlay, 5*10_000_000); err != nil {
@@ -206,7 +226,7 @@ func TestCurrentPositionTicks_ExtrapolatesWhilePlaying(t *testing.T) {
 func TestCurrentPositionTicks_DoesNotAdvanceWhilePaused(t *testing.T) {
 	hub := newTestHub(t)
 	seedUser(t, hub.store, "host", "Host")
-	p, _ := hub.CreateParty(context.Background(), "party1", "item1", 1_000*10_000_000, "host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1_000*10_000_000, "host")
 	_, _ = p.Join("host", "Host")
 
 	if err := p.HandleControl("host", wsproto.MsgPause, 5*10_000_000); err != nil {
@@ -227,10 +247,7 @@ func TestIntegration_PlaySeekPausePropagateToParticipant(t *testing.T) {
 	seedUser(t, hub.store, "host", "Host")
 	seedUser(t, hub.store, "p1", "Participant")
 
-	p, err := hub.CreateParty(context.Background(), "party1", "item1", 1000*10_000_000, "host")
-	if err != nil {
-		t.Fatal(err)
-	}
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
 	if _, err := p.Join("host", "Host"); err != nil {
 		t.Fatal(err)
 	}
@@ -304,7 +321,7 @@ func TestIntegration_DisconnectReconnectReceivesCorrectSnapshot(t *testing.T) {
 	seedUser(t, hub.store, "host", "Host")
 	seedUser(t, hub.store, "p1", "Participant")
 
-	p, _ := hub.CreateParty(context.Background(), "party1", "item1", 1000*10_000_000, "host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
 	_, _ = p.Join("host", "Host")
 	p.AttachConn("host", &fakeConn{})
 	_, _ = p.Join("p1", "Participant")
@@ -350,7 +367,7 @@ func TestIntegration_DisconnectReconnectReceivesCorrectSnapshot(t *testing.T) {
 func TestIntegration_RapidSeekThenPlay_FinalStateConsistent(t *testing.T) {
 	hub := newTestHub(t)
 	seedUser(t, hub.store, "host", "Host")
-	p, _ := hub.CreateParty(context.Background(), "party1", "item1", 1000*10_000_000, "host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
 	_, _ = p.Join("host", "Host")
 	conn := &fakeConn{}
 	p.AttachConn("host", conn)
@@ -374,7 +391,7 @@ func TestIntegration_RapidSeekThenPlay_FinalStateConsistent(t *testing.T) {
 func TestIntegration_RapidPauseThenSeek_FinalStateConsistent(t *testing.T) {
 	hub := newTestHub(t)
 	seedUser(t, hub.store, "host", "Host")
-	p, _ := hub.CreateParty(context.Background(), "party1", "item1", 1000*10_000_000, "host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
 	_, _ = p.Join("host", "Host")
 	p.AttachConn("host", &fakeConn{})
 
@@ -400,7 +417,7 @@ func TestHostGracePeriod_ReconnectRetainsHost(t *testing.T) {
 	hub := newTestHub(t)
 	seedUser(t, hub.store, "host", "Host")
 	seedUser(t, hub.store, "p1", "Participant")
-	p, _ := hub.CreateParty(context.Background(), "party1", "item1", 1000*10_000_000, "host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
 	_, _ = p.Join("host", "Host")
 	_, _ = p.Join("p1", "Participant")
 	p.AttachConn("p1", &fakeConn{})
@@ -423,7 +440,7 @@ func TestHostGracePeriod_ExpiresAndTransfersToEarliestJoined(t *testing.T) {
 	seedUser(t, hub.store, "host", "Host")
 	seedUser(t, hub.store, "early", "Early")
 	seedUser(t, hub.store, "late", "Late")
-	p, _ := hub.CreateParty(context.Background(), "party1", "item1", 1000*10_000_000, "host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
 	_, _ = p.Join("host", "Host")
 	_, _ = p.Join("early", "Early")
 	p.AttachConn("early", &fakeConn{})
@@ -449,7 +466,7 @@ func TestHostGracePeriod_FormerHostDoesNotReclaimOnReconnect(t *testing.T) {
 	hub := newTestHub(t)
 	seedUser(t, hub.store, "host", "Host")
 	seedUser(t, hub.store, "successor", "Successor")
-	p, _ := hub.CreateParty(context.Background(), "party1", "item1", 1000*10_000_000, "host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
 	_, _ = p.Join("host", "Host")
 	_, _ = p.Join("successor", "Successor")
 	p.AttachConn("successor", &fakeConn{})
@@ -484,7 +501,7 @@ func TestHostLeave_TransfersImmediately(t *testing.T) {
 	hub := newTestHub(t)
 	seedUser(t, hub.store, "host", "Host")
 	seedUser(t, hub.store, "p1", "Participant")
-	p, _ := hub.CreateParty(context.Background(), "party1", "item1", 1000*10_000_000, "host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
 	_, _ = p.Join("host", "Host")
 	_, _ = p.Join("p1", "Participant")
 	p.AttachConn("p1", &fakeConn{})
@@ -498,11 +515,15 @@ func TestHostLeave_TransfersImmediately(t *testing.T) {
 
 // --- end of media detection ---
 
-func TestEndOfMedia_ServerDetectsAndBroadcastsPause(t *testing.T) {
+// TestEndOfMedia_EndOfPlaylistGoesIdle covers the single-item case: reaching
+// the end of the party's only playlist item, with nothing queued after it,
+// transitions the party to idle (paused, no current item) rather than just
+// pausing at the last frame — see checkEndOfMedia/transitionCurrent.
+func TestEndOfMedia_EndOfPlaylistGoesIdle(t *testing.T) {
 	hub := newTestHub(t)
 	seedUser(t, hub.store, "host", "Host")
 	durationTicks := int64(1) * 10_000_000 // 1 second item
-	p, _ := hub.CreateParty(context.Background(), "party1", "item1", durationTicks, "host")
+	p := createPartyWithItem(t, hub, "party1", "item1", durationTicks, "host")
 	_, _ = p.Join("host", "Host")
 	conn := &fakeConn{}
 	p.AttachConn("host", conn)
@@ -518,12 +539,141 @@ func TestEndOfMedia_ServerDetectsAndBroadcastsPause(t *testing.T) {
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		snap := p.Snapshot()
-		if !snap.IsPlaying && snap.PositionTicks >= durationTicks {
+		if !snap.IsPlaying && snap.ItemID == "" {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatal("server did not detect end-of-media within deadline")
+	t.Fatal("server did not detect end-of-playlist and go idle within deadline")
+}
+
+// TestEndOfMedia_AdvancesToNextPlaylistItem covers the multi-item case:
+// reaching the end of the current item advances to the next queued item and
+// keeps playing, rather than stopping.
+func TestEndOfMedia_AdvancesToNextPlaylistItem(t *testing.T) {
+	hub := newTestHub(t)
+	seedUser(t, hub.store, "host", "Host")
+	durationTicks := int64(1) * 10_000_000 // 1 second item
+	p := createPartyWithItem(t, hub, "party1", "item1", durationTicks, "host")
+	if _, err := p.AddPlaylistItem(context.Background(), "host", "item2", 1000*10_000_000); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = p.Join("host", "Host")
+	conn := &fakeConn{}
+	p.AttachConn("host", conn)
+
+	if err := p.HandleControl("host", wsproto.MsgPlay, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		snap := p.Snapshot()
+		if snap.ItemID == "item2" {
+			if !snap.IsPlaying {
+				t.Errorf("advanced to item2 but not playing: %+v", snap)
+			}
+			if snap.PositionTicks != 0 {
+				t.Errorf("advanced item should start at position 0, got %d", snap.PositionTicks)
+			}
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("server did not advance to the next playlist item within deadline")
+}
+
+// --- playlist mutation: host-only, and the removal/reorder edge cases ---
+
+func TestAddPlaylistItem_NonHostRejected(t *testing.T) {
+	hub := newTestHub(t)
+	seedUser(t, hub.store, "host", "Host")
+	seedUser(t, hub.store, "guest", "Guest")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
+
+	if _, err := p.AddPlaylistItem(context.Background(), "guest", "item2", 500*10_000_000); err != ErrNotHost {
+		t.Errorf("err = %v, want ErrNotHost", err)
+	}
+}
+
+func TestRemovePlaylistItem_CurrentItemRejected(t *testing.T) {
+	hub := newTestHub(t)
+	seedUser(t, hub.store, "host", "Host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
+
+	// The playlist item createPartyWithItem seeded as current -- read it
+	// back via the actor's own listing rather than assuming its id.
+	snap := p.Snapshot()
+	if snap.ItemID != "item1" {
+		t.Fatalf("precondition failed: current item = %q, want item1", snap.ItemID)
+	}
+	var currentID int64
+	p.do(func() { currentID = p.current.PlaylistItemID })
+
+	if err := p.RemovePlaylistItem(context.Background(), "host", currentID); err != ErrCannotRemoveCurrentItem {
+		t.Errorf("err = %v, want ErrCannotRemoveCurrentItem", err)
+	}
+}
+
+func TestRemovePlaylistItem_NonHostRejected(t *testing.T) {
+	hub := newTestHub(t)
+	seedUser(t, hub.store, "host", "Host")
+	seedUser(t, hub.store, "guest", "Guest")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
+	added, err := p.AddPlaylistItem(context.Background(), "host", "item2", 500*10_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := p.RemovePlaylistItem(context.Background(), "guest", added.ID); err != ErrNotHost {
+		t.Errorf("err = %v, want ErrNotHost", err)
+	}
+}
+
+func TestReorderPlaylist_MismatchedSetRejected(t *testing.T) {
+	hub := newTestHub(t)
+	seedUser(t, hub.store, "host", "Host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
+	if _, err := p.AddPlaylistItem(context.Background(), "host", "item2", 500*10_000_000); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := p.ReorderPlaylist(context.Background(), "host", []int64{999}); err != ErrInvalidReorder {
+		t.Errorf("err = %v, want ErrInvalidReorder", err)
+	}
+}
+
+func TestSelectCurrentItem_NonHostRejected(t *testing.T) {
+	hub := newTestHub(t)
+	seedUser(t, hub.store, "host", "Host")
+	seedUser(t, hub.store, "guest", "Guest")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
+	added, err := p.AddPlaylistItem(context.Background(), "host", "item2", 500*10_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := p.SelectCurrentItem("guest", added.ID); err != ErrNotHost {
+		t.Errorf("err = %v, want ErrNotHost", err)
+	}
+}
+
+func TestSelectCurrentItem_StartsPlayingFromZero(t *testing.T) {
+	hub := newTestHub(t)
+	seedUser(t, hub.store, "host", "Host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
+	added, err := p.AddPlaylistItem(context.Background(), "host", "item2", 500*10_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := p.SelectCurrentItem("host", added.ID); err != nil {
+		t.Fatal(err)
+	}
+	snap := p.Snapshot()
+	if snap.ItemID != "item2" || !snap.IsPlaying || snap.PositionTicks != 0 {
+		t.Errorf("snap = %+v, want item2 playing from position 0", snap)
+	}
 }
 
 // --- stale/late join gets full snapshot, not replayed history ---
@@ -532,7 +682,7 @@ func TestLateJoin_ReceivesFullSnapshotNotHistory(t *testing.T) {
 	hub := newTestHub(t)
 	seedUser(t, hub.store, "host", "Host")
 	seedUser(t, hub.store, "late", "Late")
-	p, _ := hub.CreateParty(context.Background(), "party1", "item1", 1000*10_000_000, "host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
 	_, _ = p.Join("host", "Host")
 	p.AttachConn("host", &fakeConn{})
 
@@ -561,7 +711,7 @@ func TestExplicitHostTransfer(t *testing.T) {
 	hub := newTestHub(t)
 	seedUser(t, hub.store, "host", "Host")
 	seedUser(t, hub.store, "p1", "Participant")
-	p, _ := hub.CreateParty(context.Background(), "party1", "item1", 1000*10_000_000, "host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
 	_, _ = p.Join("host", "Host")
 	_, _ = p.Join("p1", "Participant")
 	p.AttachConn("p1", &fakeConn{})
@@ -586,7 +736,7 @@ func TestExplicitHostTransfer_NonHostRejected(t *testing.T) {
 	hub := newTestHub(t)
 	seedUser(t, hub.store, "host", "Host")
 	seedUser(t, hub.store, "p1", "Participant")
-	p, _ := hub.CreateParty(context.Background(), "party1", "item1", 1000*10_000_000, "host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
 	_, _ = p.Join("host", "Host")
 	_, _ = p.Join("p1", "Participant")
 
@@ -600,7 +750,7 @@ func TestExplicitHostTransfer_NonHostRejected(t *testing.T) {
 func TestPartyEnd_IsTerminalAndClosesConnections(t *testing.T) {
 	hub := newTestHub(t)
 	seedUser(t, hub.store, "host", "Host")
-	p, _ := hub.CreateParty(context.Background(), "party1", "item1", 1000*10_000_000, "host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
 	_, _ = p.Join("host", "Host")
 	conn := &fakeConn{}
 	p.AttachConn("host", conn)
@@ -644,9 +794,16 @@ func TestHub_RecoverActiveParties(t *testing.T) {
 
 	now := time.Now()
 	if err := store.CreateParty(ctx, dbx.Party{
-		ID: "party1", HostUserID: "host", ItemID: "item1",
-		DurationTicks: 1000 * 10_000_000, CreatedAt: now, Status: dbx.PartyStatusActive,
+		ID: "party1", HostUserID: "host", Name: "Test Party",
+		CreatedAt: now, Status: dbx.PartyStatusActive,
 	}); err != nil {
+		t.Fatal(err)
+	}
+	item, err := store.AddPlaylistItem(ctx, "party1", "item1", 1000*10_000_000, "host", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdatePartyCurrentItem(ctx, "party1", &item.ID); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.UpsertPlaybackState(ctx, dbx.PlaybackState{
@@ -711,8 +868,8 @@ func TestSweepInactiveParties_EndsPartyIdleLongerThanTimeout(t *testing.T) {
 
 	staleTime := time.Now().Add(-50 * time.Hour)
 	if err := store.CreateParty(ctx, dbx.Party{
-		ID: "stale-party", HostUserID: "host", ItemID: "item1",
-		DurationTicks: 1000 * 10_000_000, CreatedAt: staleTime, Status: dbx.PartyStatusActive,
+		ID: "stale-party", HostUserID: "host", Name: "Stale Party",
+		CreatedAt: staleTime, Status: dbx.PartyStatusActive,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -767,8 +924,8 @@ func TestSweepInactiveParties_RecentMemberActivityKeepsPartyAlive(t *testing.T) 
 	staleTime := time.Now().Add(-50 * time.Hour)
 	recentTime := time.Now().Add(-1 * time.Hour)
 	if err := store.CreateParty(ctx, dbx.Party{
-		ID: "recently-active-party", HostUserID: "host", ItemID: "item1",
-		DurationTicks: 1000 * 10_000_000, CreatedAt: staleTime, Status: dbx.PartyStatusActive,
+		ID: "recently-active-party", HostUserID: "host", Name: "Recently Active Party",
+		CreatedAt: staleTime, Status: dbx.PartyStatusActive,
 	}); err != nil {
 		t.Fatal(err)
 	}

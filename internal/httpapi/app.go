@@ -48,6 +48,14 @@ func RegisterRoutes(mux *http.ServeMux, app *App) {
 	mux.HandleFunc("POST /api/parties/{id}/end", app.withAuth(app.withCSRF(app.handleEndParty)))
 	mux.HandleFunc("POST /api/parties/{id}/host-transfer", app.withAuth(app.withCSRF(app.handleHostTransfer)))
 
+	mux.HandleFunc("GET /api/parties/{id}/playlist", app.withAuth(app.handleGetPlaylist))
+	mux.HandleFunc("POST /api/parties/{id}/playlist", app.withAuth(app.withCSRF(app.handleAddPlaylistItem)))
+	mux.HandleFunc("DELETE /api/parties/{id}/playlist/{itemId}", app.withAuth(app.withCSRF(app.handleRemovePlaylistItem)))
+	mux.HandleFunc("PUT /api/parties/{id}/playlist/order", app.withAuth(app.withCSRF(app.handleReorderPlaylist)))
+	mux.HandleFunc("POST /api/parties/{id}/playlist/{itemId}/play", app.withAuth(app.withCSRF(app.handleSelectPlaylistItem)))
+
+	mux.HandleFunc("GET /api/emby/items", app.withAuth(app.handleBrowseEmbyItems))
+
 	mux.HandleFunc("GET /ws/parties/{id}", app.handleWebSocket) // auth + origin validated inside (cookie-based; see ws.go)
 
 	registerPages(mux)

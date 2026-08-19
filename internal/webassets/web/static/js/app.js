@@ -78,9 +78,10 @@ async function showHome() {
 function renderActiveCard(p) {
   const el = document.createElement("div");
   el.className = "party-card";
+  const statusLabel = p.item_id ? (p.is_playing ? "Playing" : "Paused") : "Idle";
   el.innerHTML = `
     <div class="party-art">
-      <span class="status-chip ${p.is_playing ? "playing" : "paused"}">${p.is_playing ? "Playing" : "Paused"}</span>
+      <span class="status-chip ${p.is_playing ? "playing" : "paused"}">${statusLabel}</span>
       <span class="watching-chip">
         <svg viewBox="0 0 24 24" fill="none"><circle cx="9" cy="8" r="2.6" stroke="currentColor" stroke-width="1.6"/><path d="M3.5 18c.4-2.8 2.5-4.5 5.5-4.5s5.1 1.7 5.5 4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
         ${p.member_count} watching
@@ -102,7 +103,11 @@ function renderActiveCard(p) {
       <button class="btn btn-primary join-btn">Join Party</button>
     </div>
   `;
-  el.querySelector(".party-art-title h3").textContent = p.item_title || p.item_id;
+  el.querySelector(".party-art-title h3").textContent = p.name;
+  if (p.item_title) {
+    el.querySelector(".party-art-title").insertAdjacentHTML("beforeend", `<span></span>`);
+    el.querySelector(".party-art-title span").textContent = p.item_title;
+  }
   el.querySelector(".host-row .avatar").textContent = initials(p.host_display_name);
   el.querySelector(".host-row-text").textContent = `Hosted by ${p.host_display_name}`;
   el.querySelector(".join-btn").addEventListener("click", () => {
@@ -128,7 +133,7 @@ function renderYourRow(p) {
       <button class="btn btn-ghost">Open Party</button>
     </div>
   `;
-  el.querySelector(".row-text h4").textContent = p.item_title || p.item_id;
+  el.querySelector(".row-text h4").textContent = p.name;
   el.querySelector(".row-actions button").addEventListener("click", () => {
     window.location.href = `/party/${encodeURIComponent(p.party_id)}`;
   });
@@ -199,7 +204,7 @@ createForm.addEventListener("submit", async (e) => {
   hideError(createError);
   const formData = new FormData(createForm);
   try {
-    const result = await api("/api/parties", { method: "POST", body: { item_id: formData.get("item_id") } });
+    const result = await api("/api/parties", { method: "POST", body: { name: formData.get("name") } });
     window.location.href = `/party/${encodeURIComponent(result.party_id)}`;
   } catch (err) {
     showError(createError, err.message);

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/beechfuzz/watch-party/internal/dbx"
 	"github.com/beechfuzz/watch-party/internal/emby"
@@ -14,7 +15,7 @@ import (
 )
 
 type createPartyRequest struct {
-	ItemID string `json:"item_id"`
+	Name string `json:"name"`
 }
 
 // partySummary is one entry in the GET /api/parties listing — enough for
@@ -25,8 +26,9 @@ type createPartyRequest struct {
 // join-by-link already implicitly allowed before this endpoint existed.
 type partySummary struct {
 	PartyID         string `json:"party_id"`
-	ItemID          string `json:"item_id"`
-	ItemTitle       string `json:"item_title"`
+	Name            string `json:"name"`
+	ItemID          string `json:"item_id,omitempty"`
+	ItemTitle       string `json:"item_title,omitempty"`
 	HostUserID      string `json:"host_user_id"`
 	HostDisplayName string `json:"host_display_name"`
 	IsPlaying       bool   `json:"is_playing"`
@@ -36,12 +38,15 @@ type partySummary struct {
 }
 
 // handleListParties powers the Home page's Active Parties / Your Parties
-// sections. Item titles are resolved via the requesting user's own Emby
-// token (never a shared one, per the spec's hard requirement elsewhere in
-// this codebase) -- a party whose item that specific user can't see (or
-// that Emby can't resolve for any other reason) is silently omitted from
-// their listing rather than failing the whole request, matching the
-// access-control spirit of handleGetParty's join-time check.
+// sections. A party's display name is now user-chosen at creation (it no
+// longer has a mandatory Emby item to derive a title from) — the current
+// item's title, when there is one, is still resolved via the requesting
+// user's own Emby token (never a shared one). Unlike the old single-item
+// design, a viewer who can't access the current item no longer causes the
+// whole party row to be omitted (the party itself isn't Emby-gated content;
+// only playback of a specific item is) — it's shown with a generic
+// "Restricted item" placeholder instead, matching the playlist listing's
+// per-viewer resolution below.
 func (a *App) handleListParties(w http.ResponseWriter, r *http.Request) {
 	user := userFromContext(r.Context())
 	token, err := a.TokenCipher.Decrypt(user.EncryptedAccessToken)
@@ -53,11 +58,16 @@ func (a *App) handleListParties(w http.ResponseWriter, r *http.Request) {
 	active := a.Hub.All()
 	summaries := make([]partySummary, 0, len(active))
 	for _, p := range active {
-		item, err := a.Emby.GetItem(r.Context(), token, user.ID, p.ItemID)
-		if err != nil {
-			continue
-		}
 		snap := p.Snapshot()
+
+		itemTitle := ""
+		if snap.ItemID != "" {
+			if item, err := a.Emby.GetItem(r.Context(), token, user.ID, snap.ItemID); err == nil {
+				itemTitle = item.Name
+			} else {
+				itemTitle = "Restricted item"
+			}
+		}
 
 		hostDisplayName := snap.HostUserID
 		if host, err := a.Store.GetUser(r.Context(), snap.HostUserID); err == nil && host != nil {
@@ -72,36 +82,26 @@ func (a *App) handleListParties(w http.ResponseWriter, r *http.Request) {
 		}
 
 		summaries = append(summaries, partySummary{
-			PartyID: p.ID, ItemID: p.ItemID, ItemTitle: item.Name,
+			PartyID: p.ID, Name: p.Name, ItemID: snap.ItemID, ItemTitle: itemTitle,
 			HostUserID: snap.HostUserID, HostDisplayName: hostDisplayName,
 			IsPlaying: snap.AuthoritativeState.IsPlaying, PositionTicks: p.CurrentPositionTicks(),
-			DurationTicks: p.DurationTicks, MemberCount: memberCount,
+			DurationTicks: snap.DurationTicks, MemberCount: memberCount,
 		})
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"parties": summaries})
 }
 
+// handleCreateParty creates a party with a user-chosen name and an empty
+// playlist — no Emby item is required (or even possible) up front anymore;
+// media is added afterward through the playlist endpoints below.
 func (a *App) handleCreateParty(w http.ResponseWriter, r *http.Request) {
 	var req createPartyRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ItemID == "" {
-		writeError(w, http.StatusBadRequest, "bad_request", "item_id is required")
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "name is required")
 		return
 	}
 	user := userFromContext(r.Context())
-
-	token, err := a.TokenCipher.Decrypt(user.EncryptedAccessToken)
-	if err != nil {
-		a.Logger.Error("decrypt token failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
-		return
-	}
-
-	item, err := a.Emby.GetItem(r.Context(), token, user.ID, req.ItemID)
-	if err != nil {
-		a.handleEmbyErr(w, r.Context(), user.ID, err, "could not look up that item on Emby")
-		return
-	}
 
 	partyID, err := idgen.PartyID()
 	if err != nil {
@@ -115,17 +115,16 @@ func (a *App) handleCreateParty(w http.ResponseWriter, r *http.Request) {
 	// created). The 'created' status exists in the schema for conceptual
 	// completeness with the spec's stated lifecycle but isn't a state this
 	// implementation currently passes through.
-	if _, err := a.Hub.CreateParty(r.Context(), partyID, req.ItemID, item.RunTimeTicks, user.ID); err != nil {
+	if _, err := a.Hub.CreateParty(r.Context(), partyID, req.Name, user.ID); err != nil {
 		a.Logger.Error("create party failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
 		return
 	}
 
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"party_id":       partyID,
-		"item_id":        req.ItemID,
-		"duration_ticks": item.RunTimeTicks,
-		"host_user_id":   user.ID,
+		"party_id":     partyID,
+		"name":         req.Name,
+		"host_user_id": user.ID,
 	})
 }
 
@@ -148,20 +147,6 @@ func (a *App) handleGetParty(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Media authorization must be re-validated on join, not just at party
-	// creation — confirm this specific user (not just the host) can access
-	// the item before they can see/join the party.
-	token, err := a.TokenCipher.Decrypt(user.EncryptedAccessToken)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
-		return
-	}
-	item, err := a.Emby.GetItem(r.Context(), token, user.ID, row.ItemID)
-	if err != nil {
-		a.handleEmbyErr(w, r.Context(), user.ID, err, "you do not have access to this media item")
-		return
-	}
-
 	var snap wsproto.SnapshotPayload
 	if p, ok := a.Hub.Get(id); ok {
 		snap = p.Snapshot()
@@ -169,17 +154,42 @@ func (a *App) handleGetParty(w http.ResponseWriter, r *http.Request) {
 		// Active-in-DB but not in the hub shouldn't normally happen (active
 		// parties are recovered at startup), but degrade gracefully rather
 		// than 500 if it ever does.
-		snap = wsproto.SnapshotPayload{PartyID: row.ID, ItemID: row.ItemID, DurationTicks: row.DurationTicks, HostUserID: row.HostUserID}
+		snap = wsproto.SnapshotPayload{PartyID: row.ID, HostUserID: row.HostUserID}
 	}
-	// ItemTitle rides alongside the snapshot rather than joining
+
+	// Media authorization must be re-validated on join, not just at party
+	// creation — confirm this specific user (not just the host) can access
+	// the CURRENT item before they can see/join the party. With a playlist,
+	// the current item can change after join (see ARCHITECTURE.md's
+	// Playlist section) — an idle party (no current item yet) has nothing
+	// to authorize against, so this check only runs once there is one; a
+	// per-participant re-check against whatever becomes current later
+	// happens naturally at handlePlaybackURL, which every client calls
+	// again whenever the current item changes.
+	itemTitle := ""
+	if snap.ItemID != "" {
+		token, err := a.TokenCipher.Decrypt(user.EncryptedAccessToken)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
+			return
+		}
+		item, err := a.Emby.GetItem(r.Context(), token, user.ID, snap.ItemID)
+		if err != nil {
+			a.handleEmbyErr(w, r.Context(), user.ID, err, "you do not have access to this media item")
+			return
+		}
+		itemTitle = item.Name
+	}
+
+	// Name/ItemTitle ride alongside the snapshot rather than joining
 	// wsproto.SnapshotPayload itself, since that struct is also the shape of
 	// every WS snapshot broadcast — the party actor has no Emby access (by
 	// design; see ARCHITECTURE.md §3) and so has no way to populate a title.
-	// The access-check GetItem call above already fetched it for free.
 	writeJSON(w, http.StatusOK, struct {
 		wsproto.SnapshotPayload
+		Name      string `json:"name"`
 		ItemTitle string `json:"item_title"`
-	}{SnapshotPayload: snap, ItemTitle: item.Name})
+	}{SnapshotPayload: snap, Name: row.Name, ItemTitle: itemTitle})
 }
 
 func (a *App) handlePlaybackURL(w http.ResponseWriter, r *http.Request) {
@@ -197,6 +207,28 @@ func (a *App) handlePlaybackURL(w http.ResponseWriter, r *http.Request) {
 	}
 	if row.Status == dbx.PartyStatusEnded {
 		writeError(w, http.StatusGone, "party_ended", "this party has ended")
+		return
+	}
+	if row.CurrentPlaylistItemID == nil {
+		writeError(w, http.StatusConflict, "no_current_item", "no media is currently loaded for this party")
+		return
+	}
+
+	// This is also the point every client re-fetches whenever the current
+	// item changes (playlist advance, or a host selecting a different
+	// item), which makes it the per-participant, per-item re-validation
+	// point the spec's authorization rule requires now that a party's
+	// current item can change after join — see ARCHITECTURE.md's Playlist
+	// section. Emby's own PlaybackInfo call, below, does the actual
+	// rejection: a user who can't see this specific item gets an error
+	// here (surfaced to only this client), not a party-wide side effect.
+	current, err := a.Store.GetPlaylistItem(r.Context(), *row.CurrentPlaylistItemID)
+	if err != nil {
+		if errors.Is(err, dbx.ErrNotFound) {
+			writeError(w, http.StatusConflict, "no_current_item", "no media is currently loaded for this party")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
 		return
 	}
 
@@ -220,7 +252,7 @@ func (a *App) handlePlaybackURL(w http.ResponseWriter, r *http.Request) {
 
 	// Always derived from THIS user's own token — never a shared token —
 	// so every participant streams under their own Emby permissions.
-	result, err := a.Emby.GetPlaybackURL(r.Context(), token, user.ID, row.ItemID, emby.DeviceID(user.ID), startPositionTicks)
+	result, err := a.Emby.GetPlaybackURL(r.Context(), token, user.ID, current.ItemID, emby.DeviceID(user.ID), startPositionTicks)
 	if err != nil {
 		a.handleEmbyErr(w, r.Context(), user.ID, err, "could not get a playback URL from Emby")
 		return
@@ -299,6 +331,246 @@ func (a *App) handleHostTransfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// --- playlist ---
+
+// playlistItemView is one entry in GET /api/parties/{id}/playlist — the raw
+// playlist_items row plus Emby-resolved metadata under the REQUESTING
+// viewer's own token (never a shared one). An item that viewer can't access
+// is shown as a generic "Restricted item" placeholder rather than omitted
+// outright (an omission would leave an unexplained gap in the order) or
+// shown with its real title (which would leak metadata about content that
+// viewer isn't authorized to know exists) — see ARCHITECTURE.md's Playlist
+// section.
+type playlistItemView struct {
+	ID            int64  `json:"id"`
+	ItemID        string `json:"item_id"`
+	Title         string `json:"title"`
+	Restricted    bool   `json:"restricted"`
+	PosterURL     string `json:"poster_url,omitempty"`
+	DurationTicks int64  `json:"duration_ticks"`
+	Position      int    `json:"position"`
+	AddedByUserID string `json:"added_by_user_id"`
+	IsCurrent     bool   `json:"is_current"`
+}
+
+func (a *App) handleGetPlaylist(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	user := userFromContext(r.Context())
+
+	row, err := a.Store.GetParty(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, dbx.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "party not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
+		return
+	}
+	if row.Status == dbx.PartyStatusEnded {
+		writeError(w, http.StatusGone, "party_ended", "this party has ended")
+		return
+	}
+
+	items, err := a.Store.ListPlaylistItems(r.Context(), id)
+	if err != nil {
+		a.Logger.Error("list playlist items failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
+		return
+	}
+	token, err := a.TokenCipher.Decrypt(user.EncryptedAccessToken)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
+		return
+	}
+
+	out := make([]playlistItemView, 0, len(items))
+	for _, it := range items {
+		view := playlistItemView{
+			ID: it.ID, ItemID: it.ItemID, DurationTicks: it.DurationTicks,
+			Position: it.Position, AddedByUserID: it.AddedByUserID,
+			IsCurrent: row.CurrentPlaylistItemID != nil && *row.CurrentPlaylistItemID == it.ID,
+		}
+		if embyItem, err := a.Emby.GetItem(r.Context(), token, user.ID, it.ItemID); err == nil {
+			view.Title = embyItem.Name
+			view.PosterURL = a.Emby.ImageURL(it.ItemID, token)
+		} else {
+			view.Restricted = true
+			view.Title = "Restricted item"
+		}
+		out = append(out, view)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": out})
+}
+
+type addPlaylistItemRequest struct {
+	ItemID string `json:"item_id"`
+}
+
+// handleAddPlaylistItem is host-only (enforced by Party.AddPlaylistItem).
+// The GetItem call below serves double duty: it's how duration_ticks gets
+// fetched and persisted (the party actor has no Emby access of its own),
+// and it's the adding host's own authorization check for this item —
+// consistent with "being host never implicitly grants anyone else access":
+// it only proves the HOST can see this item, not that every other
+// participant can, which is why the real per-participant check happens
+// again at handlePlaybackURL whenever this item becomes current.
+func (a *App) handleAddPlaylistItem(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	user := userFromContext(r.Context())
+	var req addPlaylistItemRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ItemID == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "item_id is required")
+		return
+	}
+
+	p, ok := a.Hub.Get(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "party not found or already ended")
+		return
+	}
+	// Fail fast on host authorization before spending a token decrypt and an
+	// Emby round trip on a request that's going to be rejected regardless —
+	// Party.AddPlaylistItem is still the authoritative check (this is a
+	// cheap up-front read, not a replacement for it).
+	if p.HostUserID() != user.ID {
+		writeError(w, http.StatusForbidden, "not_host", "only the host may edit the playlist")
+		return
+	}
+
+	token, err := a.TokenCipher.Decrypt(user.EncryptedAccessToken)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
+		return
+	}
+	item, err := a.Emby.GetItem(r.Context(), token, user.ID, req.ItemID)
+	if err != nil {
+		a.handleEmbyErr(w, r.Context(), user.ID, err, "could not look up that item on Emby")
+		return
+	}
+
+	added, err := p.AddPlaylistItem(r.Context(), user.ID, req.ItemID, item.RunTimeTicks)
+	if err != nil {
+		a.writePlaylistErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"id": added.ID, "item_id": added.ItemID, "position": added.Position, "duration_ticks": added.DurationTicks,
+	})
+}
+
+func (a *App) handleRemovePlaylistItem(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	playlistItemID, err := strconv.ParseInt(r.PathValue("itemId"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid playlist item id")
+		return
+	}
+	user := userFromContext(r.Context())
+	p, ok := a.Hub.Get(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "party not found or already ended")
+		return
+	}
+	if err := p.RemovePlaylistItem(r.Context(), user.ID, playlistItemID); err != nil {
+		a.writePlaylistErr(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type reorderPlaylistRequest struct {
+	OrderedIDs []int64 `json:"ordered_ids"`
+}
+
+func (a *App) handleReorderPlaylist(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	user := userFromContext(r.Context())
+	var req reorderPlaylistRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "ordered_ids is required")
+		return
+	}
+	p, ok := a.Hub.Get(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "party not found or already ended")
+		return
+	}
+	if err := p.ReorderPlaylist(r.Context(), user.ID, req.OrderedIDs); err != nil {
+		a.writePlaylistErr(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleSelectPlaylistItem is the host-only "play this now" action —
+// Party.SelectCurrentItem both loads and starts the item in one step (see
+// its doc comment for why there's no separate "load paused" step).
+func (a *App) handleSelectPlaylistItem(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	playlistItemID, err := strconv.ParseInt(r.PathValue("itemId"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid playlist item id")
+		return
+	}
+	user := userFromContext(r.Context())
+	p, ok := a.Hub.Get(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "party not found or already ended")
+		return
+	}
+	if err := p.SelectCurrentItem(user.ID, playlistItemID); err != nil {
+		a.writePlaylistErr(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *App) writePlaylistErr(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, party.ErrNotHost):
+		writeError(w, http.StatusForbidden, "not_host", "only the host may edit the playlist")
+	case errors.Is(err, party.ErrPartyEnded):
+		writeError(w, http.StatusGone, "party_ended", "this party has ended")
+	case errors.Is(err, party.ErrCannotRemoveCurrentItem):
+		writeError(w, http.StatusConflict, "cannot_remove_current_item", "cannot remove the currently-playing item")
+	case errors.Is(err, party.ErrPlaylistItemNotFound):
+		writeError(w, http.StatusNotFound, "not_found", "playlist item not found")
+	case errors.Is(err, party.ErrInvalidReorder):
+		writeError(w, http.StatusBadRequest, "bad_request", "ordered_ids must match the current playlist exactly")
+	default:
+		a.Logger.Error("playlist operation failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
+	}
+}
+
+// handleBrowseEmbyItems is the Playlist library browser's search/browse
+// endpoint. Deliberately routed through this backend (using the requester's
+// own token) rather than direct browser-to-Emby, unlike the media/playback
+// URL — see ARCHITECTURE.md's Playlist section for why the two cases are
+// architecturally different.
+func (a *App) handleBrowseEmbyItems(w http.ResponseWriter, r *http.Request) {
+	user := userFromContext(r.Context())
+	token, err := a.TokenCipher.Decrypt(user.EncryptedAccessToken)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
+		return
+	}
+
+	q := emby.ItemsQuery{Search: r.URL.Query().Get("search"), Tab: r.URL.Query().Get("tab")}
+	if start := r.URL.Query().Get("start"); start != "" {
+		if n, err := strconv.Atoi(start); err == nil {
+			q.Start = n
+		}
+	}
+
+	items, err := a.Emby.ListItems(r.Context(), token, user.ID, q)
+	if err != nil {
+		a.handleEmbyErr(w, r.Context(), user.ID, err, "could not browse the Emby library")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 // handleEmbyErr maps an emby package error to an HTTP response. On a

@@ -27,6 +27,17 @@ const (
 	MsgClockSync MessageType = "clock_sync"
 	MsgSnapshot  MessageType = "snapshot"
 
+	// Server -> client: the party's playlist (queue) changed (add/remove/
+	// reorder). Does NOT cover a change of *current* item — that's an
+	// authoritative state change and goes through the existing snapshot
+	// broadcast (ItemID/DurationTicks live on SnapshotPayload already).
+	// Carries only the raw ordered rows: the party actor has no Emby access
+	// (by design), so it cannot resolve titles/posters itself — clients
+	// treat this as an invalidation signal and re-fetch
+	// GET /api/parties/{id}/playlist to resolve metadata under their own
+	// token (same per-viewer-resolution pattern used elsewhere).
+	MsgPlaylistUpdated MessageType = "playlist_updated"
+
 	// Server -> client informational.
 	MsgError MessageType = "error"
 )
@@ -107,6 +118,21 @@ type ClockSyncPong struct {
 	T0 int64 `json:"t0"` // echoed back unchanged
 	T1 int64 `json:"t1"` // server receive time, ms since Unix epoch
 	T2 int64 `json:"t2"` // server send time, ms since Unix epoch
+}
+
+// PlaylistItemRef is one entry in a MsgPlaylistUpdated broadcast — just
+// enough to identify and order items; no Emby-resolved metadata (see
+// MsgPlaylistUpdated's doc comment).
+type PlaylistItemRef struct {
+	ID       int64  `json:"id"`
+	ItemID   string `json:"item_id"`
+	Position int    `json:"position"`
+}
+
+// PlaylistUpdatedPayload is the complete current queue, broadcast whenever
+// it changes (add/remove/reorder).
+type PlaylistUpdatedPayload struct {
+	Items []PlaylistItemRef `json:"items"`
 }
 
 type JoinPayload struct {

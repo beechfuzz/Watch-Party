@@ -27,12 +27,27 @@ const (
 )
 
 type Party struct {
-	ID            string
-	HostUserID    string
+	ID                    string
+	HostUserID            string
+	Name                  string
+	CurrentPlaylistItemID *int64
+	CreatedAt             time.Time
+	Status                PartyStatus
+}
+
+// PlaylistItem is one entry in a party's queue. DurationTicks is fetched
+// from Emby (using the adding user's own token) and persisted at add-time,
+// authoritative from then on — the party actor has no Emby access of its
+// own (by design, see ARCHITECTURE.md §3), so it must not need to re-fetch
+// this when the item becomes current.
+type PlaylistItem struct {
+	ID            int64
+	PartyID       string
 	ItemID        string
 	DurationTicks int64
-	CreatedAt     time.Time
-	Status        PartyStatus
+	Position      int
+	AddedByUserID string
+	AddedAt       time.Time
 }
 
 type ConnectionStatus string

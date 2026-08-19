@@ -136,9 +136,9 @@ func (s *Store) DeleteExpiredSessions(ctx context.Context, now time.Time) error 
 
 func (s *Store) CreateParty(ctx context.Context, p Party) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO parties (id, host_user_id, item_id, duration_ticks, created_at, status)
+		INSERT INTO parties (id, host_user_id, name, current_playlist_item_id, created_at, status)
 		VALUES (?, ?, ?, ?, ?, ?)
-	`, p.ID, p.HostUserID, p.ItemID, p.DurationTicks, timeStr(p.CreatedAt), string(p.Status))
+	`, p.ID, p.HostUserID, p.Name, p.CurrentPlaylistItemID, timeStr(p.CreatedAt), string(p.Status))
 	if err != nil {
 		return fmt.Errorf("dbx: create party: %w", err)
 	}
@@ -147,7 +147,7 @@ func (s *Store) CreateParty(ctx context.Context, p Party) error {
 
 func (s *Store) GetParty(ctx context.Context, id string) (*Party, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, host_user_id, item_id, duration_ticks, created_at, status FROM parties WHERE id = ?
+		SELECT id, host_user_id, name, current_playlist_item_id, created_at, status FROM parties WHERE id = ?
 	`, id)
 	return scanParty(row)
 }
@@ -155,7 +155,8 @@ func (s *Store) GetParty(ctx context.Context, id string) (*Party, error) {
 func scanParty(row *sql.Row) (*Party, error) {
 	var p Party
 	var created, status string
-	if err := row.Scan(&p.ID, &p.HostUserID, &p.ItemID, &p.DurationTicks, &created, &status); err != nil {
+	var currentItemID sql.NullInt64
+	if err := row.Scan(&p.ID, &p.HostUserID, &p.Name, &currentItemID, &created, &status); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -167,6 +168,9 @@ func scanParty(row *sql.Row) (*Party, error) {
 	}
 	p.CreatedAt = t
 	p.Status = PartyStatus(status)
+	if currentItemID.Valid {
+		p.CurrentPlaylistItemID = &currentItemID.Int64
+	}
 	return &p, nil
 }
 
@@ -186,11 +190,22 @@ func (s *Store) UpdatePartyHost(ctx context.Context, id, newHostUserID string) e
 	return nil
 }
 
+// UpdatePartyCurrentItem persists which playlist item (if any) is currently
+// loaded — set on playlist advance (end-of-media) and on a host explicitly
+// selecting an item to play. A nil itemID means idle: nothing loaded.
+func (s *Store) UpdatePartyCurrentItem(ctx context.Context, id string, playlistItemID *int64) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE parties SET current_playlist_item_id = ? WHERE id = ?`, playlistItemID, id)
+	if err != nil {
+		return fmt.Errorf("dbx: update party current item: %w", err)
+	}
+	return nil
+}
+
 // ListActiveParties returns every party with status='active', for startup
 // recovery: on boot the server reconstructs in-memory state for each.
 func (s *Store) ListActiveParties(ctx context.Context) ([]Party, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, host_user_id, item_id, duration_ticks, created_at, status FROM parties WHERE status = 'active'
+		SELECT id, host_user_id, name, current_playlist_item_id, created_at, status FROM parties WHERE status = 'active'
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("dbx: list active parties: %w", err)
@@ -200,7 +215,8 @@ func (s *Store) ListActiveParties(ctx context.Context) ([]Party, error) {
 	for rows.Next() {
 		var p Party
 		var created, status string
-		if err := rows.Scan(&p.ID, &p.HostUserID, &p.ItemID, &p.DurationTicks, &created, &status); err != nil {
+		var currentItemID sql.NullInt64
+		if err := rows.Scan(&p.ID, &p.HostUserID, &p.Name, &currentItemID, &created, &status); err != nil {
 			return nil, fmt.Errorf("dbx: list active parties: %w", err)
 		}
 		t, err := parseTime(created)
@@ -209,9 +225,133 @@ func (s *Store) ListActiveParties(ctx context.Context) ([]Party, error) {
 		}
 		p.CreatedAt = t
 		p.Status = PartyStatus(status)
+		if currentItemID.Valid {
+			p.CurrentPlaylistItemID = &currentItemID.Int64
+		}
 		out = append(out, p)
 	}
 	return out, rows.Err()
+}
+
+// --- playlist_items ---
+
+// AddPlaylistItem inserts a new playlist entry at the end of the party's
+// queue (position = current max + 1, or 0 if empty) and returns the
+// complete row, including the assigned id and position.
+func (s *Store) AddPlaylistItem(ctx context.Context, partyID, itemID string, durationTicks int64, addedByUserID string, addedAt time.Time) (*PlaylistItem, error) {
+	var nextPos int
+	row := s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(position) + 1, 0) FROM playlist_items WHERE party_id = ?`, partyID)
+	if err := row.Scan(&nextPos); err != nil {
+		return nil, fmt.Errorf("dbx: add playlist item: compute position: %w", err)
+	}
+	res, err := s.db.ExecContext(ctx, `
+		INSERT INTO playlist_items (party_id, item_id, duration_ticks, position, added_by_user_id, added_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, partyID, itemID, durationTicks, nextPos, addedByUserID, timeStr(addedAt))
+	if err != nil {
+		return nil, fmt.Errorf("dbx: add playlist item: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return nil, fmt.Errorf("dbx: add playlist item: %w", err)
+	}
+	return &PlaylistItem{
+		ID: id, PartyID: partyID, ItemID: itemID, DurationTicks: durationTicks,
+		Position: nextPos, AddedByUserID: addedByUserID, AddedAt: addedAt,
+	}, nil
+}
+
+// ListPlaylistItems returns a party's queue in order.
+func (s *Store) ListPlaylistItems(ctx context.Context, partyID string) ([]PlaylistItem, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, party_id, item_id, duration_ticks, position, added_by_user_id, added_at
+		FROM playlist_items WHERE party_id = ? ORDER BY position ASC
+	`, partyID)
+	if err != nil {
+		return nil, fmt.Errorf("dbx: list playlist items: %w", err)
+	}
+	defer rows.Close()
+	var out []PlaylistItem
+	for rows.Next() {
+		item, err := scanPlaylistItem(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func scanPlaylistItem(rows *sql.Rows) (PlaylistItem, error) {
+	var item PlaylistItem
+	var addedAt string
+	if err := rows.Scan(&item.ID, &item.PartyID, &item.ItemID, &item.DurationTicks, &item.Position, &item.AddedByUserID, &addedAt); err != nil {
+		return item, fmt.Errorf("dbx: scan playlist item: %w", err)
+	}
+	t, err := parseTime(addedAt)
+	if err != nil {
+		return item, fmt.Errorf("dbx: scan playlist item: %w", err)
+	}
+	item.AddedAt = t
+	return item, nil
+}
+
+func (s *Store) GetPlaylistItem(ctx context.Context, id int64) (*PlaylistItem, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, party_id, item_id, duration_ticks, position, added_by_user_id, added_at
+		FROM playlist_items WHERE id = ?
+	`, id)
+	var item PlaylistItem
+	var addedAt string
+	if err := row.Scan(&item.ID, &item.PartyID, &item.ItemID, &item.DurationTicks, &item.Position, &item.AddedByUserID, &addedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("dbx: get playlist item: %w", err)
+	}
+	t, err := parseTime(addedAt)
+	if err != nil {
+		return nil, fmt.Errorf("dbx: get playlist item: %w", err)
+	}
+	item.AddedAt = t
+	return &item, nil
+}
+
+func (s *Store) RemovePlaylistItem(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM playlist_items WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("dbx: remove playlist item: %w", err)
+	}
+	return nil
+}
+
+// ReorderPlaylistItems rewrites position values to match orderedIDs (must be
+// exactly the party's current set of playlist item ids, in the new order).
+// Positions are moved through a temporary negative range first, since
+// idx_playlist_items_party_position is a non-deferrable unique index in
+// SQLite — writing final positions directly, one row at a time, would
+// collide with whatever row currently holds the destination position (e.g.
+// swapping two adjacent items).
+func (s *Store) ReorderPlaylistItems(ctx context.Context, partyID string, orderedIDs []int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("dbx: reorder playlist items: %w", err)
+	}
+	defer tx.Rollback()
+	for i, id := range orderedIDs {
+		if _, err := tx.ExecContext(ctx, `UPDATE playlist_items SET position = ? WHERE id = ? AND party_id = ?`, -(i + 1), id, partyID); err != nil {
+			return fmt.Errorf("dbx: reorder playlist items: %w", err)
+		}
+	}
+	for i, id := range orderedIDs {
+		if _, err := tx.ExecContext(ctx, `UPDATE playlist_items SET position = ? WHERE id = ? AND party_id = ?`, i, id, partyID); err != nil {
+			return fmt.Errorf("dbx: reorder playlist items: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("dbx: reorder playlist items: %w", err)
+	}
+	return nil
 }
 
 // --- party_members ---

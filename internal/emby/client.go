@@ -159,6 +159,105 @@ func (c *Client) GetItem(ctx context.Context, accessToken, userID, itemID string
 	return &ItemInfo{ID: parsed.ID, Name: parsed.Name, RunTimeTicks: parsed.RunTimeTicks}, nil
 }
 
+// ItemsQuery selects one of the Playlist browser's tabs. Exactly one of
+// Search/Tab is meaningful at a time; the zero value (no search term, tab
+// "") lists everything, unfiltered — callers should always set one.
+type ItemsQuery struct {
+	Search string // SearchTerm, when non-empty
+	Tab    string // "movies" | "tv" | "recent" | "favorites"
+	Start  int    // pagination offset (StartIndex)
+	Limit  int    // page size (Limit); 0 lets the caller's default apply
+}
+
+// ItemSummary is what the Playlist library browser needs to render one
+// poster tile. PosterURL is a ready-to-use, api_key-bearing image URL —
+// built server-side the same way playback URLs are, so the browser's <img>
+// tag can hit Emby directly for the (small, non-media) thumbnail bytes,
+// without Watch Party needing to proxy them. See ARCHITECTURE.md's Playlist
+// browser section for why item *metadata* goes through this backend call
+// but poster *image bytes* follow the direct-to-Emby pattern instead.
+type ItemSummary struct {
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	Type           string `json:"type"`
+	ProductionYear int    `json:"year,omitempty"`
+	PosterURL      string `json:"poster_url,omitempty"`
+	RunTimeTicks   int64  `json:"run_time_ticks"`
+}
+
+// ListItems browses/searches a user's Emby library for the Playlist
+// browser's four tabs (Movies, TV Shows, Recently Added, Favorites) plus
+// free-text search — GET /Users/{userId}/Items, endpoint shape inferred
+// the same way the rest of this package's Phase-0 investigation was (see
+// ARCHITECTURE.md §0), not yet confirmed against a live server.
+func (c *Client) ListItems(ctx context.Context, accessToken, userID string, q ItemsQuery) ([]ItemSummary, error) {
+	limit := q.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	vals := url.Values{}
+	vals.Set("Recursive", "true")
+	vals.Set("IncludeItemTypes", "Movie,Series")
+	vals.Set("Fields", "ProductionYear")
+	vals.Set("ImageTypeLimit", "1")
+	vals.Set("StartIndex", strconv.Itoa(q.Start))
+	vals.Set("Limit", strconv.Itoa(limit))
+	if q.Search != "" {
+		vals.Set("SearchTerm", q.Search)
+	}
+	switch q.Tab {
+	case "movies":
+		vals.Set("IncludeItemTypes", "Movie")
+	case "tv":
+		vals.Set("IncludeItemTypes", "Series")
+	case "recent":
+		vals.Set("SortBy", "DateCreated")
+		vals.Set("SortOrder", "Descending")
+	case "favorites":
+		vals.Set("Filters", "IsFavorite")
+	}
+
+	u := fmt.Sprintf("%s/Users/%s/Items?%s", c.baseURL, url.PathEscape(userID), vals.Encode())
+	var parsed struct {
+		Items []struct {
+			ID             string `json:"Id"`
+			Name           string `json:"Name"`
+			Type           string `json:"Type"`
+			ProductionYear int    `json:"ProductionYear"`
+			RunTimeTicks   int64  `json:"RunTimeTicks"`
+			ImageTags      struct {
+				Primary string `json:"Primary"`
+			} `json:"ImageTags"`
+		} `json:"Items"`
+	}
+	if err := c.getJSON(ctx, u, accessToken, &parsed); err != nil {
+		return nil, err
+	}
+	out := make([]ItemSummary, 0, len(parsed.Items))
+	for _, it := range parsed.Items {
+		summary := ItemSummary{
+			ID: it.ID, Name: it.Name, Type: it.Type,
+			ProductionYear: it.ProductionYear, RunTimeTicks: it.RunTimeTicks,
+		}
+		if it.ImageTags.Primary != "" {
+			summary.PosterURL = c.ImageURL(it.ID, accessToken)
+		}
+		out = append(out, summary)
+	}
+	return out, nil
+}
+
+// ImageURL builds a browser-fetchable poster URL for itemID, using the same
+// query-param api_key auth as the constructed playback URL (an <img> tag
+// can't set custom headers either) — see GetPlaybackURL and
+// ARCHITECTURE.md's Playlist browser section.
+func (c *Client) ImageURL(itemID, accessToken string) string {
+	vals := url.Values{}
+	vals.Set("api_key", accessToken)
+	vals.Set("maxHeight", "480")
+	return fmt.Sprintf("%s/Items/%s/Images/Primary?%s", c.publicBaseURL, url.PathEscape(itemID), vals.Encode())
+}
+
 // MediaSource is the subset of Emby's MediaSourceInfo Watch Party needs to
 // build a playback URL. There is deliberately no DirectStreamUrl field —
 // per the Phase 0 findings, Emby does not return one; the client builds

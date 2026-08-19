@@ -112,23 +112,32 @@ func (a *App) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := a.TokenCipher.Decrypt(user.EncryptedAccessToken)
-	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	if _, err := a.Emby.GetItem(r.Context(), token, user.ID, row.ItemID); err != nil {
-		if errors.Is(err, emby.ErrUnauthorized) {
-			_ = a.Store.DeleteSessionsForUser(r.Context(), user.ID)
-		}
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
-
 	p, ok := a.Hub.Get(partyID)
 	if !ok {
 		http.Error(w, "party not found", http.StatusNotFound)
 		return
+	}
+
+	// Media authorization must be re-validated on join, not just at party
+	// creation. An idle party (nothing currently loaded — true for every
+	// party immediately after creation now that media is added afterward
+	// via the playlist) has nothing to authorize against yet; once there IS
+	// a current item, the real per-participant, per-item check happens
+	// again at handlePlaybackURL every time the current item changes, not
+	// only here at join — see ARCHITECTURE.md's Playlist section.
+	if currentItemID := p.Snapshot().ItemID; currentItemID != "" {
+		token, err := a.TokenCipher.Decrypt(user.EncryptedAccessToken)
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if _, err := a.Emby.GetItem(r.Context(), token, user.ID, currentItemID); err != nil {
+			if errors.Is(err, emby.ErrUnauthorized) {
+				_ = a.Store.DeleteSessionsForUser(r.Context(), user.ID)
+			}
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 	}
 
 	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{

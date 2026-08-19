@@ -18,10 +18,13 @@ import (
 )
 
 var (
-	ErrNotHost       = errors.New("party: user is not host")
-	ErrNotMember     = errors.New("party: user is not a member of this party")
-	ErrPartyEnded    = errors.New("party: party has ended")
-	ErrUnknownTarget = errors.New("party: target user is not an eligible connected member")
+	ErrNotHost                 = errors.New("party: user is not host")
+	ErrNotMember               = errors.New("party: user is not a member of this party")
+	ErrPartyEnded              = errors.New("party: party has ended")
+	ErrUnknownTarget           = errors.New("party: target user is not an eligible connected member")
+	ErrPlaylistItemNotFound    = errors.New("party: playlist item not found")
+	ErrCannotRemoveCurrentItem = errors.New("party: cannot remove the currently-playing playlist item")
+	ErrInvalidReorder          = errors.New("party: reorder must include exactly the current playlist item ids")
 )
 
 // Conn is the minimal interface the actor needs to push frames to a
@@ -95,6 +98,17 @@ const (
 	EventLeft         EventType = "left"          // explicit leave
 	EventEnded        EventType = "party_ended"   // party transitioned to ended (any reason)
 	EventStateChanged EventType = "state_changed" // play/pause/seek/system end-of-media applied
+	// EventItemChanged fires whenever the party's current item changes
+	// (playlist auto-advance, end-of-playlist idle, or a host explicitly
+	// selecting a different item) — party-scoped (UserID empty), like
+	// EventEnded. ItemID/PositionTicks/IsPlaying describe the OUTGOING
+	// item's final state (IsPlaying always false), not the new one: this is
+	// what lets embyreport send an accurate Sessions/Playing/Stopped report
+	// for the item that just finished. It deliberately does NOT identify
+	// the new item — each client re-derives that from the next snapshot and
+	// re-fetches its own playback URL, which is what (re-)registers
+	// tracking for the new item (see handlePlaybackURL/RecordPlaySession).
+	EventItemChanged EventType = "item_changed"
 )
 
 // Event is a best-effort notification; consumers must not assume delivery
@@ -116,12 +130,23 @@ type Event struct {
 	IsPlaying     bool
 }
 
+// currentItem is the actor-owned pointer to whatever playlist entry is
+// presently loaded — nil means idle (nothing loaded: a freshly-created
+// party with an empty playlist, or one whose queue just ran out). Unlike
+// the old single-item design, this changes over the party's lifetime, so it
+// lives alongside state as actor-owned, do()-serialized data rather than an
+// immutable field set once at construction.
+type currentItem struct {
+	PlaylistItemID int64
+	EmbyItemID     string
+	DurationTicks  int64
+}
+
 // Party is the actor for one party: all fields below the run() goroutine
 // line are only ever read/written from inside that goroutine.
 type Party struct {
-	ID            string
-	ItemID        string
-	DurationTicks int64
+	ID   string
+	Name string
 
 	store  *dbx.Store
 	tuning Tuning
@@ -138,17 +163,30 @@ type Party struct {
 	members            map[string]*member
 	hostDisconnectedAt *time.Time
 	ended              bool
+	current            *currentItem
+	playlist           []dbx.PlaylistItem // ordered by Position; actor's in-memory cache of playlist_items
 }
 
-func newParty(id, itemID string, durationTicks int64, hostUserID string, initial State, store *dbx.Store, tuning Tuning, logger *slog.Logger, events chan<- Event) *Party {
+func newParty(id, name, hostUserID string, initial State, current *currentItem, playlist []dbx.PlaylistItem, store *dbx.Store, tuning Tuning, logger *slog.Logger, events chan<- Event) *Party {
 	p := &Party{
-		ID: id, ItemID: itemID, DurationTicks: durationTicks,
+		ID: id, Name: name,
 		store: store, tuning: tuning, logger: logger, events: events,
 		cmdCh: make(chan func()), stopCh: make(chan struct{}), stopped: make(chan struct{}),
 		state: initial, hostUserID: hostUserID, members: make(map[string]*member),
+		current: current, playlist: playlist,
 	}
 	go p.run()
 	return p
+}
+
+// currentEmbyItemID returns the Emby ItemId of whatever's currently loaded,
+// or "" when idle — the wire/DB representation of "nothing loaded" is
+// simply an empty ItemID, not a separate status field.
+func (p *Party) currentEmbyItemID() string {
+	if p.current == nil {
+		return ""
+	}
+	return p.current.EmbyItemID
 }
 
 func (p *Party) run() {
@@ -234,13 +272,39 @@ func (p *Party) buildSnapshot() wsproto.SnapshotPayload {
 			ConnectionStatus: string(m.ConnectionStatus), IsHost: m.UserID == p.hostUserID,
 		})
 	}
+	var durationTicks int64
+	if p.current != nil {
+		durationTicks = p.current.DurationTicks
+	}
 	return wsproto.SnapshotPayload{
 		AuthoritativeState: p.state.toWire(),
 		PartyID:            p.ID,
-		ItemID:             p.ItemID,
-		DurationTicks:      p.DurationTicks,
+		ItemID:             p.currentEmbyItemID(),
+		DurationTicks:      durationTicks,
 		HostUserID:         p.hostUserID,
 		Members:            members,
+	}
+}
+
+func (p *Party) buildPlaylistPayload() wsproto.PlaylistUpdatedPayload {
+	items := make([]wsproto.PlaylistItemRef, 0, len(p.playlist))
+	for _, it := range p.playlist {
+		items = append(items, wsproto.PlaylistItemRef{ID: it.ID, ItemID: it.ItemID, Position: it.Position})
+	}
+	return wsproto.PlaylistUpdatedPayload{Items: items}
+}
+
+func (p *Party) broadcastPlaylistUpdated() {
+	payload, err := json.Marshal(p.buildPlaylistPayload())
+	if err != nil {
+		p.logger.Error("marshal playlist broadcast failed", "party_id", p.ID, "error", err)
+		return
+	}
+	env := wsproto.Envelope{ProtocolVersion: wsproto.ProtocolVersion, Type: wsproto.MsgPlaylistUpdated, Payload: payload}
+	for _, m := range p.members {
+		if m.conn != nil {
+			m.conn.Send(env)
+		}
 	}
 }
 
@@ -297,24 +361,89 @@ func (p *Party) onSnapshotTick() {
 // uses for drift correction) rather than trusting any single participant's
 // browser `ended` event, per the spec's explicit requirement that a
 // spurious client-side ended event must not unilaterally end playback for
-// everyone.
+// everyone. Reaching the end now advances to the next playlist item (if
+// any) instead of just pausing — see nextPlaylistItemAfter/transitionCurrent.
 func (p *Party) checkEndOfMedia() {
-	if !p.state.IsPlaying || p.DurationTicks <= 0 {
+	if !p.state.IsPlaying || p.current == nil || p.current.DurationTicks <= 0 {
 		return
 	}
 	expected := syncalg.ExpectedPosition(p.state.toAlg(), time.Now(), 0)
-	if expected < p.DurationTicks {
+	if expected < p.current.DurationTicks {
 		return
 	}
-	p.state = State{
-		PositionTicks: p.DurationTicks, IsPlaying: false,
-		SequenceNumber: p.state.SequenceNumber + 1, ServerTimestamp: time.Now(),
-		UpdatedByUserID: nil, UpdatedByClientType: dbx.ClientTypeSystem,
+	next := p.nextPlaylistItemAfter(p.current.PlaylistItemID)
+	if next == nil {
+		p.logger.Info("end of playlist reached", "party_id", p.ID)
+		p.transitionCurrent(nil, false, nil, dbx.ClientTypeSystem)
+		return
 	}
-	p.broadcastControl(wsproto.MsgPause)
+	p.logger.Info("advancing to next playlist item", "party_id", p.ID, "item_id", next.ItemID)
+	p.transitionCurrent(&currentItem{PlaylistItemID: next.ID, EmbyItemID: next.ItemID, DurationTicks: next.DurationTicks}, true, nil, dbx.ClientTypeSystem)
+}
+
+// nextPlaylistItemAfter returns the playlist entry immediately following
+// afterPlaylistItemID by Position, or nil if that was the last one (or
+// wasn't found at all, e.g. it was concurrently removed).
+func (p *Party) nextPlaylistItemAfter(afterPlaylistItemID int64) *dbx.PlaylistItem {
+	for i, it := range p.playlist {
+		if it.ID == afterPlaylistItemID {
+			if i+1 < len(p.playlist) {
+				return &p.playlist[i+1]
+			}
+			return nil
+		}
+	}
+	return nil
+}
+
+// transitionCurrent is the single path every "current item changed" case
+// goes through: system auto-advance/idle (checkEndOfMedia) and an explicit
+// host selection (SelectCurrentItem). It resets playback state to the start
+// of whatever's now current (or to idle), bumping the same sequence-number
+// counter every other authoritative change uses — so a delayed pre-
+// transition snapshot is rejected by clients exactly like a stale seek
+// would be, with no separate numbering scheme needed. If there was a
+// previous current item, its final live position is captured and emitted
+// as EventItemChanged so embyreport can send that item's Stopped report
+// (see the EventItemChanged doc comment) before the new item's tracking
+// begins (which happens lazily, the same way it does on join: whenever a
+// client fetches a playback URL for it).
+func (p *Party) transitionCurrent(next *currentItem, playing bool, byUserID *string, clientType dbx.ClientType) {
+	var outgoingItemID string
+	var outgoingFinalPos int64
+	hadPrevious := p.current != nil
+	if hadPrevious {
+		outgoingItemID = p.current.EmbyItemID
+		outgoingFinalPos = syncalg.ExpectedPosition(p.state.toAlg(), time.Now(), 0)
+	}
+
+	p.current = next
+	p.state = State{
+		PositionTicks: 0, IsPlaying: playing,
+		SequenceNumber: p.state.SequenceNumber + 1, ServerTimestamp: time.Now(),
+		UpdatedByUserID: byUserID, UpdatedByClientType: clientType,
+	}
+
+	var newPlaylistItemID *int64
+	if next != nil {
+		id := next.PlaylistItemID
+		newPlaylistItemID = &id
+	}
+	partyID := p.ID
+	store := p.store
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := store.UpdatePartyCurrentItem(ctx, partyID, newPlaylistItemID); err != nil {
+			p.logger.Error("persist current item failed", "party_id", partyID, "error", err)
+		}
+	}()
+	p.broadcastSnapshot()
 	p.persistStateAsync()
-	p.emit(Event{Type: EventStateChanged, ItemID: p.ItemID, PositionTicks: p.state.PositionTicks, IsPlaying: false})
-	p.logger.Info("end of media reached", "party_id", p.ID)
+
+	if hadPrevious {
+		p.emit(Event{Type: EventItemChanged, ItemID: outgoingItemID, PositionTicks: outgoingFinalPos, IsPlaying: false})
+	}
 }
 
 func (p *Party) onGraceTick() {
@@ -380,7 +509,7 @@ func (p *Party) Join(userID, displayName string) (wsproto.SnapshotPayload, error
 				p.logger.Error("persist member join failed", "party_id", p.ID, "user_id", userID, "error", err)
 			}
 		}()
-		p.emit(Event{Type: EventJoined, UserID: userID, ItemID: p.ItemID, PositionTicks: p.state.PositionTicks, IsPlaying: p.state.IsPlaying})
+		p.emit(Event{Type: EventJoined, UserID: userID, ItemID: p.currentEmbyItemID(), PositionTicks: p.state.PositionTicks, IsPlaying: p.state.IsPlaying})
 	})
 	return snap, outErr
 }
@@ -419,7 +548,7 @@ func (p *Party) Disconnect(userID string) {
 				p.logger.Error("persist disconnect failed", "party_id", p.ID, "user_id", userID, "error", err)
 			}
 		}()
-		p.emit(Event{Type: EventDisconnected, UserID: userID, ItemID: p.ItemID, PositionTicks: p.state.PositionTicks, IsPlaying: p.state.IsPlaying})
+		p.emit(Event{Type: EventDisconnected, UserID: userID, ItemID: p.currentEmbyItemID(), PositionTicks: p.state.PositionTicks, IsPlaying: p.state.IsPlaying})
 	})
 }
 
@@ -443,7 +572,7 @@ func (p *Party) Leave(userID string) {
 				p.logger.Error("persist leave failed", "party_id", p.ID, "user_id", userID, "error", err)
 			}
 		}()
-		p.emit(Event{Type: EventLeft, UserID: userID, ItemID: p.ItemID, PositionTicks: p.state.PositionTicks, IsPlaying: p.state.IsPlaying})
+		p.emit(Event{Type: EventLeft, UserID: userID, ItemID: p.currentEmbyItemID(), PositionTicks: p.state.PositionTicks, IsPlaying: p.state.IsPlaying})
 		if wasHost {
 			p.hostDisconnectedAt = nil
 			newHost, ok := syncalg.SelectNewHost(p.connectedMembersForSelection(), userID)
@@ -491,7 +620,7 @@ func (p *Party) HandleControl(userID string, msgType wsproto.MessageType, positi
 		}
 		p.broadcastControl(msgType)
 		p.persistStateAsync()
-		p.emit(Event{Type: EventStateChanged, UserID: userID, ItemID: p.ItemID, PositionTicks: p.state.PositionTicks, IsPlaying: p.state.IsPlaying})
+		p.emit(Event{Type: EventStateChanged, UserID: userID, ItemID: p.currentEmbyItemID(), PositionTicks: p.state.PositionTicks, IsPlaying: p.state.IsPlaying})
 	})
 	return outErr
 }
@@ -528,6 +657,187 @@ func (p *Party) HandleHostTransfer(requestingUserID, newHostUserID string) error
 		p.broadcastSnapshot()
 	})
 	return outErr
+}
+
+// SelectCurrentItem is a host-only, explicit "play this playlist item now"
+// command — the same transitionCurrent path checkEndOfMedia's auto-advance
+// uses, just host-attributed and always starting in a playing state (there's
+// no separate "load paused" step: selecting an item is starting it).
+func (p *Party) SelectCurrentItem(userID string, playlistItemID int64) error {
+	var outErr error
+	p.do(func() {
+		if p.ended {
+			outErr = ErrPartyEnded
+			return
+		}
+		if userID != p.hostUserID {
+			outErr = ErrNotHost
+			p.sendError(p.members[userID], wsproto.ErrCodeNotHost, "only the host may select what plays")
+			return
+		}
+		var target *dbx.PlaylistItem
+		for i := range p.playlist {
+			if p.playlist[i].ID == playlistItemID {
+				target = &p.playlist[i]
+				break
+			}
+		}
+		if target == nil {
+			outErr = ErrPlaylistItemNotFound
+			p.sendError(p.members[userID], wsproto.ErrCodeBadRequest, "playlist item not found")
+			return
+		}
+		uid := userID
+		p.transitionCurrent(&currentItem{PlaylistItemID: target.ID, EmbyItemID: target.ItemID, DurationTicks: target.DurationTicks}, true, &uid, dbx.ClientTypeHost)
+	})
+	return outErr
+}
+
+// checkHostAuthorized is the shared do()-dispatched authorization gate
+// every playlist mutation starts with: not ended, and userID is the current
+// host. Kept as a fast, IO-free check so the actual SQLite write (in the
+// caller, between two do() dispatches — see AddPlaylistItem for why) never
+// runs inside the actor goroutine, per this codebase's rule that party
+// state mutation never blocks on synchronous IO (internal/dbx: "the sync
+// loop must never block on a SQLite write").
+func (p *Party) checkHostAuthorized(userID string) error {
+	var outErr error
+	p.do(func() {
+		if p.ended {
+			outErr = ErrPartyEnded
+			return
+		}
+		if userID != p.hostUserID {
+			outErr = ErrNotHost
+			p.sendError(p.members[userID], wsproto.ErrCodeNotHost, "only the host may edit the playlist")
+		}
+	})
+	return outErr
+}
+
+// AddPlaylistItem appends itemID (with its Emby-reported durationTicks,
+// fetched by the caller before invoking this — the actor itself has no
+// Emby access, by design) to the end of the party's queue. Host-only, like
+// every other playlist mutation.
+//
+// The SQLite write happens between two do() dispatches, not inside one:
+// authorize first (fast, IO-free), then write, then apply the result to the
+// actor's in-memory cache and broadcast (also fast) — never blocking the
+// single actor goroutine, and everyone else's sync traffic for this party,
+// on a disk write. This does leave a small window where the party could end
+// or the host could change between the authorization check and the write
+// landing; worst case a row is added moments after it stops mattering,
+// which is harmless and consistent with how loosely this project already
+// treats sub-second imprecision around SQLite persistence elsewhere (e.g.
+// CurrentPositionTicks).
+func (p *Party) AddPlaylistItem(ctx context.Context, userID, itemID string, durationTicks int64) (dbx.PlaylistItem, error) {
+	if err := p.checkHostAuthorized(userID); err != nil {
+		return dbx.PlaylistItem{}, err
+	}
+	item, err := p.store.AddPlaylistItem(ctx, p.ID, itemID, durationTicks, userID, time.Now())
+	if err != nil {
+		return dbx.PlaylistItem{}, err
+	}
+	p.do(func() {
+		if p.ended {
+			return
+		}
+		p.playlist = append(p.playlist, *item)
+		p.broadcastPlaylistUpdated()
+	})
+	return *item, nil
+}
+
+// RemovePlaylistItem deletes a queued item. Host-only. Removing the
+// currently-playing item is rejected outright (ErrCannotRemoveCurrentItem)
+// rather than implicitly advancing or going idle — the host must choose
+// what happens next (select another item, or let it play out) explicitly.
+// See AddPlaylistItem for why the SQLite write sits between two do()
+// dispatches instead of inside one.
+func (p *Party) RemovePlaylistItem(ctx context.Context, userID string, playlistItemID int64) error {
+	if err := p.checkHostAuthorized(userID); err != nil {
+		return err
+	}
+	var checkErr error
+	p.do(func() {
+		if p.current != nil && p.current.PlaylistItemID == playlistItemID {
+			checkErr = ErrCannotRemoveCurrentItem
+			p.sendError(p.members[userID], wsproto.ErrCodeBadRequest, "cannot remove the currently-playing item")
+			return
+		}
+		found := false
+		for _, it := range p.playlist {
+			if it.ID == playlistItemID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			checkErr = ErrPlaylistItemNotFound
+		}
+	})
+	if checkErr != nil {
+		return checkErr
+	}
+
+	if err := p.store.RemovePlaylistItem(ctx, playlistItemID); err != nil {
+		return err
+	}
+	p.do(func() {
+		for i, it := range p.playlist {
+			if it.ID == playlistItemID {
+				p.playlist = append(p.playlist[:i], p.playlist[i+1:]...)
+				break
+			}
+		}
+		p.broadcastPlaylistUpdated()
+	})
+	return nil
+}
+
+// ReorderPlaylist rewrites queue order. orderedIDs must contain exactly the
+// party's current playlist item ids (any set mismatch — stale client view,
+// concurrent add/remove — is rejected rather than guessed at). Host-only.
+// See AddPlaylistItem for why the SQLite write sits between two do()
+// dispatches instead of inside one.
+func (p *Party) ReorderPlaylist(ctx context.Context, userID string, orderedIDs []int64) error {
+	if err := p.checkHostAuthorized(userID); err != nil {
+		return err
+	}
+	var reordered []dbx.PlaylistItem
+	var checkErr error
+	p.do(func() {
+		if len(orderedIDs) != len(p.playlist) {
+			checkErr = ErrInvalidReorder
+			return
+		}
+		byID := make(map[int64]dbx.PlaylistItem, len(p.playlist))
+		for _, it := range p.playlist {
+			byID[it.ID] = it
+		}
+		reordered = make([]dbx.PlaylistItem, len(orderedIDs))
+		for i, id := range orderedIDs {
+			it, ok := byID[id]
+			if !ok {
+				checkErr = ErrInvalidReorder
+				return
+			}
+			it.Position = i
+			reordered[i] = it
+		}
+	})
+	if checkErr != nil {
+		return checkErr
+	}
+
+	if err := p.store.ReorderPlaylistItems(ctx, p.ID, orderedIDs); err != nil {
+		return err
+	}
+	p.do(func() {
+		p.playlist = reordered
+		p.broadcastPlaylistUpdated()
+	})
+	return nil
 }
 
 // Snapshot returns the current authoritative snapshot (e.g. for HTTP
@@ -571,6 +881,7 @@ func (p *Party) End(ctx context.Context) error {
 	var outErr error
 	var finalPosition int64
 	var finalIsPlaying bool
+	var finalItemID string
 	var alreadyEnded bool
 	p.do(func() {
 		if p.ended {
@@ -584,6 +895,7 @@ func (p *Party) End(ctx context.Context) error {
 		// immediately after this call returns.
 		finalPosition = syncalg.ExpectedPosition(p.state.toAlg(), time.Now(), 0)
 		finalIsPlaying = p.state.IsPlaying
+		finalItemID = p.currentEmbyItemID()
 		p.broadcastSnapshot()
 		for _, m := range p.members {
 			if m.conn != nil {
@@ -598,7 +910,7 @@ func (p *Party) End(ctx context.Context) error {
 	if err := p.store.UpdatePartyStatus(ctx, p.ID, dbx.PartyStatusEnded); err != nil {
 		outErr = err
 	}
-	p.emit(Event{Type: EventEnded, ItemID: p.ItemID, PositionTicks: finalPosition, IsPlaying: finalIsPlaying})
+	p.emit(Event{Type: EventEnded, ItemID: finalItemID, PositionTicks: finalPosition, IsPlaying: finalIsPlaying})
 	return outErr
 }
 
