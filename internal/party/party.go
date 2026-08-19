@@ -405,12 +405,41 @@ func (p *Party) onSnapshotTick() {
 	if p.ended {
 		return
 	}
+	p.checkEndOfMediaAndBroadcast()
+	if p.ended {
+		return
+	}
+	p.persistStateAsync()
+}
+
+// checkEndOfMediaAndBroadcast re-validates whether playback has reached the
+// end (see checkEndOfMedia) immediately before broadcasting a snapshot,
+// rather than trusting whatever p.state already holds. Passive broadcast
+// triggers -- a member joining, a host transfer completing, a settings
+// change -- used to skip this (only the periodic snapshotTicker ran the
+// check), which left a window after natural end-of-media, and before the
+// next tick, where such an event would re-announce a stale "still playing
+// past duration" state to every connected client. A client receiving that
+// stale state while its own <video> has already reached the real end would
+// call .play() on an ended element, which per the HTML spec seeks it back
+// to position 0 first -- reproducing the "restarts from 0" bug via the sync
+// path instead of a manual click. checkEndOfMedia is cheap (in-memory, no
+// IO) and already idempotent (guarded by p.pending != nil / a state's own
+// !IsPlaying), so calling it defensively before every broadcast costs
+// nothing. If it does find the end reached, it transitions and broadcasts
+// on its own (via transitionCurrent/enterPendingTransition); the broadcast
+// below then just resends the same sequence number, which every client's
+// existing staleness check (sync.js#isStale) already silently drops -- so
+// callers never need to special-case "did checkEndOfMedia already act."
+func (p *Party) checkEndOfMediaAndBroadcast() {
+	if p.ended {
+		return
+	}
 	p.checkEndOfMedia()
 	if p.ended {
 		return
 	}
 	p.broadcastSnapshot()
-	p.persistStateAsync()
 }
 
 // checkEndOfMedia is the server-authoritative end-of-media detection: it
@@ -595,7 +624,7 @@ func (p *Party) onGraceTick() {
 			p.logger.Error("persist host transfer failed", "party_id", p.ID, "error", err)
 		}
 	}()
-	p.broadcastSnapshot()
+	p.checkEndOfMediaAndBroadcast()
 	p.logger.Info("host transferred after grace period", "party_id", p.ID, "old_host", oldHost, "new_host", newHost)
 }
 
@@ -624,6 +653,15 @@ func (p *Party) Join(userID, displayName string) (wsproto.SnapshotPayload, error
 		if userID == p.hostUserID {
 			p.hostDisconnectedAt = nil
 		}
+		// Re-validate end-of-media before handing back this snapshot -- a
+		// join/reconnect landing in the window after natural end-of-media but
+		// before the next periodic tick would otherwise read back a stale
+		// "still playing past duration" state (see checkEndOfMediaAndBroadcast's
+		// doc comment for why that matters). Join doesn't broadcast (the
+		// caller sends this snapshot directly to the new connection, which
+		// isn't wired into the member's conn yet at this point anyway), so it
+		// needs its own call rather than routing through that helper.
+		p.checkEndOfMedia()
 		snap = p.buildSnapshot()
 		joinedAt := m.JoinedAt
 		go func() {
@@ -712,7 +750,7 @@ func (p *Party) Leave(userID string) {
 						p.logger.Error("persist host transfer failed", "party_id", p.ID, "error", err)
 					}
 				}()
-				p.broadcastSnapshot()
+				p.checkEndOfMediaAndBroadcast()
 			}
 		}
 	})
@@ -768,6 +806,25 @@ func (p *Party) HandleControl(userID string, msgType wsproto.MessageType, positi
 	return outErr
 }
 
+// HandleEndedHint is called when a client's own <video> element fires its
+// native "ended" event. Unlike HandleControl, it carries no authority of
+// its own and never touches p.state directly -- it's purely a prompt to run
+// the same authoritative check (checkEndOfMedia) the periodic snapshotTicker
+// already runs, just without waiting up to SnapshotInterval for the next
+// tick. This is what makes the host client's "ended" event an observation
+// rather than a command (see SPEC.md's Synchronization Protocol section):
+// checkEndOfMedia recomputes everything from the server's own state/clock,
+// so a stale, early, or even spoofed hint is simply a no-op if the server's
+// own math disagrees. Deliberately unauthenticated beyond normal party
+// membership -- there's nothing to authorize, since the hint can't itself
+// mutate anything -- and deliberately not rate-limited (see
+// ARCHITECTURE.md's postmortem for this bug).
+func (p *Party) HandleEndedHint() {
+	p.do(func() {
+		p.checkEndOfMediaAndBroadcast()
+	})
+}
+
 // HandleHostTransfer processes an explicit, host-initiated transfer to
 // another connected member.
 func (p *Party) HandleHostTransfer(requestingUserID, newHostUserID string) error {
@@ -797,7 +854,7 @@ func (p *Party) HandleHostTransfer(requestingUserID, newHostUserID string) error
 				p.logger.Error("persist host transfer failed", "party_id", p.ID, "error", err)
 			}
 		}()
-		p.broadcastSnapshot()
+		p.checkEndOfMediaAndBroadcast()
 	})
 	return outErr
 }
@@ -1040,16 +1097,33 @@ func (p *Party) UpdateSettings(ctx context.Context, userID, name string, setting
 		}
 		p.Name = name
 		p.settings = settings
-		p.broadcastSnapshot()
+		p.checkEndOfMediaAndBroadcast()
 	})
 	return nil
 }
 
 // Snapshot returns the current authoritative snapshot (e.g. for HTTP
-// polling / diagnostics / the Emby-reporting side channel).
+// polling / diagnostics / the Emby-reporting side channel). Every one of
+// those external callers is a read that looks passive but, since it's the
+// single place all of them go through, is exactly where a stale
+// "still playing past duration" state would otherwise leak out during the
+// window between natural end-of-media and the next periodic tick -- so this
+// re-validates via checkEndOfMedia first, same as checkEndOfMediaAndBroadcast
+// does for the WS-broadcast paths. Deliberate consequence, not incidental:
+// a plain GET (handleGetParty on a page refresh, handleListParties on the
+// dashboard, embyreport's poll, or the WS pre-join reauth check) can now
+// itself trigger an authoritative transition and a broadcast to every other
+// connected member of that party -- see ARCHITECTURE.md's postmortem for
+// this bug. checkEndOfMedia is cheap and idempotent, so this costs nothing
+// on the (overwhelmingly common) path where there's nothing to correct.
 func (p *Party) Snapshot() wsproto.SnapshotPayload {
 	var snap wsproto.SnapshotPayload
-	p.do(func() { snap = p.buildSnapshot() })
+	p.do(func() {
+		if !p.ended {
+			p.checkEndOfMedia()
+		}
+		snap = p.buildSnapshot()
+	})
 	return snap
 }
 

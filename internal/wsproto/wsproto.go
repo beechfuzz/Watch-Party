@@ -21,6 +21,16 @@ const (
 	MsgJoin  MessageType = "join"
 	MsgLeave MessageType = "leave"
 
+	// Observation events — client -> server, carry no authority. The server
+	// independently re-derives truth from its own state and treats the
+	// message only as a prompt to check sooner than the next periodic
+	// broadcast, never as fact. Unlike a control event, an observation event
+	// can never itself become part of party state. ended_hint is sent when a
+	// client's own <video> element reaches the natural end of the current
+	// item -- see checkEndOfMedia/HandleEndedHint and SPEC.md's "the host
+	// client's ended event is an observation, not an authoritative command."
+	MsgEndedHint MessageType = "ended_hint"
+
 	// Transport/control frames.
 	MsgPing      MessageType = "ping"
 	MsgPong      MessageType = "pong"

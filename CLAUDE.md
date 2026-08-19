@@ -48,7 +48,7 @@ go run ./cmd/server                                          # needs env vars fr
 go build ./...
 go test ./...                                                 # unit + integration tests
 go test -race ./...
-node --test internal/webassets/web/static/js/*.test.mjs       # frontend JS tests: sync math (mirrors internal/syncalg) + playlist selection logic
+node --test internal/webassets/web/static/js/*.test.mjs       # frontend JS tests: sync math (mirrors internal/syncalg), playlist selection logic, native-pause/ended event forwarding
 docker compose up -d --build                                  # or: podman quadlet, see watchparty.container
 ```
 
