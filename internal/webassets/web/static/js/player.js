@@ -17,6 +17,7 @@ import {
   DriftAction,
 } from "./sync.js";
 import { isRealPause } from "./playback-events.js";
+import { createHlsInstanceManager } from "./hls-source.js";
 
 const partyId = window.WATCH_PARTY_ID;
 const video = document.getElementById("video");
@@ -68,6 +69,10 @@ let currentPartySettings = { auto_advance: true, show_next_dialog: true, autopla
 let pendingDeadlineMs = null; // null when no countdown is running
 let countdownRenderTimer = null;
 let suppress = { play: false, pause: false, seeking: false };
+
+// Owns the one hls.js instance this page ever has live at a time -- see
+// hls-source.js for why that matters across playlist transitions.
+const hlsManager = createHlsInstanceManager();
 
 // A transcoded stream that starts mid-item (the common case: anyone but the
 // very first person to load the page) doesn't hand back a video.currentTime
@@ -184,14 +189,9 @@ function attachSource(url, isTranscoded) {
     showError("This browser can't play transcoded video (no native HLS support and hls.js is unavailable).");
     return;
   }
-  const hls = new Hls();
-  hls.on(Hls.Events.ERROR, (_event, data) => {
-    if (data.fatal) {
-      showError("Playback error: " + (data.details || data.type));
-    }
+  hlsManager.attach(Hls, video, url, (data) => {
+    showError("Playback error: " + (data.details || data.type));
   });
-  hls.loadSource(url);
-  hls.attachMedia(video);
 }
 
 function applyAuthoritativeState(state, { hardSeek } = {}) {
@@ -516,6 +516,12 @@ function handleSnapshotOrControl(env) {
 // party's initial current item (from main()) and every subsequent item
 // change (see handleSnapshotOrControl).
 async function loadCurrentItem(itemId) {
+  // Torn down before touching the <video> element itself, on every call
+  // including the idle transition (itemId === "", queue exhausted) -- see
+  // hls-source.js: hls.js needs to detach cleanly before anything else
+  // resets the element it's still attached to, and this covers both the
+  // item-to-item and item-to-idle cases with one unconditional call.
+  hlsManager.destroy();
   video.pause();
   video.removeAttribute("src");
   video.load();
