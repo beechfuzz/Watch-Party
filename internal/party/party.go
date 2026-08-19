@@ -459,6 +459,25 @@ func (p *Party) checkEndOfMedia() {
 		return
 	}
 	expected := syncalg.ExpectedPosition(p.state.toAlg(), time.Now(), 0)
+	// Debug-only diagnostic for the gap between the server's wall-clock
+	// extrapolation and the item's persisted duration -- logged on every
+	// evaluation while playing (not just when it trips), so a LOG_LEVEL=debug
+	// repro of "paused/advanced earlier than the real last frame" produces a
+	// trail showing whether the gap was already present early in playback
+	// (pointing at a duration_ticks/actual-media mismatch) or opened up
+	// suddenly (pointing at a stall the server's linear model couldn't see).
+	// Rides the same Snapshot()-driven checkEndOfMedia chokepoint
+	// logSyncDiagnostics already logs from at a comparable rate (see
+	// ARCHITECTURE.md's postmortem for this bug for the measured volume);
+	// deliberately not sampled or rate-limited, same reasoning as §10.1's
+	// ended_hint note, given this project's stated ≤20-concurrent-user scale.
+	p.logger.Debug("checkEndOfMedia",
+		"party_id", p.ID, "item_id", p.current.EmbyItemID,
+		"expected_position_ticks", expected, "duration_ticks", p.current.DurationTicks,
+		"state_position_ticks", p.state.PositionTicks, "is_playing", p.state.IsPlaying,
+		"elapsed_since_last_state_ms", time.Since(p.state.ServerTimestamp).Milliseconds(),
+		"reached_end", expected >= p.current.DurationTicks,
+	)
 	if expected < p.current.DurationTicks {
 		return
 	}
