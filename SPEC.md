@@ -176,6 +176,8 @@ In addition to the party-internal sync protocol, the server must report playback
 
 > **▶ As built.** Implemented as specified, using the real `PlaySessionId` captured when the browser is handed a playback URL (rather than minting a separate one purely for reporting, which would make Emby track a second phantom session). Backoff is a simple per-`(party, user)` skip-tick counter capped at 5 consecutive ticks — not exponential, but bounded, and never able to block or degrade sync since it's fully decoupled from the WebSocket hub via a subscribed event channel.
 
+> **▶ As built — extended for playlist item transitions.** "End-of-media" is no longer only a party-ending event (see Data Model and End of media above): a playlist can advance to a new current item, or return to idle, many times over one party's life. Each transition emits a party-scoped `EventItemChanged` carrying the *outgoing* item's ID and final position, which the reporter uses to send that item's `Sessions/Playing/Stopped` report and then forget that item's tracked play-session state for every participant — the incoming item's tracking begins the same lazy way it already does on join, whenever a client fetches a playback URL for it (which every item transition already requires). This is the same mechanism `EventEnded` already used for party-end reporting, just without removing the party from tracking afterward. See `ARCHITECTURE.md`'s Playlist section.
+
 ## Non-Functional Requirements
 
 - Graceful shutdown on SIGTERM (drain WebSocket connections, flush in-memory party state to SQLite before exit) — this matters specifically for Podman quadlet deployments where systemd sends SIGTERM on stop/restart.
