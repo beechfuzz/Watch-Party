@@ -99,15 +99,34 @@
           <svg viewBox="0 0 24 24" fill="none"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
         </button>
       </div>
-      <input type="search" id="browse-search" class="browse-search" placeholder="Search your library…">
-      <div class="browse-tabs" id="browse-tabs">
-        <button type="button" class="browse-tab is-active" data-tab="movies">Movies</button>
-        <button type="button" class="browse-tab" data-tab="tv">TV Shows</button>
-        <button type="button" class="browse-tab" data-tab="recent">Recently Added</button>
-        <button type="button" class="browse-tab" data-tab="favorites">Favorites</button>
+      <div class="browse-body">
+        <div class="browse-main">
+          <input type="search" id="browse-search" class="browse-search" placeholder="Search your library…">
+          <div class="browse-tabs" id="browse-tabs">
+            <button type="button" class="browse-tab is-active" data-tab="movies">Movies</button>
+            <button type="button" class="browse-tab" data-tab="tv">TV Shows</button>
+            <button type="button" class="browse-tab" data-tab="recent">Recently Added</button>
+            <button type="button" class="browse-tab" data-tab="favorites">Favorites</button>
+          </div>
+          <div class="browse-breadcrumb" id="browse-breadcrumb" hidden></div>
+          <div class="browse-grid" id="browse-grid"></div>
+          <p class="error" id="browse-error" hidden></p>
+        </div>
+        <div class="selected-media-panel">
+          <div class="selected-media-header"><h4>Selected Media</h4></div>
+          <div class="selected-media-list" id="selected-media-list"></div>
+          <button type="button" class="btn btn-primary selected-media-add-btn" id="selected-media-add-btn" disabled>Add 0 Selected Items</button>
+        </div>
       </div>
-      <div class="browse-grid" id="browse-grid"></div>
-      <p class="error" id="browse-error" hidden></p>
+    </div>
+  </dialog>
+
+  <dialog id="confirm-large-selection-dialog">
+    <h3>Add multiple items?</h3>
+    <p class="confirm-text" id="confirm-large-selection-text"></p>
+    <div style="display:flex; gap:10px; justify-content:flex-end;">
+      <button type="button" class="btn btn-ghost" id="confirm-large-selection-cancel-btn">Cancel</button>
+      <button type="button" class="btn btn-primary" id="confirm-large-selection-add-btn">Add</button>
     </div>
   </dialog>
 

@@ -181,7 +181,7 @@ type updatePartySettingsRequest struct {
 
 // handleUpdatePartySettings is the Party Settings form's post-creation save
 // path (the cog button on the party page) — host-only, like every other
-// party mutation. Unlike handleAddPlaylistItem there's no Emby round trip to
+// party mutation. Unlike handleBatchAddPlaylistItems there's no Emby round trip to
 // avoid here, so the host check lives entirely in Party.UpdateSettings
 // (still fast/IO-free before its own SQLite write — see its doc comment).
 func (a *App) handleUpdatePartySettings(w http.ResponseWriter, r *http.Request) {
@@ -490,24 +490,36 @@ func (a *App) handleGetPlaylist(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": out})
 }
 
-type addPlaylistItemRequest struct {
-	ItemID string `json:"item_id"`
+type batchAddPlaylistItemsRequest struct {
+	ItemIDs []string `json:"item_ids"`
 }
 
-// handleAddPlaylistItem is host-only (enforced by Party.AddPlaylistItem).
-// The GetItem call below serves double duty: it's how duration_ticks gets
-// fetched and persisted (the party actor has no Emby access of its own),
-// and it's the adding host's own authorization check for this item —
-// consistent with "being host never implicitly grants anyone else access":
-// it only proves the HOST can see this item, not that every other
+// handleBatchAddPlaylistItems is host-only (enforced by
+// Party.AddPlaylistItems) and is the only way media is added to a playlist
+// from the browse dialog now — even a single movie goes through this
+// endpoint (see ARCHITECTURE.md's Playlist section; the old single-item
+// POST /api/parties/{id}/playlist endpoint was removed since nothing calls
+// it once the dialog's checkbox → batch-add flow replaced its click-to-add
+// card handler).
+//
+// One Emby round trip (GetItems, an Ids-filtered bulk lookup) resolves
+// every item's duration/title/access-check at once, instead of one GetItem
+// call per item — avoiding an N+1 round trip for a large season/series
+// selection. It also serves as the adding host's own authorization check
+// for every item, same rationale as the old single-add endpoint's GetItem
+// call: it only proves the HOST can see these items, not that every other
 // participant can, which is why the real per-participant check happens
-// again at handlePlaybackURL whenever this item becomes current.
-func (a *App) handleAddPlaylistItem(w http.ResponseWriter, r *http.Request) {
+// again at handlePlaybackURL whenever an item becomes current.
+//
+// An item id missing from that bulk response (the requester can't see it,
+// or it doesn't exist) rejects the whole batch before anything is written —
+// no partial add.
+func (a *App) handleBatchAddPlaylistItems(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	user := userFromContext(r.Context())
-	var req addPlaylistItemRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ItemID == "" {
-		writeError(w, http.StatusBadRequest, "bad_request", "item_id is required")
+	var req batchAddPlaylistItemsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.ItemIDs) == 0 {
+		writeError(w, http.StatusBadRequest, "bad_request", "item_ids is required")
 		return
 	}
 
@@ -518,7 +530,7 @@ func (a *App) handleAddPlaylistItem(w http.ResponseWriter, r *http.Request) {
 	}
 	// Fail fast on host authorization before spending a token decrypt and an
 	// Emby round trip on a request that's going to be rejected regardless —
-	// Party.AddPlaylistItem is still the authoritative check (this is a
+	// Party.AddPlaylistItems is still the authoritative check (this is a
 	// cheap up-front read, not a replacement for it).
 	if p.HostUserID() != user.ID {
 		writeError(w, http.StatusForbidden, "not_host", "only the host may edit the playlist")
@@ -530,20 +542,35 @@ func (a *App) handleAddPlaylistItem(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
 		return
 	}
-	item, err := a.Emby.GetItem(r.Context(), token, user.ID, req.ItemID)
+	fetched, err := a.Emby.GetItems(r.Context(), token, user.ID, req.ItemIDs)
 	if err != nil {
-		a.handleEmbyErr(w, r.Context(), user.ID, err, "could not look up that item on Emby")
+		a.handleEmbyErr(w, r.Context(), user.ID, err, "could not look up that media on Emby")
 		return
 	}
+	byID := make(map[string]emby.ItemInfo, len(fetched))
+	for _, it := range fetched {
+		byID[it.ID] = it
+	}
+	items := make([]party.ItemToAdd, len(req.ItemIDs))
+	for i, itemID := range req.ItemIDs {
+		it, ok := byID[itemID]
+		if !ok {
+			writeError(w, http.StatusBadRequest, "bad_request", "one or more selected items are not accessible")
+			return
+		}
+		items[i] = party.ItemToAdd{ItemID: itemID, DurationTicks: it.RunTimeTicks}
+	}
 
-	added, err := p.AddPlaylistItem(r.Context(), user.ID, req.ItemID, item.RunTimeTicks)
+	added, err := p.AddPlaylistItems(r.Context(), user.ID, items)
 	if err != nil {
 		a.writeHostActionErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"id": added.ID, "item_id": added.ItemID, "position": added.Position, "duration_ticks": added.DurationTicks,
-	})
+	out := make([]map[string]any, len(added))
+	for i, it := range added {
+		out[i] = map[string]any{"id": it.ID, "item_id": it.ItemID, "position": it.Position, "duration_ticks": it.DurationTicks}
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"items": out})
 }
 
 func (a *App) handleRemovePlaylistItem(w http.ResponseWriter, r *http.Request) {
@@ -657,6 +684,54 @@ func (a *App) handleBrowseEmbyItems(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+// handleListSeasons lists a series' seasons for the Playlist browser's
+// series drill-down — same backend-routed pattern as handleBrowseEmbyItems
+// (requester's own token, JSON metadata through this backend, not a new
+// access pattern). Not host-gated: browsing the library is available to any
+// authenticated party member today, same as handleBrowseEmbyItems — only
+// adding is host-only.
+func (a *App) handleListSeasons(w http.ResponseWriter, r *http.Request) {
+	user := userFromContext(r.Context())
+	token, err := a.TokenCipher.Decrypt(user.EncryptedAccessToken)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
+		return
+	}
+	seasons, err := a.Emby.ListSeasons(r.Context(), token, user.ID, r.PathValue("id"))
+	if err != nil {
+		a.handleEmbyErr(w, r.Context(), user.ID, err, "could not browse the Emby library")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"seasons": seasons})
+}
+
+// handleListEpisodes lists a season's episodes, for the Playlist browser's
+// season drill-down and recursive series/season selection — RunTimeTicks
+// comes straight from this listing response (see emby.Client.ListEpisodes),
+// not a separate per-episode call. Requires series_id as a query parameter
+// alongside the season id in the path, since Emby's episode listing is
+// scoped under the series — the frontend already has it (from the
+// SeasonSummary the season card being drilled into was rendered from).
+func (a *App) handleListEpisodes(w http.ResponseWriter, r *http.Request) {
+	user := userFromContext(r.Context())
+	seriesID := r.URL.Query().Get("series_id")
+	if seriesID == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "series_id is required")
+		return
+	}
+	token, err := a.TokenCipher.Decrypt(user.EncryptedAccessToken)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
+		return
+	}
+	episodes, err := a.Emby.ListEpisodes(r.Context(), token, user.ID, seriesID, r.PathValue("id"))
+	if err != nil {
+		a.handleEmbyErr(w, r.Context(), user.ID, err, "could not browse the Emby library")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"episodes": episodes})
 }
 
 // handleEmbyErr maps an emby package error to an HTTP response. On a

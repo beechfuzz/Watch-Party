@@ -914,6 +914,79 @@ func TestAddPlaylistItem_NonHostRejected(t *testing.T) {
 	}
 }
 
+func TestAddPlaylistItems_NonHostRejected(t *testing.T) {
+	hub := newTestHub(t)
+	seedUser(t, hub.store, "host", "Host")
+	seedUser(t, hub.store, "guest", "Guest")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
+
+	if _, err := p.AddPlaylistItems(context.Background(), "guest", []ItemToAdd{
+		{ItemID: "item2", DurationTicks: 500 * 10_000_000},
+	}); err != ErrNotHost {
+		t.Errorf("err = %v, want ErrNotHost", err)
+	}
+	if items, err := hub.store.ListPlaylistItems(context.Background(), "party1"); err != nil || len(items) != 1 {
+		t.Errorf("playlist = %+v (err=%v), want unchanged at 1 item (the non-host batch must not have been written)", items, err)
+	}
+}
+
+func TestAddPlaylistItems_OrderPreserved(t *testing.T) {
+	hub := newTestHub(t)
+	seedUser(t, hub.store, "host", "Host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
+
+	added, err := p.AddPlaylistItems(context.Background(), "host", []ItemToAdd{
+		{ItemID: "item-b", DurationTicks: 200 * 10_000_000},
+		{ItemID: "item-a", DurationTicks: 100 * 10_000_000},
+		{ItemID: "item-c", DurationTicks: 300 * 10_000_000},
+	})
+	if err != nil {
+		t.Fatalf("AddPlaylistItems: %v", err)
+	}
+	if len(added) != 3 || added[0].ItemID != "item-b" || added[1].ItemID != "item-a" || added[2].ItemID != "item-c" {
+		t.Fatalf("added = %+v, want [item-b, item-a, item-c] preserving the caller's order", added)
+	}
+	if added[0].Position != 1 || added[1].Position != 2 || added[2].Position != 3 {
+		t.Errorf("positions = [%d, %d, %d], want sequential starting after the existing item at position 0", added[0].Position, added[1].Position, added[2].Position)
+	}
+
+	// The actor's own in-memory cache (not just the store) must reflect the
+	// batch, in the same order -- this is what Snapshot/broadcastPlaylistUpdated
+	// serve from, so a mismatch here would only surface as a subtle "playlist
+	// looks right after reload but not live" bug.
+	var cached []dbx.PlaylistItem
+	p.do(func() { cached = append([]dbx.PlaylistItem{}, p.playlist...) })
+	if len(cached) != 4 {
+		t.Fatalf("actor playlist cache = %+v, want 4 items", cached)
+	}
+	for i, want := range []string{"item1", "item-b", "item-a", "item-c"} {
+		if cached[i].ItemID != want {
+			t.Errorf("actor playlist cache[%d] = %q, want %q", i, cached[i].ItemID, want)
+		}
+	}
+}
+
+func TestAddPlaylistItems_SingleBroadcast(t *testing.T) {
+	hub := newTestHub(t)
+	seedUser(t, hub.store, "host", "Host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
+	_, _ = p.Join("host", "Host")
+	conn := &fakeConn{}
+	p.AttachConn("host", conn)
+
+	if _, err := p.AddPlaylistItems(context.Background(), "host", []ItemToAdd{
+		{ItemID: "item-a", DurationTicks: 100 * 10_000_000},
+		{ItemID: "item-b", DurationTicks: 200 * 10_000_000},
+		{ItemID: "item-c", DurationTicks: 300 * 10_000_000},
+	}); err != nil {
+		t.Fatalf("AddPlaylistItems: %v", err)
+	}
+
+	if n := conn.countOfType(wsproto.MsgPlaylistUpdated); n != 1 {
+		t.Errorf("playlist_updated broadcasts = %d, want exactly 1 for a 3-item batch (not N)", n)
+	}
+}
+
 func TestRemovePlaylistItem_CurrentItemRejected(t *testing.T) {
 	hub := newTestHub(t)
 	seedUser(t, hub.store, "host", "Host")

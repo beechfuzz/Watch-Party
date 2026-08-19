@@ -891,6 +891,42 @@ func (p *Party) AddPlaylistItem(ctx context.Context, userID, itemID string, dura
 	return *item, nil
 }
 
+// ItemToAdd is one item to append via AddPlaylistItems — itemID plus its
+// Emby-reported durationTicks, fetched by the caller (in one bulk round trip
+// via emby.Client.GetItems) before invoking this, same as AddPlaylistItem.
+type ItemToAdd struct {
+	ItemID        string
+	DurationTicks int64
+}
+
+// AddPlaylistItems appends multiple items to the end of the party's queue in
+// one store-level transaction and one broadcast — the batch counterpart to
+// AddPlaylistItem, used by the "Add N Selected Item(s)" flow so a large
+// selection doesn't produce N authorize/write/broadcast cycles. See
+// AddPlaylistItem's doc comment for why the SQLite write happens between two
+// do() dispatches rather than inside one.
+func (p *Party) AddPlaylistItems(ctx context.Context, userID string, items []ItemToAdd) ([]dbx.PlaylistItem, error) {
+	if err := p.checkHostAuthorized(userID); err != nil {
+		return nil, err
+	}
+	newItems := make([]dbx.NewPlaylistItem, len(items))
+	for i, it := range items {
+		newItems[i] = dbx.NewPlaylistItem{ItemID: it.ItemID, DurationTicks: it.DurationTicks}
+	}
+	added, err := p.store.AddPlaylistItems(ctx, p.ID, newItems, userID, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	p.do(func() {
+		if p.ended {
+			return
+		}
+		p.playlist = append(p.playlist, added...)
+		p.broadcastPlaylistUpdated()
+	})
+	return added, nil
+}
+
 // RemovePlaylistItem deletes a queued item. Host-only. Removing the
 // currently-playing item is rejected outright (ErrCannotRemoveCurrentItem)
 // rather than implicitly advancing or going idle — the host must choose
