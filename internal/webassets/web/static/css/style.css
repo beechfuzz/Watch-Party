@@ -491,6 +491,15 @@ dialog h3 { font-family: var(--font-display); font-size: 16px; font-weight: 600;
    rest, now that both sit inside .sidebar-block-body rather than directly
    inside .chat-block. */
 .chat-block .sidebar-block-body { display: flex; flex-direction: column; min-height: 0; }
+/* Chat is the last of the three sidebar blocks, and none of them has
+   flex-grow (all three size to their own flex-basis -- see .sidebar-block
+   above). With no block claiming leftover column height, any space beyond
+   the sum of the three blocks' heights went unclaimed below the last one.
+   flex-grow:1 here (Watching Now/Playlist stay flex-grow:0, sized to their
+   own height as before) makes Chat absorb that leftover so it fills
+   .party-sidebar-col, matching the other two blocks' already-correct
+   sizing. See ARCHITECTURE.md §11.6. */
+.chat-block.sidebar-block { flex-grow: 1; }
 /* .is-coming-soon (line 124) sets pointer-events:none on the whole
    .chat-block, which is inherited by every descendant -- including this
    panel's own collapse header, making it unclickable along with the
