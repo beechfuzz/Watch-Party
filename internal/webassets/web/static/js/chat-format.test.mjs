@@ -1,7 +1,7 @@
 // Run with: node --test internal/webassets/web/static/js/chat-format.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MAX_CHAT_MESSAGE_LENGTH, validateChatBody, truncateForOverlay } from "./chat-format.js";
+import { MAX_CHAT_MESSAGE_LENGTH, validateChatBody, truncateForOverlay, shouldShowOverlay } from "./chat-format.js";
 
 test("validateChatBody: rejects empty and whitespace-only input", () => {
   for (const raw of ["", "   ", "\t\n", undefined, null]) {
@@ -54,4 +54,20 @@ test("truncateForOverlay: truncates to exactly maxLen characters plus an ellipsi
 test("truncateForOverlay: default maxLen is 50", () => {
   const body = "a".repeat(51);
   assert.equal(truncateForOverlay(body), "a".repeat(50) + "…");
+});
+
+test("shouldShowOverlay: shown while fullscreen for another user's message", () => {
+  assert.equal(shouldShowOverlay(true, "user-bob", "user-alice"), true);
+});
+
+test("shouldShowOverlay: not shown when not fullscreen, even for another user's message", () => {
+  assert.equal(shouldShowOverlay(false, "user-bob", "user-alice"), false);
+});
+
+test("shouldShowOverlay: not shown for the viewer's own message, even while fullscreen", () => {
+  assert.equal(shouldShowOverlay(true, "user-alice", "user-alice"), false);
+});
+
+test("shouldShowOverlay: not shown when neither condition holds", () => {
+  assert.equal(shouldShowOverlay(false, "user-alice", "user-alice"), false);
 });

@@ -43,3 +43,13 @@ export function truncateForOverlay(body, maxLen = 50) {
   if (body.length <= maxLen) return body;
   return body.slice(0, maxLen) + "…";
 }
+
+// shouldShowOverlay is the fullscreen quick-reply overlay's trigger
+// condition, extracted as a pure predicate so the "when" decision is
+// unit-testable without a real Fullscreen API or WebSocket message: show
+// the overlay only while the viewer is actually in fullscreen, and never
+// for the viewer's own message (there's no reason to toast someone their
+// own sent text back at them).
+export function shouldShowOverlay(isFullscreen, senderUserId, viewerUserId) {
+  return Boolean(isFullscreen) && senderUserId !== viewerUserId;
+}

@@ -34,7 +34,11 @@ function chatInitials(name) {
   return (name || "?").trim().slice(0, 1).toUpperCase();
 }
 
-function resolveIdentity(userId) {
+// Exported so the fullscreen overlay module (chat-overlay.js) can resolve a
+// message's sender identity through this same cache, rather than firing a
+// second, duplicate Emby lookup for a sender the sidebar panel has already
+// resolved (or is already resolving).
+export function resolveIdentity(userId) {
   if (identityCache.has(userId)) return identityCache.get(userId);
   const promise = api(`/api/emby/users/${encodeURIComponent(userId)}`)
     .then((res) => ({ displayName: res.display_name || userId, avatarUrl: res.avatar_url || "" }))
