@@ -529,8 +529,19 @@ dialog h3 { font-family: var(--font-display); font-size: 16px; font-weight: 600;
 }
 .playlist-item {
   display: flex; align-items: center; gap: 10px; padding: 8px; border-radius: var(--radius-control);
+  border-top: 2px solid transparent; border-bottom: 2px solid transparent;
 }
 .playlist-item.is-current { background: rgba(232,163,61,0.10); }
+.playlist-item.is-dragging { opacity: 0.4; }
+.playlist-item.drag-over-top { border-top-color: var(--accent-teal); }
+.playlist-item.drag-over-bottom { border-bottom-color: var(--accent-teal); }
+.playlist-item-handle {
+  width: 18px; height: 26px; flex-shrink: 0; border-radius: 6px; background: transparent; border: none;
+  color: var(--text-tertiary); display: flex; align-items: center; justify-content: center; cursor: grab;
+}
+.playlist-item-handle:active { cursor: grabbing; }
+.playlist-item-handle:hover { color: var(--text-primary); }
+.playlist-item-handle svg { width: 15px; height: 15px; }
 .playlist-item-thumb {
   width: 40px; height: 56px; flex-shrink: 0; border-radius: 5px; background: var(--bg-panel-raised) center/cover no-repeat;
   border: 1px solid var(--border-subtle);

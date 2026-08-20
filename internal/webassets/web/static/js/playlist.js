@@ -21,6 +21,7 @@ import {
   deselectAll,
   formatSelectedLabel,
   addButtonLabel,
+  reorderIds,
 } from "./playlist-select.js";
 
 const playlistItemsEl = document.getElementById("playlist-items");
@@ -43,6 +44,14 @@ let partyId = null;
 let isHostFn = () => false;
 let currentTab = "movies";
 let searchDebounceTimer = null;
+
+// Single-item drag-and-drop reorder state: the id of the playlist item
+// currently being dragged, tracked here rather than read back from
+// DataTransfer during dragover/drop (some browsers restrict
+// dataTransfer.getData() to the "drop" event only). dragstart still calls
+// dataTransfer.setData() too -- Firefox requires it to initiate the drag at
+// all, even though this module never reads it back.
+let draggedItemId = null;
 
 // Drill-down navigation stack: [] = tab/search root. An entry is
 // {type: "series", id, name} or {type: "season", id, name, seriesId, seriesName}.
@@ -82,10 +91,38 @@ function iconBtn(title, pathD) {
   return btn;
 }
 
+// Reads the ordered playlist item ids currently rendered in the DOM --
+// the source of truth reorderIds() operates on, kept in sync with the
+// server by loadPlaylist() re-rendering from scratch on every mutation.
+function renderedItemIds() {
+  return [...playlistItemsEl.querySelectorAll(".playlist-item")].map((el) => Number(el.dataset.itemId));
+}
+
+function clearDragOverClasses(row) {
+  row.classList.remove("drag-over-top", "drag-over-bottom");
+}
+
+async function commitReorder(orderedIds) {
+  try {
+    await api(`/api/parties/${encodeURIComponent(partyId)}/playlist/order`, {
+      method: "PUT",
+      body: { ordered_ids: orderedIds },
+    });
+    await loadPlaylist();
+  } catch (err) {
+    alert(err.message);
+    await loadPlaylist(); // resync with the server's actual order
+  }
+}
+
 function renderPlaylistItem(item) {
   const row = document.createElement("div");
   row.className = `playlist-item${item.is_current ? " is-current" : ""}`;
+  row.dataset.itemId = String(item.id);
   row.innerHTML = `
+    <button type="button" class="playlist-item-handle" title="Drag to reorder" hidden>
+      <svg viewBox="0 0 24 24" fill="none"><circle cx="9" cy="6" r="1.4" fill="currentColor"/><circle cx="15" cy="6" r="1.4" fill="currentColor"/><circle cx="9" cy="12" r="1.4" fill="currentColor"/><circle cx="15" cy="12" r="1.4" fill="currentColor"/><circle cx="9" cy="18" r="1.4" fill="currentColor"/><circle cx="15" cy="18" r="1.4" fill="currentColor"/></svg>
+    </button>
     <div class="playlist-item-thumb"></div>
     <div class="playlist-item-body">
       <div class="playlist-item-title"></div>
@@ -100,6 +137,48 @@ function renderPlaylistItem(item) {
   row.querySelector(".playlist-item-meta").textContent = item.is_current
     ? "Now playing"
     : ticksToLabel(item.duration_ticks);
+
+  // The drag handle stays live for every item when hosting, including the
+  // current one: only *removing* the current item is disallowed
+  // (ErrCannotRemoveCurrentItem), reordering its position is fine --
+  // ReorderPlaylist only rejects a mismatched id set, never a reorder that
+  // happens to move the current item.
+  const handle = row.querySelector(".playlist-item-handle");
+  handle.hidden = !isHostFn();
+  if (isHostFn()) {
+    handle.draggable = true;
+    handle.addEventListener("dragstart", (e) => {
+      draggedItemId = item.id;
+      e.dataTransfer.setData("text/plain", String(item.id));
+      e.dataTransfer.effectAllowed = "move";
+      row.classList.add("is-dragging");
+    });
+    handle.addEventListener("dragend", () => {
+      draggedItemId = null;
+      row.classList.remove("is-dragging");
+    });
+  }
+
+  row.addEventListener("dragover", (e) => {
+    if (!isHostFn() || draggedItemId === null || draggedItemId === item.id) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    const rect = row.getBoundingClientRect();
+    const placeAfter = e.clientY - rect.top > rect.height / 2;
+    row.classList.toggle("drag-over-top", !placeAfter);
+    row.classList.toggle("drag-over-bottom", placeAfter);
+  });
+  row.addEventListener("dragleave", () => clearDragOverClasses(row));
+  row.addEventListener("drop", (e) => {
+    if (!isHostFn() || draggedItemId === null || draggedItemId === item.id) return;
+    e.preventDefault();
+    const rect = row.getBoundingClientRect();
+    const placeAfter = e.clientY - rect.top > rect.height / 2;
+    clearDragOverClasses(row);
+    const newOrder = reorderIds(renderedItemIds(), draggedItemId, item.id, placeAfter);
+    draggedItemId = null;
+    commitReorder(newOrder);
+  });
 
   if (isHostFn() && !item.is_current) {
     const playBtn = iconBtn("Play now", `<path d="M7 5l12 7-12 7V5z" fill="currentColor"/>`);

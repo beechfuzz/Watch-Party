@@ -1065,6 +1065,43 @@ func TestReorderPlaylist_MismatchedSetRejected(t *testing.T) {
 	}
 }
 
+// TestReorderPlaylist_CurrentItemPositionAllowed confirms that only
+// *removing* the currently-playing item is disallowed (ErrCannotRemoveCurrentItem,
+// see TestRemovePlaylistItem_CurrentItemRejected) -- moving its position in
+// the queue via ReorderPlaylist is fine, since ReorderPlaylist only checks
+// that orderedIDs is exactly the current playlist id set.
+func TestReorderPlaylist_CurrentItemPositionAllowed(t *testing.T) {
+	hub := newTestHub(t)
+	seedUser(t, hub.store, "host", "Host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
+	added, err := p.AddPlaylistItem(context.Background(), "host", "item2", 500*10_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var currentID int64
+	p.do(func() { currentID = p.current.PlaylistItemID })
+	if currentID == added.ID {
+		t.Fatalf("precondition failed: current item is the one just added")
+	}
+
+	// Move the current item (item1) from position 0 to position 1.
+	if err := p.ReorderPlaylist(context.Background(), "host", []int64{added.ID, currentID}); err != nil {
+		t.Fatalf("ReorderPlaylist(current item's new position) = %v, want nil", err)
+	}
+
+	p.do(func() {
+		if p.current == nil || p.current.PlaylistItemID != currentID {
+			t.Errorf("current item changed after reorder: %+v", p.current)
+		}
+		if len(p.playlist) != 2 || p.playlist[0].ID != added.ID || p.playlist[1].ID != currentID {
+			t.Errorf("playlist order = %+v, want [%d, %d]", p.playlist, added.ID, currentID)
+		} else if p.playlist[1].Position != 1 {
+			t.Errorf("current item position = %d, want 1", p.playlist[1].Position)
+		}
+	})
+}
+
 func TestSelectCurrentItem_NonHostRejected(t *testing.T) {
 	hub := newTestHub(t)
 	seedUser(t, hub.store, "host", "Host")

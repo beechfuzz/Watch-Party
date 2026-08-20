@@ -91,3 +91,19 @@ export function formatSelectedLabel(entry) {
 export function addButtonLabel(count) {
   return `Add ${count} Selected Item${count === 1 ? "" : "s"}`;
 }
+
+// Playlist reorder drag-and-drop math -- pure so the drop-position
+// arithmetic can be unit tested independent of DOM/drag events, the same
+// split as the selection logic above. Returns a new ordered id array with
+// sourceId moved to just before (placeAfter false) or after (placeAfter
+// true) targetId. No-ops (returns ids unchanged, not a copy) if
+// sourceId === targetId or if targetId isn't present (a stale drop target,
+// e.g. the playlist changed mid-drag).
+export function reorderIds(ids, sourceId, targetId, placeAfter) {
+  if (sourceId === targetId) return ids;
+  const without = ids.filter((id) => id !== sourceId);
+  const targetIndex = without.indexOf(targetId);
+  if (targetIndex === -1) return ids;
+  without.splice(targetIndex + (placeAfter ? 1 : 0), 0, sourceId);
+  return without;
+}
