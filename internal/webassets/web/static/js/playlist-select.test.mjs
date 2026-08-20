@@ -10,6 +10,7 @@ import {
   deselectAll,
   formatSelectedLabel,
   addButtonLabel,
+  reorderIds,
 } from "./playlist-select.js";
 
 const movie = (id, title, year) => ({ type: "movie", id, title, year });
@@ -132,4 +133,49 @@ test("addButtonLabel: singular vs plural", () => {
   assert.equal(addButtonLabel(1), "Add 1 Selected Item");
   assert.equal(addButtonLabel(2), "Add 2 Selected Items");
   assert.equal(addButtonLabel(0), "Add 0 Selected Items");
+});
+
+test("reorderIds: move item forward, placing it after the target", () => {
+  const result = reorderIds([1, 2, 3, 4], 1, 3, true);
+  assert.deepEqual(result, [2, 3, 1, 4]);
+});
+
+test("reorderIds: move item forward, placing it before the target", () => {
+  const result = reorderIds([1, 2, 3, 4], 1, 3, false);
+  assert.deepEqual(result, [2, 1, 3, 4]);
+});
+
+test("reorderIds: move item backward, placing it after the target", () => {
+  const result = reorderIds([1, 2, 3, 4], 4, 1, true);
+  assert.deepEqual(result, [1, 4, 2, 3]);
+});
+
+test("reorderIds: move item backward, placing it before the target", () => {
+  const result = reorderIds([1, 2, 3, 4], 4, 1, false);
+  assert.deepEqual(result, [4, 1, 2, 3]);
+});
+
+test("reorderIds: dropping on itself is a no-op", () => {
+  const ids = [1, 2, 3];
+  assert.deepEqual(reorderIds(ids, 2, 2, true), ids);
+});
+
+test("reorderIds: stale/unknown target id is a no-op", () => {
+  const ids = [1, 2, 3];
+  assert.deepEqual(reorderIds(ids, 1, 999, true), ids);
+});
+
+test("reorderIds: moving the first item to the end", () => {
+  assert.deepEqual(reorderIds([1, 2, 3], 1, 3, true), [2, 3, 1]);
+});
+
+test("reorderIds: moving the last item to the front", () => {
+  assert.deepEqual(reorderIds([1, 2, 3], 3, 1, false), [3, 1, 2]);
+});
+
+test("reorderIds: does not mutate its input", () => {
+  const ids = [1, 2, 3];
+  const copy = [...ids];
+  reorderIds(ids, 1, 3, true);
+  assert.deepEqual(ids, copy);
 });
