@@ -72,6 +72,33 @@ func TestHandleChatSend_NonHostMemberAllowed(t *testing.T) {
 	}
 }
 
+// Defense-in-depth: today the only path into HandleChatSend is through an
+// already-Join-validated WebSocket connection (httpapi/ws.go's
+// dispatchWSMessage), so this case shouldn't be reachable in production --
+// but HandleChatSend must not silently accept a userID that never joined
+// this party if it's ever called some other way (directly, as this test
+// does, or from a future caller). This is the specific case previously
+// flagged as having zero test coverage in either direction: nothing
+// asserted it was rejected, and nothing asserted it was allowed either.
+func TestHandleChatSend_NeverJoinedRejected(t *testing.T) {
+	hub := newTestHub(t)
+	seedUser(t, hub.store, "host", "Host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
+	// Deliberately never call p.Join for this userID.
+
+	if err := p.HandleChatSend(context.Background(), "stranger", "hi"); err != ErrNotMember {
+		t.Fatalf("HandleChatSend from a never-joined userID = %v, want ErrNotMember", err)
+	}
+
+	msgs, err := hub.store.ListChatMessages(context.Background(), "party1", 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 0 {
+		t.Errorf("stored messages = %+v, want none -- a rejected send must not be persisted", msgs)
+	}
+}
+
 func TestHandleChatSend_PersistsToStore(t *testing.T) {
 	hub := newTestHub(t)
 	seedUser(t, hub.store, "host", "Host")

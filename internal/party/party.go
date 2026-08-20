@@ -983,12 +983,21 @@ func (p *Party) checkHostAuthorized(userID string) error {
 // chat section for why chat gets this narrower tier instead of extending
 // (or bypassing) the host-only pattern every other mutation uses: chat
 // doesn't touch playback state, the playlist, or Emby, so gating it to the
-// host would defeat the feature's whole point. There's no separate
-// membership check here beyond "not ended": a chat_send can only reach this
-// method via an already-Join-validated, already-Origin-checked WebSocket
-// connection (see httpapi/ws.go's dispatchWSMessage), so the connection
-// lifecycle itself is the membership check -- the same reasoning
-// HandleEndedHint's doc comment already uses for the same class of message.
+// host would defeat the feature's whole point.
+//
+// The p.members[userID] check below is defense-in-depth, not the primary
+// guarantee: a chat_send can only reach this method today via an already-
+// Join-validated, already-Origin-checked WebSocket connection (see
+// httpapi/ws.go's dispatchWSMessage), so the connection lifecycle already
+// makes a foreign userID unreachable in practice. It's checked explicitly
+// anyway, for the same reason HandleControl checks host status even though
+// it's reached the same structurally-gated way: every other mutation in
+// this codebase performs its own runtime authorization check regardless of
+// how it's called, rather than relying solely on caller discipline one
+// layer up -- chat's authorization tier is narrower (membership, not
+// host), but the *pattern* of checking it explicitly, inside the actor,
+// should still hold. TestHandleChatSend_NeverJoinedRejected pins this
+// directly by calling HandleChatSend with a userID that never called Join.
 //
 // Follows the exact two-phase dispatch pattern AddPlaylistItem established:
 // authorize/validate/rate-limit fast and IO-free inside the actor, then the
@@ -1012,6 +1021,10 @@ func (p *Party) HandleChatSend(ctx context.Context, userID, body string) error {
 	p.do(func() {
 		if p.ended {
 			outErr = ErrPartyEnded
+			return
+		}
+		if _, ok := p.members[userID]; !ok {
+			outErr = ErrNotMember
 			return
 		}
 		if trimmed == "" {
