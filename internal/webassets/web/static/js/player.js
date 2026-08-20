@@ -25,6 +25,7 @@ import {
   serializePanelState,
   toggleCollapse,
   resizePanels,
+  lastExpandedKey,
 } from "./sidebar-panels.js";
 
 const partyId = window.WATCH_PARTY_ID;
@@ -393,10 +394,12 @@ partySettingsForm.addEventListener("submit", async (e) => {
 const PANEL_STORAGE_KEY = "watchparty:sidebarPanels";
 
 function applyPanelState(state) {
+  const growKey = lastExpandedKey(state);
   for (const key of PANEL_KEYS) {
     const block = document.querySelector(`.sidebar-block[data-panel-key="${key}"]`);
     if (!block) continue;
     block.classList.toggle("is-collapsed", state[key].collapsed);
+    block.classList.toggle("is-grow-target", key === growKey);
     block.style.flexBasis = state[key].collapsed ? "" : `${state[key].heightPx}px`;
   }
   for (const handle of document.querySelectorAll(".sidebar-resize-handle")) {

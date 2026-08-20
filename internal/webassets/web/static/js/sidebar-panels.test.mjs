@@ -9,6 +9,7 @@ import {
   serializePanelState,
   toggleCollapse,
   resizePanels,
+  lastExpandedKey,
 } from "./sidebar-panels.js";
 
 test("defaultPanelState: every panel starts expanded with a height at or above the minimum", () => {
@@ -112,4 +113,34 @@ test("resizePanels: is a pure function -- does not mutate its input state", () =
   const before = JSON.stringify(state);
   resizePanels(state, "playlist", "chat", 25);
   assert.equal(JSON.stringify(state), before);
+});
+
+test("lastExpandedKey: with nothing collapsed, returns the last panel in PANEL_KEYS order", () => {
+  assert.equal(lastExpandedKey(defaultPanelState()), "chat");
+});
+
+test("lastExpandedKey: collapsing the last panel hands the grow target to the new last-expanded one", () => {
+  // The exact regression this generalizes: collapsing Chat used to reopen
+  // the leftover-space gap under Playlist, since only Chat ever grew.
+  const state = toggleCollapse(defaultPanelState(), "chat");
+  assert.equal(lastExpandedKey(state), "playlist");
+});
+
+test("lastExpandedKey: collapsing the last two panels hands the grow target to watching-now", () => {
+  let state = toggleCollapse(defaultPanelState(), "chat");
+  state = toggleCollapse(state, "playlist");
+  assert.equal(lastExpandedKey(state), "watching-now");
+});
+
+test("lastExpandedKey: re-expanding a panel gives it back the grow target, since it's re-derived, not sticky", () => {
+  let state = toggleCollapse(defaultPanelState(), "chat");
+  assert.equal(lastExpandedKey(state), "playlist");
+  state = toggleCollapse(state, "chat"); // re-expand
+  assert.equal(lastExpandedKey(state), "chat");
+});
+
+test("lastExpandedKey: returns null when every panel is collapsed", () => {
+  let state = defaultPanelState();
+  for (const key of PANEL_KEYS) state = toggleCollapse(state, key);
+  assert.equal(lastExpandedKey(state), null);
 });

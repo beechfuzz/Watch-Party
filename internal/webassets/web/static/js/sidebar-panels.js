@@ -68,6 +68,24 @@ export function toggleCollapse(state, key) {
 // nothing to negotiate against a fixed-height collapsed neighbor, so the
 // DOM wiring disables that handle entirely rather than special-casing it
 // here.
+// lastExpandedKey returns whichever panel should absorb the column's
+// leftover flex space: the last (bottom-most, per PANEL_KEYS order)
+// currently-expanded panel, or null if every panel is collapsed (nothing
+// to grow). Generalizes the old hardcoded "Chat always grows" rule -- Chat
+// only ever worked as the grow target because it happened to always be the
+// last block in the DOM *and* expanded; collapsing it reopens the identical
+// gap under whatever is now the last expanded block (confirmed on Playlist,
+// see ARCHITECTURE.md). Deriving this fresh from state on every call means
+// there's no separate "which panel grows" field to keep in sync with
+// collapse/expand -- it always falls out of {collapsed, heightPx} alone.
+export function lastExpandedKey(state) {
+  for (let i = PANEL_KEYS.length - 1; i >= 0; i--) {
+    const key = PANEL_KEYS[i];
+    if (!state[key].collapsed) return key;
+  }
+  return null;
+}
+
 export function resizePanels(state, keyA, keyB, deltaY) {
   const total = state[keyA].heightPx + state[keyB].heightPx;
   let newA = state[keyA].heightPx + deltaY;
