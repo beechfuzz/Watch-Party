@@ -18,6 +18,7 @@ These must never be silently violated. If a change requires bending one, stop an
 - **Watch Party never proxies, caches, or transcodes media.** The server hands back an Emby-constructed playback URL; the participant's own browser streams directly from Emby using that participant's own token. No media bytes ever pass through this server.
 - **Emby credentials, tokens, session cookies, and authenticated playback URLs are never logged — at any log level, including debug.** There is no automated redaction; this is enforced by not putting these values in a log call in the first place. Before adding a log statement near auth, sessions, or `emby.Client`, check what you're passing.
 - **Media authorization is re-validated per participant, for whatever item is currently loaded — not inherited from the host, and not just checked once at join.** A party's current item can change after join (playlist advance, or a host selecting a different item), so the check re-fires every time it does, at the point each participant fetches a playback URL for it (`handlePlaybackURL`) — not only at the join-time gate, which only covers the item current *at that moment*. Being the host, or another member already having access, never implicitly grants anyone else access to an item they couldn't already see in Emby themselves.
+- **Every party mutation is host-gated, except chat send.** `HandleControl`, `HandleHostTransfer`, every playlist mutation, and `UpdateSettings` all check `userID == p.hostUserID`. Chat (`HandleChatSend`) is the sole, deliberate exception — authorized by party membership instead, because it doesn't touch playback state, the playlist, or Emby (see `ARCHITECTURE.md` §12.3). Don't extend membership-only authorization to any other mutation without equally deliberate design and a documented reason — the host-only pattern is the default for a reason.
 
 ## Where things live
 
@@ -48,7 +49,7 @@ go run ./cmd/server                                          # needs env vars fr
 go build ./...
 go test ./...                                                 # unit + integration tests
 go test -race ./...
-node --test internal/webassets/web/static/js/*.test.mjs       # frontend JS tests: sync math (mirrors internal/syncalg), playlist selection logic, native-pause/ended event forwarding
+node --test internal/webassets/web/static/js/*.test.mjs       # frontend JS tests: sync math (mirrors internal/syncalg), playlist selection logic, chat validation/truncation, native-pause/ended event forwarding
 docker compose up -d --build                                  # or: podman quadlet, see watchparty.container
 ```
 

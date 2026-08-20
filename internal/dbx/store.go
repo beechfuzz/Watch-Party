@@ -565,3 +565,71 @@ func (s *Store) GetPlaybackState(ctx context.Context, partyID string) (*Playback
 	}
 	return &st, nil
 }
+
+// --- chat ---
+
+// AddChatMessage persists one chat message, assigning its id and returning
+// the full row for the caller to broadcast. Called by the party actor
+// between two do() dispatches, the same two-phase pattern AddPlaylistItem
+// already established for a mutation that needs a blocking SQLite write but
+// must never block the actor goroutine on it.
+func (s *Store) AddChatMessage(ctx context.Context, partyID, userID, body string, sentAt time.Time) (*ChatMessage, error) {
+	res, err := s.db.ExecContext(ctx, `
+		INSERT INTO chat_messages (party_id, user_id, body, sent_at)
+		VALUES (?, ?, ?, ?)
+	`, partyID, userID, body, timeStr(sentAt))
+	if err != nil {
+		return nil, fmt.Errorf("dbx: add chat message: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return nil, fmt.Errorf("dbx: add chat message: %w", err)
+	}
+	return &ChatMessage{ID: id, PartyID: partyID, UserID: userID, Body: body, SentAt: sentAt}, nil
+}
+
+// ListChatMessages returns a party's chat history, oldest first, capped at
+// the most recent limit messages -- chat is ephemeral (wiped at party end,
+// see DeleteChatMessages/Party.End) and this app's scale (~20 concurrent
+// users per party) doesn't call for real pagination, so a fixed recent
+// window is simpler than a cursor API and was chosen deliberately over one.
+func (s *Store) ListChatMessages(ctx context.Context, partyID string, limit int) ([]ChatMessage, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, party_id, user_id, body, sent_at FROM (
+			SELECT id, party_id, user_id, body, sent_at
+			FROM chat_messages WHERE party_id = ? ORDER BY id DESC LIMIT ?
+		) ORDER BY id ASC
+	`, partyID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("dbx: list chat messages: %w", err)
+	}
+	defer rows.Close()
+	var out []ChatMessage
+	for rows.Next() {
+		var m ChatMessage
+		var sentAt string
+		if err := rows.Scan(&m.ID, &m.PartyID, &m.UserID, &m.Body, &sentAt); err != nil {
+			return nil, fmt.Errorf("dbx: scan chat message: %w", err)
+		}
+		t, err := parseTime(sentAt)
+		if err != nil {
+			return nil, fmt.Errorf("dbx: scan chat message: %w", err)
+		}
+		m.SentAt = t
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// DeleteChatMessages wipes a party's entire chat history -- called from
+// Party.End, the single path every way a party ends (explicit "End Party"
+// and the inactivity sweep alike) funnels through, per this app's retention
+// rule that chat never outlives the party it belongs to. Party rows
+// themselves are never deleted (status just becomes 'ended'), so this can't
+// ride an ON DELETE CASCADE off the party row -- it has to be explicit.
+func (s *Store) DeleteChatMessages(ctx context.Context, partyID string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM chat_messages WHERE party_id = ?`, partyID); err != nil {
+		return fmt.Errorf("dbx: delete chat messages: %w", err)
+	}
+	return nil
+}

@@ -10,12 +10,22 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/beechfuzz/watch-party/internal/dbx"
 	"github.com/beechfuzz/watch-party/internal/syncalg"
 	"github.com/beechfuzz/watch-party/internal/wsproto"
 )
+
+// MaxChatMessageLength is the maximum chat message length, in runes (not
+// bytes -- a multi-byte emoji would otherwise silently count for more than
+// the client's own UTF-16-code-unit-based maxlength check). Kept in sync
+// with the client's own limit by convention, not a shared build step -- this
+// project has none, per CLAUDE.md's tech stack (sync math is mirrored the
+// same way, not shared).
+const MaxChatMessageLength = 300
 
 var (
 	ErrNotHost                 = errors.New("party: user is not host")
@@ -25,6 +35,9 @@ var (
 	ErrPlaylistItemNotFound    = errors.New("party: playlist item not found")
 	ErrCannotRemoveCurrentItem = errors.New("party: cannot remove the currently-playing playlist item")
 	ErrInvalidReorder          = errors.New("party: reorder must include exactly the current playlist item ids")
+	ErrChatMessageEmpty        = errors.New("party: chat message is empty")
+	ErrChatMessageTooLong      = errors.New("party: chat message exceeds max length")
+	ErrChatRateLimited         = errors.New("party: chat rate limit exceeded")
 )
 
 // Conn is the minimal interface the actor needs to push frames to a
@@ -196,6 +209,13 @@ type Party struct {
 	settings           Settings
 	pending            *pendingTransition // non-nil while counting down to an automatic advance/idle
 	pendingTimer       *time.Timer        // fires onPendingTransitionFired; nil when pending is nil
+
+	// chatLimiters holds one rate-limit bucket per user who has ever sent a
+	// chat message in this party, keyed by userID and never removed for the
+	// actor's lifetime (not on Leave/Disconnect/rejoin) -- see chatlimit.go
+	// for why that persistence is load-bearing, not incidental. Discarded
+	// along with the rest of this Party's state when the actor stops.
+	chatLimiters map[string]*chatBucket
 }
 
 func newParty(id, name, hostUserID string, initial State, current *currentItem, playlist []dbx.PlaylistItem, settings Settings, store *dbx.Store, tuning Tuning, logger *slog.Logger, events chan<- Event) *Party {
@@ -358,6 +378,23 @@ func (p *Party) broadcastPlaylistUpdated() {
 		return
 	}
 	env := wsproto.Envelope{ProtocolVersion: wsproto.ProtocolVersion, Type: wsproto.MsgPlaylistUpdated, Payload: payload}
+	for _, m := range p.members {
+		if m.conn != nil {
+			m.conn.Send(env)
+		}
+	}
+}
+
+func (p *Party) broadcastChatMessage(msg dbx.ChatMessage) {
+	payload, err := json.Marshal(wsproto.ChatMessagePayload{
+		ID: msg.ID, UserID: msg.UserID, Body: msg.Body,
+		SentAt: msg.SentAt.UTC().Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		p.logger.Error("marshal chat message broadcast failed", "party_id", p.ID, "error", err)
+		return
+	}
+	env := wsproto.Envelope{ProtocolVersion: wsproto.ProtocolVersion, Type: wsproto.MsgChatMessage, Payload: payload}
 	for _, m := range p.members {
 		if m.conn != nil {
 			m.conn.Send(env)
@@ -941,6 +978,88 @@ func (p *Party) checkHostAuthorized(userID string) error {
 	return outErr
 }
 
+// HandleChatSend is the first mutation in this codebase authorized by mere
+// party membership rather than host status -- see ARCHITECTURE.md's Party
+// chat section for why chat gets this narrower tier instead of extending
+// (or bypassing) the host-only pattern every other mutation uses: chat
+// doesn't touch playback state, the playlist, or Emby, so gating it to the
+// host would defeat the feature's whole point.
+//
+// The p.members[userID] check below is defense-in-depth, not the primary
+// guarantee: a chat_send can only reach this method today via an already-
+// Join-validated, already-Origin-checked WebSocket connection (see
+// httpapi/ws.go's dispatchWSMessage), so the connection lifecycle already
+// makes a foreign userID unreachable in practice. It's checked explicitly
+// anyway, for the same reason HandleControl checks host status even though
+// it's reached the same structurally-gated way: every other mutation in
+// this codebase performs its own runtime authorization check regardless of
+// how it's called, rather than relying solely on caller discipline one
+// layer up -- chat's authorization tier is narrower (membership, not
+// host), but the *pattern* of checking it explicitly, inside the actor,
+// should still hold. TestHandleChatSend_NeverJoinedRejected pins this
+// directly by calling HandleChatSend with a userID that never called Join.
+//
+// Follows the exact two-phase dispatch pattern AddPlaylistItem established:
+// authorize/validate/rate-limit fast and IO-free inside the actor, then the
+// blocking SQLite write happens in the caller's goroutine (never inside
+// do()), then a second fast dispatch broadcasts the assigned id/timestamp.
+// Length is checked in runes, not bytes, so multi-byte characters count the
+// same way a client's own length check would. An over-length message is
+// rejected with an error frame to the sender (a compliant client's own
+// maxlength should make this unreachable, so hitting it server-side means a
+// bypassed/buggy client -- worth surfacing). A message that fails the rate
+// limit is dropped silently, with no error frame: a compliant client's own
+// local post-send throttle means this is essentially only ever hit by an
+// actual flood (or a same-account multi-tab edge case), and echoing an
+// error back to a flooding client would just hand it a fast tuning signal
+// for its send rate -- the same posture HandleEndedHint already takes
+// toward a spoofed/stale hint ("simply a no-op").
+func (p *Party) HandleChatSend(ctx context.Context, userID, body string) error {
+	trimmed := strings.TrimSpace(body)
+	var outErr error
+	var accepted bool
+	p.do(func() {
+		if p.ended {
+			outErr = ErrPartyEnded
+			return
+		}
+		if _, ok := p.members[userID]; !ok {
+			outErr = ErrNotMember
+			return
+		}
+		if trimmed == "" {
+			outErr = ErrChatMessageEmpty
+			p.sendError(p.members[userID], wsproto.ErrCodeBadRequest, "chat message cannot be empty")
+			return
+		}
+		if utf8.RuneCountInString(trimmed) > MaxChatMessageLength {
+			outErr = ErrChatMessageTooLong
+			p.sendError(p.members[userID], wsproto.ErrCodeChatMessageLong, fmt.Sprintf("chat messages are limited to %d characters", MaxChatMessageLength))
+			return
+		}
+		if !p.allowChatSend(userID, time.Now()) {
+			outErr = ErrChatRateLimited // dropped silently -- see doc comment above
+			return
+		}
+		accepted = true
+	})
+	if !accepted {
+		return outErr
+	}
+
+	msg, err := p.store.AddChatMessage(ctx, p.ID, userID, trimmed, time.Now())
+	if err != nil {
+		return err
+	}
+	p.do(func() {
+		if p.ended {
+			return
+		}
+		p.broadcastChatMessage(*msg)
+	})
+	return nil
+}
+
 // AddPlaylistItem appends itemID (with its Emby-reported durationTicks,
 // fetched by the caller before invoking this — the actor itself has no
 // Emby access, by design) to the end of the party's queue. Host-only, like
@@ -1220,6 +1339,16 @@ func (p *Party) End(ctx context.Context) error {
 	}
 	if err := p.store.UpdatePartyStatus(ctx, p.ID, dbx.PartyStatusEnded); err != nil {
 		outErr = err
+	}
+	// Chat history never outlives the party it belongs to (see
+	// ARCHITECTURE.md's Party chat retention section) -- this is the single
+	// path every way a party ends funnels through (Hub.EndParty, called by
+	// both the explicit "End Party" handler and SweepInactiveParties), so
+	// there's exactly one place this needs to be hooked in. Log-and-continue
+	// rather than folding into outErr: a party failing to fully end because
+	// chat cleanup hiccuped would be worse than a rare leftover row.
+	if err := p.store.DeleteChatMessages(ctx, p.ID); err != nil {
+		p.logger.Error("delete chat messages on party end failed", "party_id", p.ID, "error", err)
 	}
 	p.emit(Event{Type: EventEnded, ItemID: finalItemID, PositionTicks: finalPosition, IsPlaying: finalIsPlaying})
 	return outErr

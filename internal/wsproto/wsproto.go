@@ -48,6 +48,17 @@ const (
 	// token (same per-viewer-resolution pattern used elsewhere).
 	MsgPlaylistUpdated MessageType = "playlist_updated"
 
+	// Chat events -- a new category, distinct from the four above: unlike
+	// Control events, chat_send is authorized by party *membership*, not
+	// host status (the first mutation in this codebase's WS protocol that
+	// isn't host-gated -- see ARCHITECTURE.md's Party chat section for why
+	// chat doesn't need the host-only tier every other mutation uses).
+	// Unlike an Observation event, chat_send has real authority of its own:
+	// once accepted it's persisted and becomes part of the party's chat
+	// history, not just a hint the server may or may not act on.
+	MsgChatSend    MessageType = "chat_send"    // client -> server
+	MsgChatMessage MessageType = "chat_message" // server -> broadcast
+
 	// Server -> client informational.
 	MsgError MessageType = "error"
 )
@@ -176,6 +187,24 @@ type PlaylistUpdatedPayload struct {
 	Items []PlaylistItemRef `json:"items"`
 }
 
+// ChatSendPayload is the client's request to post a chat message. The
+// server independently re-validates length and rate limit -- this is never
+// trusted as-is, per this codebase's "the server is authoritative" posture.
+type ChatSendPayload struct {
+	Body string `json:"body"`
+}
+
+// ChatMessagePayload is the server-assigned, broadcast form of a chat
+// message. Deliberately carries no display name or avatar -- clients
+// resolve sender identity live, per their own Emby token, from UserID (see
+// ARCHITECTURE.md's Party chat section).
+type ChatMessagePayload struct {
+	ID     int64  `json:"id"`
+	UserID string `json:"user_id"`
+	Body   string `json:"body"`
+	SentAt string `json:"sent_at"` // RFC3339Nano
+}
+
 type JoinPayload struct {
 	UserID string `json:"user_id"`
 }
@@ -191,9 +220,10 @@ type ErrorPayload struct {
 
 // Error codes returned in ErrorPayload.Code.
 const (
-	ErrCodeNotHost      = "not_host"
-	ErrCodeInvalidState = "invalid_state"
-	ErrCodePartyEnded   = "party_ended"
-	ErrCodeBadRequest   = "bad_request"
-	ErrCodeUnauthorized = "unauthorized"
+	ErrCodeNotHost         = "not_host"
+	ErrCodeInvalidState    = "invalid_state"
+	ErrCodePartyEnded      = "party_ended"
+	ErrCodeBadRequest      = "bad_request"
+	ErrCodeUnauthorized    = "unauthorized"
+	ErrCodeChatMessageLong = "chat_message_too_long"
 )

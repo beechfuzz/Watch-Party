@@ -86,20 +86,21 @@
 
       <div class="sidebar-resize-handle" data-resize-a="playlist" data-resize-b="chat" title="Drag to resize"></div>
 
-      <div class="chat-block is-coming-soon sidebar-block" data-panel-key="chat">
+      <div class="chat-block sidebar-block" data-panel-key="chat">
         <button type="button" class="sidebar-block-header" data-panel-toggle="chat">
           <h4>Chat</h4>
-          <span class="coming-soon-badge">Coming Soon</span>
           <svg class="panel-chevron" viewBox="0 0 24 24" fill="none"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
         <div class="sidebar-block-body">
-          <div class="chat-messages">
-            <svg viewBox="0 0 24 24" fill="none"><path d="M4 12l16-7-6 16-2.5-7L4 12z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>
-            <span>Chat is coming soon</span>
+          <div class="chat-messages" id="chat-messages">
+            <div class="chat-empty">
+              <svg viewBox="0 0 24 24" fill="none"><path d="M4 12l16-7-6 16-2.5-7L4 12z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>
+              <span>No messages yet — say hello!</span>
+            </div>
           </div>
           <div class="chat-input-row">
-            <input type="text" placeholder="Type a message…" disabled>
-            <button class="chat-send-btn" disabled title="Coming soon">
+            <input type="text" id="chat-input" placeholder="Type a message…" maxlength="300">
+            <button class="chat-send-btn" id="chat-send-btn" title="Send">
               <svg viewBox="0 0 24 24" fill="none"><path d="M4 12l16-7-6 16-2.5-7L4 12z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
             </button>
           </div>

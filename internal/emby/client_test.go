@@ -605,3 +605,70 @@ func TestGetItem_ParsesRunTimeTicks(t *testing.T) {
 		t.Errorf("item = %+v", item)
 	}
 }
+
+func TestGetUser_ParsesProfileAndPrimaryImageTag(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/Users/user-2" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(map[string]any{"Id": "user-2", "Name": "Jamie", "PrimaryImageTag": "abc123"})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	u, err := c.GetUser(context.Background(), "tok", "user-2")
+	if err != nil {
+		t.Fatalf("GetUser: %v", err)
+	}
+	if u.ID != "user-2" || u.Name != "Jamie" || !u.HasPrimaryImage {
+		t.Errorf("user = %+v, want {user-2 Jamie true}", u)
+	}
+}
+
+func TestGetUser_NoPrimaryImageTag_HasPrimaryImageFalse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"Id": "user-3", "Name": "Alex", "PrimaryImageTag": ""})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	u, err := c.GetUser(context.Background(), "tok", "user-3")
+	if err != nil {
+		t.Fatalf("GetUser: %v", err)
+	}
+	if u.HasPrimaryImage {
+		t.Error("HasPrimaryImage = true, want false for a user with no PrimaryImageTag")
+	}
+}
+
+func TestGetUser_Unauthorized(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	if _, err := c.GetUser(context.Background(), "bad-tok", "user-2"); err != ErrUnauthorized {
+		t.Errorf("err = %v, want ErrUnauthorized", err)
+	}
+}
+
+func TestUserImageURL_CarriesAPIKeyAndUsesPublicBaseURL(t *testing.T) {
+	c := NewClient("http://internal-only:8096")
+	c.SetPublicBaseURL("https://public.example.com")
+
+	got := c.UserImageURL("user-2", "tok-xyz")
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Host != "public.example.com" {
+		t.Errorf("host = %q, want the public base URL, not the internal one", u.Host)
+	}
+	if u.Query().Get("api_key") != "tok-xyz" {
+		t.Errorf("api_key = %q, want the requesting user's own token", u.Query().Get("api_key"))
+	}
+	if u.Path != "/Users/user-2/Images/Primary" {
+		t.Errorf("path = %q", u.Path)
+	}
+}

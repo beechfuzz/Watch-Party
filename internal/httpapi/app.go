@@ -49,6 +49,8 @@ func RegisterRoutes(mux *http.ServeMux, app *App) {
 	mux.HandleFunc("POST /api/parties/{id}/host-transfer", app.withAuth(app.withCSRF(app.handleHostTransfer)))
 	mux.HandleFunc("PUT /api/parties/{id}/settings", app.withAuth(app.withCSRF(app.handleUpdatePartySettings)))
 
+	mux.HandleFunc("GET /api/parties/{id}/chat", app.withAuth(app.handleGetChatHistory))
+
 	mux.HandleFunc("GET /api/parties/{id}/playlist", app.withAuth(app.handleGetPlaylist))
 	mux.HandleFunc("POST /api/parties/{id}/playlist/batch", app.withAuth(app.withCSRF(app.handleBatchAddPlaylistItems)))
 	mux.HandleFunc("DELETE /api/parties/{id}/playlist/{itemId}", app.withAuth(app.withCSRF(app.handleRemovePlaylistItem)))
@@ -56,6 +58,7 @@ func RegisterRoutes(mux *http.ServeMux, app *App) {
 	mux.HandleFunc("POST /api/parties/{id}/playlist/{itemId}/play", app.withAuth(app.withCSRF(app.handleSelectPlaylistItem)))
 
 	mux.HandleFunc("GET /api/emby/items", app.withAuth(app.handleBrowseEmbyItems))
+	mux.HandleFunc("GET /api/emby/users/{id}", app.withAuth(app.handleGetEmbyUser))
 	mux.HandleFunc("GET /api/emby/series/{id}/seasons", app.withAuth(app.handleListSeasons))
 	mux.HandleFunc("GET /api/emby/seasons/{id}/episodes", app.withAuth(app.handleListEpisodes))
 

@@ -83,6 +83,20 @@ type PartyMember struct {
 	LastReportedAt            *time.Time
 }
 
+// ChatMessage is one persisted party chat message. Deliberately carries no
+// display name or avatar -- sender identity is resolved live, per the
+// *viewing* participant's own Emby token, the same per-viewer pattern
+// GetItem/ImageURL already use for playlist metadata (see ARCHITECTURE.md's
+// Party chat section). Rows are deleted in bulk the moment a party ends
+// (Party.End), so nothing here needs to outlive an active party.
+type ChatMessage struct {
+	ID      int64
+	PartyID string
+	UserID  string
+	Body    string
+	SentAt  time.Time
+}
+
 type ClientType string
 
 const (

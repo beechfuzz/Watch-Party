@@ -16,6 +16,9 @@ import (
 	"testing"
 	"time"
 
+	"nhooyr.io/websocket"
+	"nhooyr.io/websocket/wsjson"
+
 	"github.com/beechfuzz/watch-party/internal/cryptox"
 	"github.com/beechfuzz/watch-party/internal/dbx"
 	"github.com/beechfuzz/watch-party/internal/emby"
@@ -1063,5 +1066,293 @@ func TestWebSocket_OriginRejected(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("status = %d, want 403 for a disallowed Origin", resp.StatusCode)
+	}
+}
+
+// --- chat: real WebSocket wire integration ---
+//
+// Everything above this point that exercises chat (chat_test.go's
+// HandleChatSend-level tests, and handleGetChatHistory/handleGetEmbyUser
+// above) either calls Party.HandleChatSend directly or hits a REST
+// endpoint -- neither goes anywhere near the actual WebSocket wire: real
+// JSON envelope framing, ws.go's dispatchWSMessage switch, or a real
+// nhooyr.io/websocket connection. This section is the one place that does,
+// following this codebase's only prior WS-level test (TestWebSocket_OriginRejected
+// above) as far as connection setup goes, but going further -- that test
+// never completes a real handshake or exchanges a message. No dedicated WS
+// integration-test harness existed anywhere in this codebase before this
+// (confirmed: no other _test.go file in this repo's history ever called
+// websocket.Dial) -- SPEC.md's own "Integration tests" line for play/pause/
+// seek is explicitly scoped as "against the real party actor
+// (internal/party/party_test.go)," i.e. the same fakeConn-based pattern
+// chat_test.go already follows, not a wire-level one. This test is a new
+// pattern for the codebase, not a pre-existing one being followed.
+
+// dialPartyWS opens a real WebSocket connection to partyID as c's
+// authenticated user, reusing c's cookie-jar-bearing http.Client so the
+// handshake carries the same session cookie an HTTP request from c would.
+func dialPartyWS(t *testing.T, srv *httptest.Server, c *testClient, partyID string) *websocket.Conn {
+	t.Helper()
+	wsURL := "ws://" + strings.TrimPrefix(srv.URL, "http://") + "/ws/parties/" + partyID
+	conn, _, err := websocket.Dial(context.Background(), wsURL, &websocket.DialOptions{
+		HTTPClient: c.http,
+		HTTPHeader: http.Header{"Origin": []string{"http://test-origin.example"}}, // matches newTestAppWithEmby's AppOrigins
+	})
+	if err != nil {
+		t.Fatalf("dial party websocket: %v", err)
+	}
+	t.Cleanup(func() { conn.Close(websocket.StatusNormalClosure, "") })
+	return conn
+}
+
+// readUntilType reads envelopes off conn until one of the given type
+// arrives (or the deadline expires), discarding everything else along the
+// way -- necessary because the party actor's periodic snapshot ticker
+// (50ms in these tests, see newTestAppWithEmby's Tuning) can interleave its
+// own snapshot broadcasts with the chat_message this test is waiting for,
+// same as a real client's connection would see in production.
+func readUntilType(t *testing.T, conn *websocket.Conn, want wsproto.MessageType, timeout time.Duration) wsproto.Envelope {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	for {
+		var env wsproto.Envelope
+		if err := wsjson.Read(ctx, conn, &env); err != nil {
+			t.Fatalf("read websocket message (waiting for %q): %v", want, err)
+		}
+		if env.Type == want {
+			return env
+		}
+	}
+}
+
+// TestWebSocket_ChatSend_BroadcastsOverRealSocket is this codebase's first
+// real WS-wire-level test: two independent nhooyr.io/websocket client
+// connections (not Party.HandleChatSend called directly, not a fakeConn)
+// against a real httptest.Server running the actual RegisterRoutes mux.
+// Alice sends a real chat_send envelope, JSON-marshaled exactly as a
+// browser client would; the assertion is that both Alice's own connection
+// and Bob's separate connection receive a chat_message envelope back,
+// JSON-unmarshaled on this end exactly as a browser client would, with the
+// correct user_id/body -- proving internal/httpapi/ws.go's real
+// case wsproto.MsgChatSend dispatch arm and the resulting broadcast, not
+// just the internal/party actor logic underneath it.
+func TestWebSocket_ChatSend_BroadcastsOverRealSocket(t *testing.T) {
+	app, srv := newTestApp(t)
+	alice := loginTestClient(t, srv)
+	_, created := alice.do("POST", "/api/parties", map[string]string{"name": "Movie Night"}, true)
+	partyID := created["party_id"].(string)
+	bob := bobSession(t, app, srv)
+
+	aliceConn := dialPartyWS(t, srv, alice, partyID)
+	readUntilType(t, aliceConn, wsproto.MsgSnapshot, 2*time.Second) // initial snapshot sent on join
+
+	bobConn := dialPartyWS(t, srv, bob, partyID)
+	readUntilType(t, bobConn, wsproto.MsgSnapshot, 2*time.Second)
+
+	sendPayload, err := json.Marshal(wsproto.ChatSendPayload{Body: "hello over the wire"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := wsjson.Write(writeCtx, aliceConn, wsproto.Envelope{
+		ProtocolVersion: wsproto.ProtocolVersion, Type: wsproto.MsgChatSend, Payload: sendPayload,
+	}); err != nil {
+		t.Fatalf("write chat_send: %v", err)
+	}
+
+	for name, conn := range map[string]*websocket.Conn{"alice (sender)": aliceConn, "bob (other member)": bobConn} {
+		env := readUntilType(t, conn, wsproto.MsgChatMessage, 3*time.Second)
+		var msg wsproto.ChatMessagePayload
+		if err := json.Unmarshal(env.Payload, &msg); err != nil {
+			t.Fatalf("%s: decode chat_message payload: %v", name, err)
+		}
+		if msg.UserID != "user-alice" {
+			t.Errorf("%s: chat_message user_id = %q, want %q", name, msg.UserID, "user-alice")
+		}
+		if msg.Body != "hello over the wire" {
+			t.Errorf("%s: chat_message body = %q, want %q", name, msg.Body, "hello over the wire")
+		}
+		if msg.ID == 0 {
+			t.Errorf("%s: chat_message id was not assigned", name)
+		}
+	}
+}
+
+// --- chat: history endpoint ---
+
+func TestHandleGetChatHistory_ReturnsMessagesOldestFirstWithNoIdentity(t *testing.T) {
+	app, srv := newTestApp(t)
+	c := loginTestClient(t, srv)
+	_, created := c.do("POST", "/api/parties", map[string]string{"name": "Movie Night"}, true)
+	partyID := created["party_id"].(string)
+
+	p, ok := app.Hub.Get(partyID)
+	if !ok {
+		t.Fatal("party not found in hub")
+	}
+	// Creating a party makes the caller its host but not yet a p.members
+	// entry -- that only happens on Join (normally at WS-connect time).
+	// HandleChatSend now defense-in-depth-checks membership, so this test's
+	// direct call needs the same Join a real sender's WS connection would
+	// have already done.
+	if _, err := p.Join("user-alice", "Alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.HandleChatSend(context.Background(), "user-alice", "first"); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.HandleChatSend(context.Background(), "user-alice", "second"); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, body := c.do("GET", "/api/parties/"+partyID+"/chat", nil, false)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d body=%v", resp.StatusCode, body)
+	}
+	messages, ok := body["messages"].([]any)
+	if !ok || len(messages) != 2 {
+		t.Fatalf("messages = %v, want 2 entries", body["messages"])
+	}
+	first, _ := messages[0].(map[string]any)
+	if first["body"] != "first" || first["user_id"] != "user-alice" {
+		t.Errorf("first message = %v, want body=first user_id=user-alice", first)
+	}
+	second, _ := messages[1].(map[string]any)
+	if second["body"] != "second" {
+		t.Errorf("second message = %v, want body=second (oldest first)", second)
+	}
+	// The whole point: no display name or avatar ships on this response --
+	// the client resolves identity separately, per its own token.
+	if _, present := first["display_name"]; present {
+		t.Error("chat history response must not carry a display_name -- identity is resolved client-side, per viewer")
+	}
+	if _, present := first["avatar_url"]; present {
+		t.Error("chat history response must not carry an avatar_url")
+	}
+}
+
+func TestHandleGetChatHistory_PartyEnded(t *testing.T) {
+	app, srv := newTestApp(t)
+	c := loginTestClient(t, srv)
+	_, created := c.do("POST", "/api/parties", map[string]string{"name": "Movie Night"}, true)
+	partyID := created["party_id"].(string)
+	if err := app.Hub.EndParty(context.Background(), partyID); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, body := c.do("GET", "/api/parties/"+partyID+"/chat", nil, false)
+	if resp.StatusCode != http.StatusGone {
+		t.Fatalf("status = %d body=%v, want 410", resp.StatusCode, body)
+	}
+}
+
+func TestHandleGetChatHistory_NotFound(t *testing.T) {
+	_, srv := newTestApp(t)
+	c := loginTestClient(t, srv)
+	resp, _ := c.do("GET", "/api/parties/does-not-exist/chat", nil, false)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+// --- chat: sender identity resolution ---
+
+// newFakeEmbyWithUserProfile serves auth plus GET /Users/{id} for a fixed
+// set of profiles -- the endpoint handleGetEmbyUser calls with the
+// *viewer's* own token to resolve a chat message's sender identity.
+func newFakeEmbyWithUserProfile(t *testing.T, profiles map[string]map[string]any) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/Users/AuthenticateByName", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"AccessToken": "fake-token",
+			"User":        map[string]string{"Id": "user-alice", "Name": "Alice"},
+		})
+	})
+	for id, profile := range profiles {
+		p := profile
+		mux.HandleFunc("/Users/"+id, func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode(p)
+		})
+	}
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestHandleGetEmbyUser_ResolvesDisplayNameAndAvatar(t *testing.T) {
+	fakeEmbySrv := newFakeEmbyWithUserProfile(t, map[string]map[string]any{
+		"user-bob": {"Id": "user-bob", "Name": "Bobby", "PrimaryImageTag": "tag123"},
+	})
+	app, srv := newTestAppWithEmby(t, emby.NewClient(fakeEmbySrv.URL))
+	alice := loginTestClient(t, srv)
+	if err := app.Store.UpsertUser(context.Background(), "user-bob", "Bob (cached)", "enc", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, body := alice.do("GET", "/api/emby/users/user-bob", nil, false)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d body=%v", resp.StatusCode, body)
+	}
+	if body["display_name"] != "Bobby" {
+		t.Errorf("display_name = %v, want the live Emby name, not the cached one", body["display_name"])
+	}
+	avatarURL, _ := body["avatar_url"].(string)
+	if avatarURL == "" || !strings.Contains(avatarURL, "user-bob") {
+		t.Errorf("avatar_url = %q, want a URL for user-bob's avatar", avatarURL)
+	}
+}
+
+func TestHandleGetEmbyUser_NoPrimaryImage_EmptyAvatarURL(t *testing.T) {
+	fakeEmbySrv := newFakeEmbyWithUserProfile(t, map[string]map[string]any{
+		"user-bob": {"Id": "user-bob", "Name": "Bobby", "PrimaryImageTag": ""},
+	})
+	_, srv := newTestAppWithEmby(t, emby.NewClient(fakeEmbySrv.URL))
+	alice := loginTestClient(t, srv)
+
+	resp, body := alice.do("GET", "/api/emby/users/user-bob", nil, false)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d body=%v", resp.StatusCode, body)
+	}
+	if body["avatar_url"] != "" {
+		t.Errorf("avatar_url = %v, want empty string when the user has no PrimaryImageTag", body["avatar_url"])
+	}
+}
+
+// If Emby rejects/can't serve the profile lookup (e.g. a server that
+// restricts /Users/{id} to admins -- see emby.Client.GetUser's doc
+// comment), the endpoint must still return 200 with a usable fallback
+// identity, not fail the whole chat message.
+func TestHandleGetEmbyUser_FallsBackToLocalDisplayNameOnEmbyFailure(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/Users/AuthenticateByName", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"AccessToken": "fake-token",
+			"User":        map[string]string{"Id": "user-alice", "Name": "Alice"},
+		})
+	})
+	mux.HandleFunc("/Users/user-bob", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden) // simulates an Emby server that restricts this to admins
+	})
+	fakeEmbySrv := httptest.NewServer(mux)
+	t.Cleanup(fakeEmbySrv.Close)
+
+	app, srv := newTestAppWithEmby(t, emby.NewClient(fakeEmbySrv.URL))
+	alice := loginTestClient(t, srv)
+	if err := app.Store.UpsertUser(context.Background(), "user-bob", "Bob (cached)", "enc", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, body := alice.do("GET", "/api/emby/users/user-bob", nil, false)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d body=%v, want 200 even when Emby's own lookup fails", resp.StatusCode, body)
+	}
+	if body["display_name"] != "Bob (cached)" {
+		t.Errorf("display_name = %v, want fallback to the locally-cached name", body["display_name"])
+	}
+	if body["avatar_url"] != "" {
+		t.Errorf("avatar_url = %v, want empty on fallback", body["avatar_url"])
 	}
 }
