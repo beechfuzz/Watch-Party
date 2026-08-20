@@ -34,7 +34,7 @@
 
   <div class="party-layout">
     <div class="player-col">
-      <div class="player-frame">
+      <div class="player-frame" id="player-frame">
         <video id="video" playsinline controls></video>
         <div class="player-idle" id="player-idle" hidden>
           <svg viewBox="0 0 24 24" fill="none"><path d="M4 12l16-7-6 16-2.5-7L4 12z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>
@@ -43,6 +43,19 @@
         </div>
         <div class="next-item-banner" id="next-item-banner" hidden>
           <span id="next-item-banner-text"></span>
+        </div>
+        <div class="chat-overlay" id="chat-overlay" hidden>
+          <button type="button" class="chat-overlay-dismiss" id="chat-overlay-dismiss" title="Dismiss" aria-label="Dismiss">
+            <svg viewBox="0 0 24 24" fill="none"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+          </button>
+          <div class="chat-overlay-sender" id="chat-overlay-sender"></div>
+          <div class="chat-overlay-text" id="chat-overlay-text"></div>
+          <form class="chat-overlay-reply-row" id="chat-overlay-reply-form">
+            <input type="text" id="chat-overlay-reply-input" placeholder="Reply…" maxlength="300" autocomplete="off">
+            <button type="submit" class="chat-overlay-reply-btn" title="Send" aria-label="Send">
+              <svg viewBox="0 0 24 24" fill="none"><path d="M4 12l16-7-6 16-2.5-7L4 12z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+            </button>
+          </form>
         </div>
       </div>
 

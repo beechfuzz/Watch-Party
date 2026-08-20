@@ -381,9 +381,25 @@ dialog h3 { font-family: var(--font-display); font-size: 16px; font-weight: 600;
   background: linear-gradient(155deg, #1A1F2A, #0C0F15);
   border: 1px solid var(--border-subtle); overflow: hidden;
 }
+/* object-fit:contain (not the default fill) matters more now that
+   .player-frame -- a plain div -- is the fullscreen target instead of
+   <video> itself (see fullscreenBtn's click handler in player.js): a
+   fullscreened <video> gets special browser handling that letterboxes to
+   preserve its aspect ratio automatically, but a fullscreened div has no
+   such built-in behavior, so without this the video would stretch to fill
+   a differently-proportioned screen instead of staying letterboxed. Applies
+   equally in the normal in-page (non-fullscreen) case, which was already
+   safe since .player-frame's own aspect-ratio:16/9 above happens to match
+   most source video -- contain is strictly safer there too, not just a
+   fullscreen-specific fix. */
 .player-frame video {
-  width: 100%; height: 100%; display: block; background: black; color-scheme: dark;
+  width: 100%; height: 100%; display: block; background: black; color-scheme: dark; object-fit: contain;
 }
+/* Browsers already apply this via their :fullscreen UA stylesheet, but it's
+   asserted explicitly rather than relied upon implicitly -- .player-frame's
+   own aspect-ratio:16/9 above must not constrain it once it's the
+   fullscreen element filling an arbitrarily-proportioned screen. */
+.player-frame:fullscreen { width: 100%; height: 100%; }
 .player-idle {
   width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 10px; text-align: center; color: var(--text-tertiary); padding: 20px;
@@ -400,6 +416,54 @@ dialog h3 { font-family: var(--font-display); font-size: 16px; font-weight: 600;
   white-space: nowrap; pointer-events: none;
 }
 .next-item-banner strong { color: var(--accent-amber); font-family: var(--font-mono); }
+
+/* Fullscreen chat overlay: a small, non-blocking card near the bottom-right
+   of the video, shown by chat-overlay.js when a chat_message arrives while
+   .player-frame is the document's fullscreen element and the message isn't
+   the viewer's own. Positioned/sized the same "absolute child of
+   .player-frame" pattern .next-item-banner already establishes.
+   .is-visible (added/removed by JS, not the hidden attribute alone) drives
+   the slide+fade transition -- toggling `hidden` alone would jump-cut
+   instead of animating. The :not(:fullscreen) rule is a defense-in-depth
+   guard: even if chat-overlay.js's own JS check had a bug, the overlay
+   still physically cannot render outside fullscreen. */
+.player-frame:not(:fullscreen) .chat-overlay { display: none !important; }
+.chat-overlay {
+  position: absolute; right: 20px; bottom: 20px; z-index: 2;
+  width: min(340px, calc(100% - 40px)); padding: 14px 16px;
+  background: rgba(15,18,26,0.86); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+  border: 1px solid var(--border-subtle); border-left: 3px solid var(--accent-teal);
+  border-radius: var(--radius-panel); box-shadow: 0 12px 32px rgba(0,0,0,0.45);
+  opacity: 0; transform: translateY(12px); transition: opacity .2s ease, transform .2s ease;
+  pointer-events: none;
+}
+.chat-overlay.is-visible { opacity: 1; transform: translateY(0); pointer-events: auto; }
+.chat-overlay-dismiss {
+  position: absolute; top: 8px; right: 8px; width: 22px; height: 22px;
+  display: flex; align-items: center; justify-content: center; border-radius: 50%;
+  background: transparent; border: none; color: var(--text-tertiary);
+}
+.chat-overlay-dismiss:hover { color: var(--text-primary); background: rgba(255,255,255,0.06); }
+.chat-overlay-dismiss svg { width: 12px; height: 12px; }
+.chat-overlay-sender {
+  font-family: var(--font-display); font-size: 12.5px; font-weight: 600; color: var(--accent-teal);
+  margin: 0 22px 3px 0;
+}
+.chat-overlay-text { font-size: 13px; color: var(--text-primary); line-height: 1.4; margin: 0 4px 10px 0; overflow-wrap: anywhere; }
+.chat-overlay-reply-row { display: flex; gap: 6px; }
+.chat-overlay-reply-row input {
+  flex: 1; min-width: 0; background: var(--bg-input); border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-control); padding: 7px 10px; color: var(--text-primary);
+  font-size: 12.5px; font-family: var(--font-body);
+}
+.chat-overlay-reply-row input::placeholder { color: var(--text-tertiary); }
+.chat-overlay-reply-btn {
+  width: 30px; height: 30px; flex-shrink: 0; border-radius: var(--radius-control);
+  background: var(--bg-panel-raised); border: 1px solid var(--border-subtle); color: var(--text-tertiary);
+  display: flex; align-items: center; justify-content: center;
+}
+.chat-overlay-reply-btn:hover { color: var(--text-primary); }
+.chat-overlay-reply-btn svg { width: 13px; height: 13px; }
 
 .host-caption { font-size: 12px; color: var(--text-tertiary); margin-top: 12px; }
 .host-caption strong { color: var(--text-secondary); font-weight: 500; }

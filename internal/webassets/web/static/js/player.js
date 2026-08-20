@@ -7,6 +7,7 @@ import { api } from "./api.js";
 import { PartyConnection } from "./ws-client.js";
 import { initPlaylist, loadPlaylist } from "./playlist.js";
 import { initChat, handleIncomingChatMessage } from "./chat.js";
+import { initChatOverlay, handleChatMessageForOverlay } from "./chat-overlay.js";
 import { wireSettingsForm } from "./settingsForm.js";
 import {
   TICKS_PER_SECOND,
@@ -31,6 +32,7 @@ import {
 
 const partyId = window.WATCH_PARTY_ID;
 const video = document.getElementById("video");
+const playerFrame = document.getElementById("player-frame");
 const playerIdleEl = document.getElementById("player-idle");
 const partyTitleEl = document.getElementById("party-title");
 const partySubtitleEl = document.getElementById("party-subtitle");
@@ -301,12 +303,26 @@ function armRecalibration() {
   video.addEventListener("canplay", recalibrateAndReseek, { once: true });
 }
 
+// Fullscreens .player-frame (the existing position:relative wrapper
+// .next-item-banner already overlays) rather than the bare <video> element.
+// The Fullscreen API only keeps the requested element and its descendants
+// rendered while fullscreen -- fullscreening <video> directly, as this used
+// to, would mean the chat overlay (an absolutely-positioned sibling of
+// <video> inside .player-frame, same pattern .next-item-banner already
+// uses) simply wouldn't exist on screen while fullscreen. See
+// ARCHITECTURE.md's Party chat overlay section for what this was verified
+// against in a real browser before landing.
 fullscreenBtn.addEventListener("click", () => {
-  if (video.requestFullscreen) {
-    video.requestFullscreen().catch((err) => showError("Couldn't enter fullscreen: " + err.message));
+  if (playerFrame.requestFullscreen) {
+    playerFrame.requestFullscreen().catch((err) => showError("Couldn't enter fullscreen: " + err.message));
   } else if (video.webkitEnterFullscreen) {
     // iOS Safari: only the <video> element itself can go fullscreen, via
-    // this legacy prefixed method instead of the standard Fullscreen API.
+    // this legacy prefixed method instead of the standard Fullscreen API --
+    // there is no container-fullscreen equivalent on this platform, so the
+    // chat overlay cannot render during iOS native fullscreen. Known,
+    // unavoidable platform limitation, not a bug -- same posture this app
+    // already takes for playlist drag-and-drop's desktop-only limitation
+    // (see ARCHITECTURE.md §9.6).
     video.webkitEnterFullscreen();
   } else {
     showError("Fullscreen isn't supported in this browser.");
@@ -701,7 +717,12 @@ async function main() {
   initPlaylist(partyId, isHost);
   loadPlaylist();
 
-  initChat({ partyId, meUserId: me.user.id, send: (body) => conn && conn.send("chat_send", { body }) });
+  initChatOverlay({ meUserId: me.user.id });
+  initChat({
+    partyId, meUserId: me.user.id,
+    send: (body) => conn && conn.send("chat_send", { body }),
+    onMessage: handleChatMessageForOverlay,
+  });
 
   // See the requestedStartPositionTicks/playbackOffsetTicks declarations
   // above: 0 for direct play/stream, and for transcoded playback the item
