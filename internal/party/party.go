@@ -713,10 +713,17 @@ func (p *Party) AttachConn(userID string, conn Conn) {
 // Disconnect marks userID as disconnected (not left) — a dropped
 // connection is not a departure. If userID is the host, starts the grace
 // period clock.
+//
+// No-ops if the member already has ConnLeft: an explicit Leave can be
+// followed by this same connection's read loop unwinding (its deferred
+// Disconnect call in ws.go), and without this guard that would silently
+// downgrade a deliberate departure back to a transient one — exactly the
+// connected/disconnected/left distinction SPEC.md's "Connection state vs.
+// intent" section exists to preserve.
 func (p *Party) Disconnect(userID string) {
 	p.do(func() {
 		m, ok := p.members[userID]
-		if !ok || p.ended {
+		if !ok || p.ended || m.ConnectionStatus == dbx.ConnLeft {
 			return
 		}
 		m.ConnectionStatus = dbx.ConnDisconnected

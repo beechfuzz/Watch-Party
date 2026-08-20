@@ -18,6 +18,14 @@ import {
 } from "./sync.js";
 import { isRealPause } from "./playback-events.js";
 import { createHlsInstanceManager } from "./hls-source.js";
+import { initSidebar } from "./sidebar.js";
+import {
+  PANEL_KEYS,
+  loadPanelState,
+  serializePanelState,
+  toggleCollapse,
+  resizePanels,
+} from "./sidebar-panels.js";
 
 const partyId = window.WATCH_PARTY_ID;
 const video = document.getElementById("video");
@@ -34,7 +42,6 @@ const pauseBtn = document.getElementById("pause-btn");
 const fullscreenBtn = document.getElementById("fullscreen-btn");
 const inviteBtn = document.getElementById("invite-btn");
 const endBtn = document.getElementById("end-btn");
-const leaveBtn = document.getElementById("leave-btn");
 const errorEl = document.getElementById("error");
 
 const partySettingsBtn = document.getElementById("party-settings-btn");
@@ -57,6 +64,17 @@ const nextItemBannerText = document.getElementById("next-item-banner-text");
 // over the wire, since a mismatched client just corrects a bit more or less
 // aggressively, never incorrectly.
 const thresholds = { softDriftMs: 300, hardDriftMs: 1500, maxRateAdjustment: 0.05 };
+
+// Wired once at module load, like every other top-level listener here.
+// onBeforeNavigate/onLoggedOut are what turn "leave the party page via the
+// sidebar" (a Home click, or signing out) into an explicit leave instead
+// of a silent disconnect -- see leaveCurrentParty below and
+// ARCHITECTURE.md's Persistent sidebar section for why sign-out is
+// included here and back/refresh/tab-close deliberately are not.
+const sidebar = initSidebar({
+  onBeforeNavigate: leaveCurrentParty,
+  onLoggedOut: () => { window.location.href = "/"; },
+});
 
 let me = null;
 let hostUserId = null;
@@ -323,14 +341,23 @@ endBtn.addEventListener("click", async () => {
   window.location.href = "/";
 });
 
-leaveBtn.addEventListener("click", async () => {
+// Called by the sidebar (see initSidebar's onBeforeNavigate above) before
+// it actually navigates away or signs out -- this POST is the same
+// explicit-leave call the old "Leave Party" button used to make directly.
+// Party.Leave sets connection_status to "left" immediately (including an
+// immediate host handoff, no grace-period wait); the subsequent
+// conn.close() is a clean local teardown of this tab's own WebSocket --
+// see Party.Disconnect's ConnLeft guard (party.go) for why the server-side
+// state isn't clobbered back to "disconnected" once that connection
+// actually closes.
+async function leaveCurrentParty() {
   try {
     await api(`/api/parties/${encodeURIComponent(partyId)}/leave`, { method: "POST" });
   } catch {
-    // best-effort; navigate away regardless
+    // best-effort; proceed regardless, same as the old button's behavior
   }
-  window.location.href = "/";
-});
+  if (conn) conn.close();
+}
 
 partySettingsBtn.addEventListener("click", () => {
   partySettingsError.hidden = true;
@@ -356,6 +383,66 @@ partySettingsForm.addEventListener("submit", async (e) => {
     partySettingsError.hidden = false;
   }
 });
+
+// --- right sidebar: independently scrollable, collapsible, resizable panels ---
+// DOM/localStorage glue over sidebar-panels.js's pure state logic. Wired at
+// module load (like the rest of this file's top-level listeners) rather
+// than inside main(), so persisted heights/collapse state apply as soon as
+// the page paints instead of waiting on the /api/me and party-info round
+// trips main() makes first.
+const PANEL_STORAGE_KEY = "watchparty:sidebarPanels";
+
+function applyPanelState(state) {
+  for (const key of PANEL_KEYS) {
+    const block = document.querySelector(`.sidebar-block[data-panel-key="${key}"]`);
+    if (!block) continue;
+    block.classList.toggle("is-collapsed", state[key].collapsed);
+    block.style.flexBasis = state[key].collapsed ? "" : `${state[key].heightPx}px`;
+  }
+  for (const handle of document.querySelectorAll(".sidebar-resize-handle")) {
+    const disabled = state[handle.dataset.resizeA].collapsed || state[handle.dataset.resizeB].collapsed;
+    handle.classList.toggle("is-disabled", disabled);
+  }
+}
+
+function initSidebarPanels() {
+  let state = loadPanelState(localStorage.getItem(PANEL_STORAGE_KEY));
+  applyPanelState(state);
+  const persist = () => localStorage.setItem(PANEL_STORAGE_KEY, serializePanelState(state));
+
+  for (const btn of document.querySelectorAll("[data-panel-toggle]")) {
+    btn.addEventListener("click", () => {
+      state = toggleCollapse(state, btn.dataset.panelToggle);
+      applyPanelState(state);
+      persist();
+    });
+  }
+
+  for (const handle of document.querySelectorAll(".sidebar-resize-handle")) {
+    const keyA = handle.dataset.resizeA;
+    const keyB = handle.dataset.resizeB;
+    handle.addEventListener("pointerdown", (e) => {
+      if (state[keyA].collapsed || state[keyB].collapsed) return; // nothing to negotiate
+      e.preventDefault();
+      handle.setPointerCapture(e.pointerId);
+      handle.classList.add("is-dragging");
+      let lastY = e.clientY;
+      const onMove = (moveEvent) => {
+        state = resizePanels(state, keyA, keyB, moveEvent.clientY - lastY);
+        lastY = moveEvent.clientY;
+        applyPanelState(state);
+      };
+      const onUp = () => {
+        handle.classList.remove("is-dragging");
+        handle.removeEventListener("pointermove", onMove);
+        persist();
+      };
+      handle.addEventListener("pointermove", onMove);
+      handle.addEventListener("pointerup", onUp, { once: true });
+    });
+  }
+}
+initSidebarPanels();
 
 function initials(name) {
   return (name || "?").trim().slice(0, 1).toUpperCase();
@@ -583,6 +670,7 @@ async function main() {
     window.location.href = "/";
     return;
   }
+  sidebar.setUser(me);
 
   let partyInfo;
   try {
