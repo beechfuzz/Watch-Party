@@ -430,6 +430,17 @@ dialog h3 { font-family: var(--font-display); font-size: 16px; font-weight: 600;
 }
 .sidebar-block:not(:last-of-type) { margin-bottom: 4px; }
 .sidebar-block.is-collapsed { flex: 0 0 auto !important; }
+/* Leftover .party-sidebar-col height (column height minus the sum of every
+   expanded block's flex-basis, plus margins/handles) goes to whichever
+   block is currently the last *expanded* one -- player.js's applyPanelState
+   toggles this class onto exactly that block on every state change
+   (sidebar-panels.js's lastExpandedKey), derived fresh from
+   {collapsed, heightPx} each time rather than hardcoded to one panel. Loses
+   to .is-collapsed's flex:0 0 auto!important above exactly like it did when
+   this only ever targeted Chat, so a collapsed block never grows regardless
+   of this class. See ARCHITECTURE.md §11.7 (generalizes §11.6's
+   Chat-only fix, which only held while Chat itself stayed expanded). */
+.sidebar-block.is-grow-target { flex-grow: 1; }
 
 .sidebar-block-header-row { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .sidebar-block-header-row .sidebar-block-header { flex: 1; min-width: 0; }
@@ -491,15 +502,6 @@ dialog h3 { font-family: var(--font-display); font-size: 16px; font-weight: 600;
    rest, now that both sit inside .sidebar-block-body rather than directly
    inside .chat-block. */
 .chat-block .sidebar-block-body { display: flex; flex-direction: column; min-height: 0; }
-/* Chat is the last of the three sidebar blocks, and none of them has
-   flex-grow (all three size to their own flex-basis -- see .sidebar-block
-   above). With no block claiming leftover column height, any space beyond
-   the sum of the three blocks' heights went unclaimed below the last one.
-   flex-grow:1 here (Watching Now/Playlist stay flex-grow:0, sized to their
-   own height as before) makes Chat absorb that leftover so it fills
-   .party-sidebar-col, matching the other two blocks' already-correct
-   sizing. See ARCHITECTURE.md §11.6. */
-.chat-block.sidebar-block { flex-grow: 1; }
 /* .is-coming-soon (line 124) sets pointer-events:none on the whole
    .chat-block, which is inherited by every descendant -- including this
    panel's own collapse header, making it unclickable along with the
