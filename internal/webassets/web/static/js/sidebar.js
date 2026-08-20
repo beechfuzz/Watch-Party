@@ -17,12 +17,41 @@
 // disconnect. The dashboard has nothing to leave, so app.js calls
 // initSidebar without it and a sidebar click just behaves like a normal
 // link/logout.
+//
+// This module also owns the sidebar's collapsed/expanded (icon-only rail)
+// toggle -- pure load/serialize logic lives in sidebar-collapse.js, unit
+// tested there without a DOM, the same split sidebar-panels.js/player.js
+// use for the right sidebar's collapse/resize state.
 import { api, clearCSRFToken } from "./api.js";
+import { loadCollapsedState, serializeCollapsedState } from "./sidebar-collapse.js";
+
+const COLLAPSE_STORAGE_KEY = "watchparty:sidebarCollapsed";
+
+// Applied synchronously, before any of initSidebar's async callers resolve
+// (both app.js and player.js call initSidebar() at module-eval time), so a
+// returning visitor's persisted collapsed state is on screen at first paint
+// -- the same early-apply timing player.js's initSidebarPanels uses for the
+// right sidebar's persisted state.
+function applyCollapsedState(sidebarEl, toggleBtn, collapsed) {
+  sidebarEl.classList.toggle("is-collapsed", collapsed);
+  toggleBtn.setAttribute("aria-expanded", String(!collapsed));
+  toggleBtn.setAttribute("aria-label", collapsed ? "Expand sidebar" : "Collapse sidebar");
+}
 
 export function initSidebar({ onBeforeNavigate, onLoggedOut } = {}) {
   const avatarInitial = document.getElementById("user-avatar-initial");
   const userName = document.getElementById("user-name");
   const logoutBtn = document.getElementById("logout-btn");
+  const sidebarEl = document.querySelector(".sidebar");
+  const collapseToggleBtn = document.getElementById("sidebar-collapse-toggle");
+
+  let collapsed = loadCollapsedState(localStorage.getItem(COLLAPSE_STORAGE_KEY));
+  applyCollapsedState(sidebarEl, collapseToggleBtn, collapsed);
+  collapseToggleBtn.addEventListener("click", () => {
+    collapsed = !collapsed;
+    applyCollapsedState(sidebarEl, collapseToggleBtn, collapsed);
+    localStorage.setItem(COLLAPSE_STORAGE_KEY, serializeCollapsedState(collapsed));
+  });
 
   for (const link of document.querySelectorAll(".nav-item[href]")) {
     link.addEventListener("click", async (e) => {
