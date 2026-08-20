@@ -196,6 +196,13 @@ func (a *App) dispatchWSMessage(ctx context.Context, p *party.Party, userID stri
 	case wsproto.MsgEndedHint:
 		p.HandleEndedHint()
 
+	case wsproto.MsgChatSend:
+		var payload wsproto.ChatSendPayload
+		if err := json.Unmarshal(env.Payload, &payload); err != nil {
+			return
+		}
+		_ = p.HandleChatSend(ctx, userID, payload.Body)
+
 	case wsproto.MsgHostTransfer:
 		var payload wsproto.HostTransferPayload
 		if err := json.Unmarshal(env.Payload, &payload); err != nil {

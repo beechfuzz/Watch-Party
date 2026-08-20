@@ -159,6 +159,58 @@ func (c *Client) GetItem(ctx context.Context, accessToken, userID, itemID string
 	return &ItemInfo{ID: parsed.ID, Name: parsed.Name, RunTimeTicks: parsed.RunTimeTicks}, nil
 }
 
+// UserSummary is the subset of Emby's user profile Watch Party needs to
+// display a chat message's sender identity.
+type UserSummary struct {
+	ID              string
+	Name            string
+	HasPrimaryImage bool
+}
+
+// GetUser fetches another user's public profile (GET /Users/{id}) using the
+// *viewing* participant's own access token -- the same per-viewer
+// resolution pattern GetItem already uses for playlist item titles (see
+// ARCHITECTURE.md §9.2), applied to chat sender identity instead of media
+// metadata: a chat message's sender display name/avatar is never persisted,
+// only re-resolved live from UserID on every render (see
+// ARCHITECTURE.md's Party chat section).
+//
+// Whether a non-admin token can read another user's profile depends on that
+// Emby server's own policy configuration -- unconfirmed against a live
+// server, the same caveat this package's other endpoint-shape guesses carry
+// (see the package doc comment and ListItems/ListSeasons/ListEpisodes).
+// Callers should treat a failure here as "fall back to the locally-cached
+// display name, no avatar" rather than a hard error blocking chat entirely
+// -- see httpapi's handleGetEmbyUser.
+func (c *Client) GetUser(ctx context.Context, accessToken, userID string) (*UserSummary, error) {
+	u := fmt.Sprintf("%s/Users/%s", c.baseURL, url.PathEscape(userID))
+	var parsed struct {
+		ID              string `json:"Id"`
+		Name            string `json:"Name"`
+		PrimaryImageTag string `json:"PrimaryImageTag"`
+	}
+	if err := c.getJSON(ctx, u, accessToken, &parsed); err != nil {
+		return nil, err
+	}
+	return &UserSummary{ID: parsed.ID, Name: parsed.Name, HasPrimaryImage: parsed.PrimaryImageTag != ""}, nil
+}
+
+// UserImageURL builds a browser-fetchable avatar URL for userID, using the
+// same query-param api_key auth as ImageURL (an <img> tag can't set custom
+// headers either) -- direct browser-to-Emby, exactly the same pattern
+// poster art already follows and for the same reasons (see ImageURL and
+// ARCHITECTURE.md's Party chat section): no avatar bytes ever pass through
+// this server. Callers should only use this when GetUser reported
+// HasPrimaryImage -- Emby returns a generic silhouette (not a 404) for a
+// user with no avatar set, which would otherwise render as a real-looking
+// but meaningless image instead of this app's own fallback.
+func (c *Client) UserImageURL(userID, accessToken string) string {
+	vals := url.Values{}
+	vals.Set("api_key", accessToken)
+	vals.Set("maxHeight", "160")
+	return fmt.Sprintf("%s/Users/%s/Images/Primary?%s", c.publicBaseURL, url.PathEscape(userID), vals.Encode())
+}
+
 // ItemsQuery selects one of the Playlist browser's tabs. Exactly one of
 // Search/Tab is meaningful at a time; the zero value (no search term, tab
 // "") lists everything, unfiltered — callers should always set one.

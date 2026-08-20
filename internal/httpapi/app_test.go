@@ -1065,3 +1065,172 @@ func TestWebSocket_OriginRejected(t *testing.T) {
 		t.Errorf("status = %d, want 403 for a disallowed Origin", resp.StatusCode)
 	}
 }
+
+// --- chat: history endpoint ---
+
+func TestHandleGetChatHistory_ReturnsMessagesOldestFirstWithNoIdentity(t *testing.T) {
+	app, srv := newTestApp(t)
+	c := loginTestClient(t, srv)
+	_, created := c.do("POST", "/api/parties", map[string]string{"name": "Movie Night"}, true)
+	partyID := created["party_id"].(string)
+
+	p, ok := app.Hub.Get(partyID)
+	if !ok {
+		t.Fatal("party not found in hub")
+	}
+	if err := p.HandleChatSend(context.Background(), "user-alice", "first"); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.HandleChatSend(context.Background(), "user-alice", "second"); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, body := c.do("GET", "/api/parties/"+partyID+"/chat", nil, false)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d body=%v", resp.StatusCode, body)
+	}
+	messages, ok := body["messages"].([]any)
+	if !ok || len(messages) != 2 {
+		t.Fatalf("messages = %v, want 2 entries", body["messages"])
+	}
+	first, _ := messages[0].(map[string]any)
+	if first["body"] != "first" || first["user_id"] != "user-alice" {
+		t.Errorf("first message = %v, want body=first user_id=user-alice", first)
+	}
+	second, _ := messages[1].(map[string]any)
+	if second["body"] != "second" {
+		t.Errorf("second message = %v, want body=second (oldest first)", second)
+	}
+	// The whole point: no display name or avatar ships on this response --
+	// the client resolves identity separately, per its own token.
+	if _, present := first["display_name"]; present {
+		t.Error("chat history response must not carry a display_name -- identity is resolved client-side, per viewer")
+	}
+	if _, present := first["avatar_url"]; present {
+		t.Error("chat history response must not carry an avatar_url")
+	}
+}
+
+func TestHandleGetChatHistory_PartyEnded(t *testing.T) {
+	app, srv := newTestApp(t)
+	c := loginTestClient(t, srv)
+	_, created := c.do("POST", "/api/parties", map[string]string{"name": "Movie Night"}, true)
+	partyID := created["party_id"].(string)
+	if err := app.Hub.EndParty(context.Background(), partyID); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, body := c.do("GET", "/api/parties/"+partyID+"/chat", nil, false)
+	if resp.StatusCode != http.StatusGone {
+		t.Fatalf("status = %d body=%v, want 410", resp.StatusCode, body)
+	}
+}
+
+func TestHandleGetChatHistory_NotFound(t *testing.T) {
+	_, srv := newTestApp(t)
+	c := loginTestClient(t, srv)
+	resp, _ := c.do("GET", "/api/parties/does-not-exist/chat", nil, false)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+// --- chat: sender identity resolution ---
+
+// newFakeEmbyWithUserProfile serves auth plus GET /Users/{id} for a fixed
+// set of profiles -- the endpoint handleGetEmbyUser calls with the
+// *viewer's* own token to resolve a chat message's sender identity.
+func newFakeEmbyWithUserProfile(t *testing.T, profiles map[string]map[string]any) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/Users/AuthenticateByName", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"AccessToken": "fake-token",
+			"User":        map[string]string{"Id": "user-alice", "Name": "Alice"},
+		})
+	})
+	for id, profile := range profiles {
+		p := profile
+		mux.HandleFunc("/Users/"+id, func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode(p)
+		})
+	}
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestHandleGetEmbyUser_ResolvesDisplayNameAndAvatar(t *testing.T) {
+	fakeEmbySrv := newFakeEmbyWithUserProfile(t, map[string]map[string]any{
+		"user-bob": {"Id": "user-bob", "Name": "Bobby", "PrimaryImageTag": "tag123"},
+	})
+	app, srv := newTestAppWithEmby(t, emby.NewClient(fakeEmbySrv.URL))
+	alice := loginTestClient(t, srv)
+	if err := app.Store.UpsertUser(context.Background(), "user-bob", "Bob (cached)", "enc", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, body := alice.do("GET", "/api/emby/users/user-bob", nil, false)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d body=%v", resp.StatusCode, body)
+	}
+	if body["display_name"] != "Bobby" {
+		t.Errorf("display_name = %v, want the live Emby name, not the cached one", body["display_name"])
+	}
+	avatarURL, _ := body["avatar_url"].(string)
+	if avatarURL == "" || !strings.Contains(avatarURL, "user-bob") {
+		t.Errorf("avatar_url = %q, want a URL for user-bob's avatar", avatarURL)
+	}
+}
+
+func TestHandleGetEmbyUser_NoPrimaryImage_EmptyAvatarURL(t *testing.T) {
+	fakeEmbySrv := newFakeEmbyWithUserProfile(t, map[string]map[string]any{
+		"user-bob": {"Id": "user-bob", "Name": "Bobby", "PrimaryImageTag": ""},
+	})
+	_, srv := newTestAppWithEmby(t, emby.NewClient(fakeEmbySrv.URL))
+	alice := loginTestClient(t, srv)
+
+	resp, body := alice.do("GET", "/api/emby/users/user-bob", nil, false)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d body=%v", resp.StatusCode, body)
+	}
+	if body["avatar_url"] != "" {
+		t.Errorf("avatar_url = %v, want empty string when the user has no PrimaryImageTag", body["avatar_url"])
+	}
+}
+
+// If Emby rejects/can't serve the profile lookup (e.g. a server that
+// restricts /Users/{id} to admins -- see emby.Client.GetUser's doc
+// comment), the endpoint must still return 200 with a usable fallback
+// identity, not fail the whole chat message.
+func TestHandleGetEmbyUser_FallsBackToLocalDisplayNameOnEmbyFailure(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/Users/AuthenticateByName", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"AccessToken": "fake-token",
+			"User":        map[string]string{"Id": "user-alice", "Name": "Alice"},
+		})
+	})
+	mux.HandleFunc("/Users/user-bob", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden) // simulates an Emby server that restricts this to admins
+	})
+	fakeEmbySrv := httptest.NewServer(mux)
+	t.Cleanup(fakeEmbySrv.Close)
+
+	app, srv := newTestAppWithEmby(t, emby.NewClient(fakeEmbySrv.URL))
+	alice := loginTestClient(t, srv)
+	if err := app.Store.UpsertUser(context.Background(), "user-bob", "Bob (cached)", "enc", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, body := alice.do("GET", "/api/emby/users/user-bob", nil, false)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d body=%v, want 200 even when Emby's own lookup fails", resp.StatusCode, body)
+	}
+	if body["display_name"] != "Bob (cached)" {
+		t.Errorf("display_name = %v, want fallback to the locally-cached name", body["display_name"])
+	}
+	if body["avatar_url"] != "" {
+		t.Errorf("avatar_url = %v, want empty on fallback", body["avatar_url"])
+	}
+}

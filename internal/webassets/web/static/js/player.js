@@ -6,6 +6,7 @@
 import { api } from "./api.js";
 import { PartyConnection } from "./ws-client.js";
 import { initPlaylist, loadPlaylist } from "./playlist.js";
+import { initChat, handleIncomingChatMessage } from "./chat.js";
 import { wireSettingsForm } from "./settingsForm.js";
 import {
   TICKS_PER_SECOND,
@@ -700,6 +701,8 @@ async function main() {
   initPlaylist(partyId, isHost);
   loadPlaylist();
 
+  initChat({ partyId, meUserId: me.user.id, send: (body) => conn && conn.send("chat_send", { body }) });
+
   // See the requestedStartPositionTicks/playbackOffsetTicks declarations
   // above: 0 for direct play/stream, and for transcoded playback the item
   // offset Emby was *asked* to start this transcode session at (the
@@ -724,6 +727,9 @@ async function main() {
           break;
         case "playlist_updated":
           loadPlaylist();
+          break;
+        case "chat_message":
+          handleIncomingChatMessage(env.payload);
           break;
         case "clock_sync": {
           const p = env.payload;

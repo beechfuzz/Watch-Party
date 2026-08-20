@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/beechfuzz/watch-party/internal/dbx"
 	"github.com/beechfuzz/watch-party/internal/emby"
@@ -490,6 +491,54 @@ func (a *App) handleGetPlaylist(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": out})
 }
 
+// chatHistoryLimit caps how much history GET /api/parties/{id}/chat
+// returns. Chat is ephemeral (wiped entirely at party end, see
+// Party.End/Store.DeleteChatMessages) and this app's scale doesn't call for
+// real pagination -- a fixed recent window is simpler than a cursor API and
+// was chosen deliberately over one. See ARCHITECTURE.md's Party chat
+// section.
+const chatHistoryLimit = 200
+
+// handleGetChatHistory returns a party's chat history, oldest first. Not
+// host-gated, and not membership-gated beyond ordinary authentication --
+// same visibility rule handleGetParty/handleGetPlaylist already apply
+// ("every active party is visible to every signed-in user", see
+// ARCHITECTURE.md §7). Deliberately returns raw {id, user_id, body,
+// sent_at} rows with no display name or avatar -- the client resolves
+// sender identity live, per its own token, via GET /api/emby/users/{id}.
+func (a *App) handleGetChatHistory(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	row, err := a.Store.GetParty(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, dbx.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "party not found")
+			return
+		}
+		a.Logger.Error("get party failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
+		return
+	}
+	if row.Status == dbx.PartyStatusEnded {
+		writeError(w, http.StatusGone, "party_ended", "this party has ended")
+		return
+	}
+
+	messages, err := a.Store.ListChatMessages(r.Context(), id, chatHistoryLimit)
+	if err != nil {
+		a.Logger.Error("list chat messages failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
+		return
+	}
+	out := make([]map[string]any, len(messages))
+	for i, m := range messages {
+		out[i] = map[string]any{
+			"id": m.ID, "user_id": m.UserID, "body": m.Body,
+			"sent_at": m.SentAt.UTC().Format(time.RFC3339Nano),
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"messages": out})
+}
+
 type batchAddPlaylistItemsRequest struct {
 	ItemIDs []string `json:"item_ids"`
 }
@@ -732,6 +781,49 @@ func (a *App) handleListEpisodes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"episodes": episodes})
+}
+
+// handleGetEmbyUser resolves a chat message sender's display name/avatar
+// for the requesting *viewer*, using the viewer's own token -- same
+// backend-routed pattern as handleBrowseEmbyItems, applied to another
+// user's profile instead of an item. Deliberately tolerant of Emby
+// rejecting the lookup (some Emby servers restrict /Users/{id} to admins;
+// see emby.Client.GetUser's doc comment): falls back to this app's own
+// locally-cached display name (already persisted at that user's own last
+// login, not a new copy made for chat) with no avatar, rather than erroring
+// the whole request -- a chat message must always be able to render with
+// *some* identity, even a stale/best-effort one.
+func (a *App) handleGetEmbyUser(w http.ResponseWriter, r *http.Request) {
+	viewer := userFromContext(r.Context())
+	targetUserID := r.PathValue("id")
+
+	token, err := a.TokenCipher.Decrypt(viewer.EncryptedAccessToken)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
+		return
+	}
+
+	displayName := targetUserID
+	avatarURL := ""
+	if target, err := a.Store.GetUser(r.Context(), targetUserID); err == nil {
+		displayName = target.DisplayName
+	}
+	if summary, err := a.Emby.GetUser(r.Context(), token, targetUserID); err == nil {
+		displayName = summary.Name
+		if summary.HasPrimaryImage {
+			avatarURL = a.Emby.UserImageURL(targetUserID, token)
+		}
+	} else if errors.Is(err, emby.ErrUnauthorized) {
+		// The viewer's own token was rejected outright (not just denied for
+		// this particular lookup) -- force re-auth the same way every other
+		// Emby-facing handler does, but still fall back to the locally-cached
+		// name below rather than failing this request; a chat message's
+		// identity shouldn't block on the viewer's session already being
+		// stale.
+		_ = a.Store.DeleteSessionsForUser(r.Context(), viewer.ID)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"display_name": displayName, "avatar_url": avatarURL})
 }
 
 // handleEmbyErr maps an emby package error to an HTTP response. On a

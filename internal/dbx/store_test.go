@@ -324,3 +324,126 @@ func TestAddPlaylistItems_AtomicOnFailure(t *testing.T) {
 		t.Errorf("ListPlaylistItems = %+v, want no rows persisted after a failed batch", items)
 	}
 }
+
+func TestChatMessagesRoundTrip(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	if err := s.UpsertUser(ctx, "host1", "Host", "tok", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateParty(ctx, Party{ID: "party1", HostUserID: "host1", Name: "Movie Night", CreatedAt: now, Status: PartyStatusActive}); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := s.AddChatMessage(ctx, "party1", "host1", "hello", now)
+	if err != nil {
+		t.Fatalf("AddChatMessage: %v", err)
+	}
+	if first.ID == 0 {
+		t.Error("AddChatMessage did not assign an id")
+	}
+	second, err := s.AddChatMessage(ctx, "party1", "host1", "world", now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("AddChatMessage: %v", err)
+	}
+	if second.ID == first.ID {
+		t.Error("second message got the same id as the first")
+	}
+
+	msgs, err := s.ListChatMessages(ctx, "party1", 200)
+	if err != nil {
+		t.Fatalf("ListChatMessages: %v", err)
+	}
+	if len(msgs) != 2 || msgs[0].Body != "hello" || msgs[1].Body != "world" {
+		t.Fatalf("ListChatMessages = %+v, want [hello, world] oldest-first", msgs)
+	}
+	if !msgs[0].SentAt.Equal(now) {
+		t.Errorf("first message SentAt = %v, want %v", msgs[0].SentAt, now)
+	}
+
+	if err := s.DeleteChatMessages(ctx, "party1"); err != nil {
+		t.Fatalf("DeleteChatMessages: %v", err)
+	}
+	msgs, err = s.ListChatMessages(ctx, "party1", 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 0 {
+		t.Errorf("messages after DeleteChatMessages = %+v, want none", msgs)
+	}
+}
+
+func TestListChatMessages_RespectsLimitKeepingMostRecent(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	if err := s.UpsertUser(ctx, "host1", "Host", "tok", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateParty(ctx, Party{ID: "party1", HostUserID: "host1", Name: "Movie Night", CreatedAt: now, Status: PartyStatusActive}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		if _, err := s.AddChatMessage(ctx, "party1", "host1", string(rune('a'+i)), now.Add(time.Duration(i)*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	msgs, err := s.ListChatMessages(ctx, "party1", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 3 {
+		t.Fatalf("len(msgs) = %d, want 3", len(msgs))
+	}
+	// Must be the 3 MOST RECENT, still returned oldest-first -- not simply
+	// the first 3 ever sent.
+	got := []string{msgs[0].Body, msgs[1].Body, msgs[2].Body}
+	want := []string{"c", "d", "e"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("msgs = %v, want %v (most recent 3, oldest-first)", got, want)
+			break
+		}
+	}
+}
+
+func TestDeleteChatMessages_OnlyAffectsTheGivenParty(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	if err := s.UpsertUser(ctx, "host1", "Host", "tok", now); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"party1", "party2"} {
+		if err := s.CreateParty(ctx, Party{ID: id, HostUserID: "host1", Name: id, CreatedAt: now, Status: PartyStatusActive}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.AddChatMessage(ctx, id, "host1", "hi from "+id, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := s.DeleteChatMessages(ctx, "party1"); err != nil {
+		t.Fatal(err)
+	}
+
+	msgs1, err := s.ListChatMessages(ctx, "party1", 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs1) != 0 {
+		t.Errorf("party1 messages = %+v, want none (deleted)", msgs1)
+	}
+	msgs2, err := s.ListChatMessages(ctx, "party2", 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs2) != 1 {
+		t.Errorf("party2 messages = %+v, want 1 (must be unaffected by deleting party1's)", msgs2)
+	}
+}
