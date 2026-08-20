@@ -478,3 +478,57 @@ Collapse is a header click toggling `.sidebar-block.is-collapsed`, which hides t
 The resize math and collapse-toggle state transitions live in a DOM-free pure module, `sidebar-panels.js` (`resizePanels`, `toggleCollapse`, `loadPanelState`/`serializePanelState`), unit-tested in `sidebar-panels.test.mjs` without a DOM — the same split already established by `playlist-select.js`/`hls-source.js`/`playback-events.js` for keeping pointer/DOM-event wiring separate from the logic worth testing directly. `player.js`'s `initSidebarPanels` is the thin DOM/`localStorage` glue layer, wired at module load (like this file's other top-level listeners) rather than inside `main()`'s async flow, so a returning visitor's persisted layout applies as soon as the page paints instead of waiting on the `/api/me`/party-info round trips.
 
 **Persistence is `localStorage`, per-browser — not a per-account server-synced preference.** This app has no other per-user-preference storage to extend, and a server round trip for a pure UI convenience (versus a functional/authorization concern) would be disproportionate to what's being solved. A stored value survives reloads on the same browser but doesn't follow the account to a different device/browser; if that turns out to matter in practice, it would need a small new endpoint/column, deliberately not built preemptively here.
+
+### 11.4 Two stacked bugs, from merging §11.1's partial: every page loaded blank
+
+Immediately after §11.1's shared-partial work merged, every page (`/` and `/party/{id}`) loaded as a completely blank document — not a rendering or JS problem, `view-source:` showed an empty `<body>` with nothing in it at all. `go build ./...` and `go vet ./...` both passed cleanly; the process itself started and logged `"listening"` normally. This turned out to be two independent bugs, stacked, each one hiding the other's symptom.
+
+**Reproducing it.** Built the actual binary the way the Dockerfile does (`CGO_ENABLED=0 go build`, since a plain `go run`/`go build` under cgo hits an unrelated `privdrop` failure when run as root — see §6 — that would have blocked reproduction entirely), ran it, and requested `/`:
+
+```
+HTTP/1.1 200 OK
+Cache-Control: no-cache
+Content-Type: text/html; charset=utf-8
+Content-Length: 0
+```
+
+Zero bytes in the body, `200 OK`, nothing in stderr. Exactly the reported symptom, and notably *not* a 500 — which is what made it look like a rendering bug rather than a server-side failure at first glance.
+
+**Bug 1, the actual root cause: `//go:embed web/templates` silently dropped `_sidebar.html`.** Go's `embed` package excludes any file or directory whose name begins with `.` or `_` from a bare `//go:embed <dir>` pattern — this is documented behavior (the `all:` prefix is required to include them), not a bug in the `embed` package, but it's easy to miss for a file that's meant to be included precisely *because* its name marks it as a partial rather than a page. `internal/webassets/webassets.go`'s `templatesFS` used the bare form, so `_sidebar.html` — and the `{{define "sidebar"}}` template it declares — was never in the embedded FS in the first place. This has nothing to do with `template.ParseFS`'s glob (`*.html` matches `_sidebar.html` fine at the pattern level) or with any naming collision; the file simply never reached the parser.
+
+Confirmed directly, not inferred from the diff: a throwaway program (later deleted — see below) called `webassets.Templates()` and printed what actually parsed:
+
+```
+Parsed templates:
+ - party.html
+ - index.html
+```
+
+No `sidebar` template at all. Executing either page against that set produced:
+
+```
+index.html exec err: html/template:index.html:41:17: no such template "sidebar"
+party.html exec err: html/template:party.html:13:13: no such template "sidebar"
+```
+
+Both templates open their `<body>` with `{{template "sidebar" .}}` (party.html) or reach it within the first visible section (index.html) — essentially the first thing either template does — so `ExecuteTemplate` failed before writing any output at all, for both pages, on every request. This also answers a question worth ruling in/out explicitly: `mustParseTemplates()` does **not** panic at startup over this. Parsing a `{{template "sidebar" .}}` reference doesn't require "sidebar" to be defined anywhere in the set — `html/template` only resolves template names at execution time, not parse time. So the failure mode was "server starts fine, every page silently breaks," not "server won't start" — worth stating plainly since a startup panic would have pointed straight at the cause, and this didn't.
+
+**Bug 2, independent, and what made bug 1 invisible instead of loud: both `ExecuteTemplate` call sites in `internal/httpapi/pages.go` discarded the returned error.**
+
+```go
+w.Header().Set("Content-Type", "text/html; charset=utf-8")
+w.Header().Set("Cache-Control", "no-cache")
+pageTemplates.ExecuteTemplate(w, "party.html", pageData{PartyID: r.PathValue("id")})
+```
+
+Headers (and, implicitly, the `200` status) were already sent before `ExecuteTemplate` ran, and its `error` return was never inspected. When execution failed immediately — as bug 1 guaranteed it would, on literally every request — nothing more was ever written to `w`, and Go's `net/http` had already committed to a `200 OK`. The result: a `200`, correct `Content-Type`, `Content-Length: 0`, and no error anywhere in the logs, because there was no code path that could have logged it. This is what turned "a template is missing" — which would normally be a loud, obvious failure — into a symptom indistinguishable from a JS/rendering problem until someone thought to check the raw response body.
+
+These are genuinely two separate defects, not one bug described two ways: fixing only the `embed` directive would have made the pages render correctly, and the swallowed-error handling would have gone back to being simply unexercised, dormant code — correct in effect, but leaving the exact same silent-500-as-200 trap for the next template bug that comes along, whenever that is. Fixing only the error handling without the `embed` fix would have turned the blank page into a proper 500, which is a real improvement, but wouldn't have fixed the actual page.
+
+**Fix.**
+- `internal/webassets/webassets.go`: `//go:embed web/templates` → `//go:embed all:web/templates`, restoring `_sidebar.html` to the embedded FS.
+- `internal/httpapi/pages.go`: a new `renderPage(w, logger, tmpl, name, data)` helper executes the template into a `bytes.Buffer` first. On error, it logs the real error (template name + `err.Error()` — safe to log; `pageData` carries only `PartyID`/`ActiveNav`, nothing that touches the credentials/tokens/session invariant in `CLAUDE.md`) and responds with a generic `500` body (`http.StatusText(500)`) — never the raw template error, which could otherwise leak internal template/file structure to a client. On success, headers are set and the buffered bytes are written in one shot. Both page handlers now call this helper instead of calling `ExecuteTemplate` against `w` directly with the headers pre-set. `registerPages` gained a `logger *slog.Logger` parameter (threaded from `RegisterRoutes`'s existing `app.Logger`) to support this.
+
+**Test coverage.** Two new tests in `internal/httpapi/pages_test.go` exercise `renderPage` directly: `TestRenderPage_TemplateExecutionFailure_Returns500` (a deliberately broken template set produces a `500` with a generic body, and the real error still reaches the log) and `TestRenderPage_Success_ReturnsContent` (the real, production `pageTemplates` — including `_sidebar.html` — renders `200` with actual sidebar markup in the body; this one doubles as a regression test for the `embed` fix itself, since dropping the `all:` prefix again would fail this test with the exact `no such template "sidebar"` error above, not silently pass). `TestStaticAssetsAndPages_NotCacheable` (`app_test.go`), which already requested `/` and `/party/{id}` through the real mux, was extended to also assert a `200` status and a non-empty body — end-to-end coverage through `registerPages`'s actual wiring, not just the helper in isolation.
+
+**Diagnostic tooling.** A throwaway `cmd/tmplcheck` program (calling `webassets.Templates()` directly and printing what parsed, then calling `ExecuteTemplate` to surface the real error text quoted above) was used to confirm the root cause before any fix was written, then deleted — it was never meant to be a permanent part of the tree, and isn't.

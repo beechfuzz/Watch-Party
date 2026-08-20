@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -566,9 +567,23 @@ func TestStaticAssetsAndPages_NotCacheable(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GET %s: %v", path, err)
 		}
+		body, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
+		if err != nil {
+			t.Fatalf("GET %s: read body: %v", path, err)
+		}
 		if got := resp.Header.Get("Cache-Control"); got != "no-cache" {
 			t.Errorf("GET %s: Cache-Control = %q, want %q", path, got, "no-cache")
+		}
+		// Regression coverage for the blank-page bug (ARCHITECTURE.md §11.4):
+		// a template execution failure used to produce a 200 OK with an
+		// empty body. Both pages route through the shared sidebar partial,
+		// so this also exercises that _sidebar.html is actually embedded.
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("GET %s: status = %d, want 200", path, resp.StatusCode)
+		}
+		if len(body) == 0 {
+			t.Errorf("GET %s: empty response body", path)
 		}
 	}
 }

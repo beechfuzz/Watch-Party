@@ -13,7 +13,13 @@ import (
 //go:embed web/static
 var staticFS embed.FS
 
-//go:embed web/templates
+// The all: prefix is required: without it, //go:embed silently excludes
+// any file whose name starts with "_" or "." (Go's embed package
+// convention for "hidden" files) -- which would drop _sidebar.html from
+// this FS entirely, with no error at build or parse time. See
+// ARCHITECTURE.md §11.4.
+//
+//go:embed all:web/templates
 var templatesFS embed.FS
 
 // StaticFS returns the embedded static assets rooted at "static/..." so
