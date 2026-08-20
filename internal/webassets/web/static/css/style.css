@@ -325,7 +325,7 @@ dialog h3 { font-family: var(--font-display); font-size: 16px; font-weight: 600;
 .party-topbar {
   display: flex; align-items: center; justify-content: space-between;
   padding: 16px 28px; border-bottom: 1px solid var(--border-quiet); gap: 16px; flex-wrap: wrap;
-  position: relative; z-index: 1;
+  position: relative; z-index: 1; flex-shrink: 0;
 }
 .party-title-block { min-width: 0; }
 .party-title-block h2 {
@@ -351,8 +351,19 @@ dialog h3 { font-family: var(--font-display); font-size: 16px; font-weight: 600;
 .icon-btn svg { width: 15px; height: 15px; }
 .icon-btn:hover { color: var(--text-primary); border-color: var(--text-tertiary); }
 
-.party-layout { display: grid; grid-template-columns: 1fr 300px; gap: 0; align-items: stretch; position: relative; z-index: 1; }
-.player-col { padding: 24px 24px 40px 28px; }
+/* .main-content's dashboard padding/overflow don't apply on the party
+   page -- the topbar and .party-layout own their own scroll regions
+   instead (see .party-sidebar-col below), so the page never grows past
+   the viewport the way the old bodyless party.html could. Same
+   min-height:0-chain technique the dashboard's .sidebar/.main-content
+   pair already uses (ARCHITECTURE.md §7) extended one level deeper. */
+.main-content.party-main { padding: 0; display: flex; flex-direction: column; overflow: hidden; }
+
+.party-layout {
+  display: grid; grid-template-columns: 1fr 300px; gap: 0; align-items: stretch;
+  position: relative; z-index: 1; flex: 1; min-height: 0;
+}
+.player-col { padding: 24px 24px 40px 28px; overflow-y: auto; min-height: 0; }
 
 .player-frame {
   position: relative; width: 100%; aspect-ratio: 16/9; border-radius: var(--radius-panel);
@@ -384,10 +395,61 @@ dialog h3 { font-family: var(--font-display); font-size: 16px; font-weight: 600;
 
 .host-controls-row { margin-top: 14px; display: flex; align-items: center; gap: 10px; }
 
-.party-sidebar-col { padding: 24px 28px 28px 0; border-left: 1px solid var(--border-quiet); display: flex; flex-direction: column; min-height: 0; }
-.sidebar-block { margin-bottom: 24px; flex-shrink: 0; }
-.sidebar-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
-.sidebar-title h4 { font-size: 13px; font-weight: 600; margin: 0; color: var(--text-secondary); }
+/* Bounded to the column's own height (in turn bounded by .party-layout's
+   flex:1/min-height:0, itself bounded by .party-main inside the
+   viewport-height .app-shell -- see the .main-content.party-main comment
+   above) rather than growing with content. The column itself no longer
+   scrolls -- overflow-y:hidden -- each .sidebar-block-body scrolls its own
+   content instead, so one section can be scrolled without moving the
+   others, exactly like the dashboard's independently-scrolling panes. */
+.party-sidebar-col {
+  padding: 24px 28px 28px 0; border-left: 1px solid var(--border-quiet);
+  display: flex; flex-direction: column; min-height: 0; overflow-y: hidden;
+}
+
+/* Each block is a resizable/collapsible panel. Expanded panels carry an
+   explicit flex-basis (px, set inline by sidebar-panels.js) that drives
+   their height; flex-shrink:1 lets the column's own height still win if a
+   stored height would otherwise overflow it (e.g. after a smaller viewport
+   resize). A collapsed panel drops to a fixed header-only height and
+   opts out of the flex-basis dance entirely. */
+.sidebar-block {
+  flex-shrink: 1; flex-grow: 0; display: flex; flex-direction: column; min-height: 0;
+  overflow: hidden; border-radius: var(--radius-control);
+}
+.sidebar-block:not(:last-of-type) { margin-bottom: 4px; }
+.sidebar-block.is-collapsed { flex: 0 0 auto !important; }
+
+.sidebar-block-header-row { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.sidebar-block-header-row .sidebar-block-header { flex: 1; min-width: 0; }
+
+.sidebar-block-header {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  width: 100%; flex-shrink: 0; margin: 0 0 14px; padding: 0;
+  background: transparent; border: none; text-align: left; cursor: pointer;
+}
+.sidebar-block-header h4 { font-size: 13px; font-weight: 600; margin: 0; color: var(--text-secondary); }
+.sidebar-block-header .coming-soon-badge { margin-left: auto; }
+.panel-chevron {
+  width: 14px; height: 14px; flex-shrink: 0; color: var(--text-tertiary);
+  transition: transform 0.15s ease;
+}
+.sidebar-block.is-collapsed .panel-chevron { transform: rotate(-90deg); }
+.sidebar-block.is-collapsed .sidebar-block-header { margin-bottom: 0; }
+
+.sidebar-block-body { flex: 1; min-height: 0; overflow-y: auto; }
+.sidebar-block.is-collapsed .sidebar-block-body { display: none; }
+
+.sidebar-resize-handle {
+  flex-shrink: 0; height: 9px; margin: 2px 0; cursor: row-resize; position: relative;
+}
+.sidebar-resize-handle::after {
+  content: ''; position: absolute; left: 0; right: 0; top: 4px; height: 1px;
+  background: var(--border-subtle);
+}
+.sidebar-resize-handle:hover::after, .sidebar-resize-handle.is-dragging::after { background: var(--text-tertiary); }
+.sidebar-resize-handle.is-disabled { cursor: default; pointer-events: none; }
+.sidebar-resize-handle.is-disabled::after { background: transparent; }
 
 .participant-row { display: flex; align-items: center; gap: 12px; padding: 8px 0; }
 .participant-row.is-offline { opacity: 0.45; }
@@ -412,9 +474,12 @@ dialog h3 { font-family: var(--font-display); font-size: 16px; font-weight: 600;
 }
 .make-host-btn:hover { color: var(--text-secondary); border-color: var(--text-secondary); }
 
-/* chat (coming soon) */
-.chat-block { flex: 1; display: flex; flex-direction: column; min-height: 0; }
-.chat-block .sidebar-title { flex-shrink: 0; }
+/* chat (coming soon) -- .chat-block is also .sidebar-block (flex column,
+   see above); its body additionally needs to be a flex column itself so
+   .chat-input-row can pin to the bottom while .chat-messages fills the
+   rest, now that both sit inside .sidebar-block-body rather than directly
+   inside .chat-block. */
+.chat-block .sidebar-block-body { display: flex; flex-direction: column; min-height: 0; }
 .chat-messages {
   flex: 1; min-height: 120px; display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 10px; text-align: center; color: var(--text-tertiary); font-size: 12.5px; padding: 20px 10px;
@@ -435,8 +500,8 @@ dialog h3 { font-family: var(--font-display); font-size: 16px; font-weight: 600;
 .chat-send-btn svg { width: 15px; height: 15px; }
 
 /* playlist */
-.playlist-block .sidebar-title button.icon-btn { width: 28px; height: 28px; }
-.playlist-block .sidebar-title button.icon-btn svg { width: 13px; height: 13px; }
+.playlist-block .sidebar-block-header-row button.icon-btn { width: 28px; height: 28px; }
+.playlist-block .sidebar-block-header-row button.icon-btn svg { width: 13px; height: 13px; }
 .playlist-empty {
   border: 1px dashed var(--border-subtle); border-radius: var(--radius-control);
   padding: 16px 12px; text-align: center; color: var(--text-tertiary); font-size: 12.5px;

@@ -1,8 +1,9 @@
 // Index page: login form, then the dashboard (active/your parties +
 // create). Server is the source of truth; this just renders whatever
 // /api/me and /api/parties say.
-import { api, setCSRFToken, clearCSRFToken } from "./api.js";
+import { api, setCSRFToken } from "./api.js";
 import { wireSettingsForm } from "./settingsForm.js";
+import { initSidebar } from "./sidebar.js";
 
 const TICKS_PER_SECOND = 10_000_000;
 
@@ -10,10 +11,7 @@ const loginSection = document.getElementById("login-section");
 const homeSection = document.getElementById("home-section");
 const loginForm = document.getElementById("login-form");
 const loginError = document.getElementById("login-error");
-const userAvatarInitial = document.getElementById("user-avatar-initial");
-const userName = document.getElementById("user-name");
 const welcomeHeading = document.getElementById("welcome-heading");
-const logoutBtn = document.getElementById("logout-btn");
 
 const createBtn = document.getElementById("create-party-btn");
 const createDialog = document.getElementById("create-party-dialog");
@@ -30,6 +28,8 @@ const activeCount = document.getElementById("active-count");
 const yourSection = document.getElementById("your-parties-section");
 const yourList = document.getElementById("your-parties-list");
 const yourCount = document.getElementById("your-count");
+
+const sidebar = initSidebar({ onLoggedOut: showLogin });
 
 let me = null;
 
@@ -74,8 +74,7 @@ function showLogin() {
 async function showHome() {
   loginSection.hidden = true;
   homeSection.hidden = false;
-  userAvatarInitial.textContent = initials(me.user.display_name);
-  userName.textContent = me.user.display_name;
+  sidebar.setUser(me);
   welcomeHeading.textContent = `Welcome back, ${me.user.display_name} 👋`;
   await loadParties();
 }
@@ -186,15 +185,6 @@ loginForm.addEventListener("submit", async (e) => {
     showHome();
   } catch (err) {
     showError(loginError, err.message);
-  }
-});
-
-logoutBtn.addEventListener("click", async () => {
-  try {
-    await api("/api/auth/logout", { method: "POST" });
-  } finally {
-    clearCSRFToken();
-    showLogin();
   }
 });
 

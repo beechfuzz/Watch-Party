@@ -525,6 +525,37 @@ func TestHostLeave_TransfersImmediately(t *testing.T) {
 	}
 }
 
+// TestDisconnect_DoesNotDowngradeAlreadyLeft covers the real bug this
+// found: an explicit Leave (e.g. the frontend's leave-then-navigate flow)
+// is always followed by the same connection's read loop unwinding, which
+// calls Disconnect on its way out (see ws.go's deferred Disconnect after
+// wsReadLoop returns). Without a guard, that silently overwrote a
+// deliberate ConnLeft back to ConnDisconnected — exactly the distinction
+// SPEC.md's "Connection state vs. intent" section exists to preserve.
+func TestDisconnect_DoesNotDowngradeAlreadyLeft(t *testing.T) {
+	hub := newTestHub(t)
+	seedUser(t, hub.store, "host", "Host")
+	seedUser(t, hub.store, "p1", "Participant")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
+	_, _ = p.Join("host", "Host")
+	_, _ = p.Join("p1", "Participant")
+	p.AttachConn("p1", &fakeConn{})
+
+	p.Leave("p1")
+	p.Disconnect("p1") // simulates the connection's own teardown after an explicit leave
+
+	snap := p.Snapshot()
+	var status string
+	for _, m := range snap.Members {
+		if m.UserID == "p1" {
+			status = m.ConnectionStatus
+		}
+	}
+	if status != string(dbx.ConnLeft) {
+		t.Errorf("connection_status = %q after Leave+Disconnect, want %q (Disconnect must not downgrade an explicit leave)", status, dbx.ConnLeft)
+	}
+}
+
 // --- end of media detection ---
 
 // TestEndOfMedia_EndOfPlaylistGoesIdle covers the single-item case: reaching

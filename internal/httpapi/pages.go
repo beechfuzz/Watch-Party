@@ -17,6 +17,17 @@ func mustParseTemplates() *template.Template {
 	return t
 }
 
+// pageData is the data every server-rendered page template (and the shared
+// sidebar partial they both include, _sidebar.html) executes against.
+// ActiveNav marks which sidebar nav item, if any, should render as
+// "is-active" -- "home" on the dashboard; left empty on the party room,
+// since none of the sidebar's destinations represent "you're in a party"
+// today.
+type pageData struct {
+	PartyID   string
+	ActiveNav string
+}
+
 // registerPages attaches the server-rendered HTML shell and static asset
 // routes. The pages themselves hold almost no server logic — they're a
 // thin shell that vanilla JS (web/static/js/*.js) fills in by calling the
@@ -33,7 +44,7 @@ func registerPages(mux *http.ServeMux) {
 	mux.HandleFunc("GET /party/{id}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-cache")
-		pageTemplates.ExecuteTemplate(w, "party.html", map[string]string{"PartyID": r.PathValue("id")})
+		pageTemplates.ExecuteTemplate(w, "party.html", pageData{PartyID: r.PathValue("id")})
 	})
 
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
@@ -43,7 +54,7 @@ func registerPages(mux *http.ServeMux) {
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-cache")
-		pageTemplates.ExecuteTemplate(w, "index.html", nil)
+		pageTemplates.ExecuteTemplate(w, "index.html", pageData{ActiveNav: "home"})
 	})
 }
 
