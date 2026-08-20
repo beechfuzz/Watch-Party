@@ -63,6 +63,17 @@ button { font-family: var(--font-body); cursor: pointer; }
 a { color: inherit; text-decoration: none; }
 :focus-visible { outline: 2px solid var(--accent-teal); outline-offset: 2px; }
 
+/* The browser's own UA stylesheet already does `[hidden] { display: none }`,
+   but author-origin rules always win over UA-origin rules regardless of
+   specificity -- so any element whose class also sets an explicit `display`
+   (.btn, .icon-btn, .host-controls-row, ...) stays visibly displayed even
+   while its `hidden` attribute is set. This one rule re-asserts `hidden` at
+   author level, `!important` so it wins over any such class regardless of
+   which is more specific or comes later in the cascade. See
+   ARCHITECTURE.md §11.5 -- this is what silently defeated every host-only
+   `el.hidden = !isHost()` toggle on the party page. */
+[hidden] { display: none !important; }
+
 .atmosphere {
   position: fixed; inset: 0; z-index: 0; pointer-events: none;
   background:
