@@ -1,9 +1,14 @@
 name: CI
 
-# Go build/vet/test/race plus the frontend sync-math tests, on every push and
-# pull request against main. Deliberately separate from docker-publish.yml,
-# which already validates the Docker build on every PR — this workflow never
-# touches the image.
+# Go build/vet/test/race plus the frontend JS tests (sync math, playlist
+# selection logic, native-pause/ended event forwarding, hls.js instance
+# lifecycle, sidebar panel state, and the [hidden]-vs-CSS regression guard —
+# see ARCHITECTURE.md §11.5), on every push and pull request against main.
+# The frontend step previously only ran sync.test.mjs by name, silently
+# never running the other four *.test.mjs files that already existed —
+# fixed to the glob CLAUDE.md always documented running. Deliberately
+# separate from docker-publish.yml, which already validates the Docker
+# build on every PR — this workflow never touches the image.
 
 on:
   push:
@@ -47,5 +52,5 @@ jobs:
         with:
           node-version: "22" # node:test + top-level ESM import, no package.json to pin a version otherwise
 
-      - name: Frontend sync-math tests
-        run: node --test internal/webassets/web/static/js/sync.test.mjs
+      - name: Frontend JS tests
+        run: node --test internal/webassets/web/static/js/*.test.mjs
