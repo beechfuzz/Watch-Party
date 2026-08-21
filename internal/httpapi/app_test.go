@@ -612,6 +612,36 @@ func TestGetParty_IncludesItemTitle(t *testing.T) {
 	}
 }
 
+// TestGetParty_IncludesHostReconnecting pins the initial-page-load path
+// (handleGetParty, hit on first load and on refresh) alongside the
+// WebSocket snapshot path: both go through the same Party.Snapshot(), so a
+// client loading/refreshing the party page mid-grace-period must see
+// host_reconnecting: true too, not just a client that was already
+// connected when the host disconnected.
+func TestGetParty_IncludesHostReconnecting(t *testing.T) {
+	app, srv := newTestApp(t)
+	c := loginTestClient(t, srv)
+	_, created := c.do("POST", "/api/parties", map[string]string{"name": "Movie Night"}, true)
+	partyID := created["party_id"].(string)
+
+	p, ok := app.Hub.Get(partyID)
+	if !ok {
+		t.Fatal("party not found in hub")
+	}
+	if _, err := p.Join("user-alice", "Alice"); err != nil {
+		t.Fatal(err)
+	}
+	p.Disconnect("user-alice") // host (alice) drops -- starts the grace-period clock
+
+	resp, got := c.do("GET", "/api/parties/"+partyID, nil, false)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d body=%v", resp.StatusCode, got)
+	}
+	if got["host_reconnecting"] != true {
+		t.Errorf("host_reconnecting = %v, want true while the host is disconnected within the grace period", got["host_reconnecting"])
+	}
+}
+
 func TestGetParty_UnknownID_404(t *testing.T) {
 	_, srv := newTestApp(t)
 	c := loginTestClient(t, srv)
