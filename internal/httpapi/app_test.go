@@ -1305,6 +1305,31 @@ func TestHandleGetEmbyUser_ResolvesDisplayNameAndAvatar(t *testing.T) {
 	}
 }
 
+// A viewer looking up their own id (the sidebar's own-avatar case) isn't a
+// special case handleGetEmbyUser needs to know about -- it's the exact same
+// GET /Users/{id} call as looking up anyone else, just with targetUserID
+// equal to the viewer's own id, which Emby always permits for a user's own
+// token. This pins that nothing here accidentally assumes target != viewer.
+func TestHandleGetEmbyUser_ResolvesOwnProfile(t *testing.T) {
+	fakeEmbySrv := newFakeEmbyWithUserProfile(t, map[string]map[string]any{
+		"user-alice": {"Id": "user-alice", "Name": "Alice", "PrimaryImageTag": "tag456"},
+	})
+	_, srv := newTestAppWithEmby(t, emby.NewClient(fakeEmbySrv.URL))
+	alice := loginTestClient(t, srv)
+
+	resp, body := alice.do("GET", "/api/emby/users/user-alice", nil, false)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d body=%v", resp.StatusCode, body)
+	}
+	if body["display_name"] != "Alice" {
+		t.Errorf("display_name = %v, want the viewer's own live Emby name", body["display_name"])
+	}
+	avatarURL, _ := body["avatar_url"].(string)
+	if avatarURL == "" || !strings.Contains(avatarURL, "user-alice") {
+		t.Errorf("avatar_url = %q, want a URL for the viewer's own avatar", avatarURL)
+	}
+}
+
 func TestHandleGetEmbyUser_NoPrimaryImage_EmptyAvatarURL(t *testing.T) {
 	fakeEmbySrv := newFakeEmbyWithUserProfile(t, map[string]map[string]any{
 		"user-bob": {"Id": "user-bob", "Name": "Bobby", "PrimaryImageTag": ""},

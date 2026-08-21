@@ -8,12 +8,14 @@
 // chat message's own payload -- it's resolved live, per the *viewing*
 // participant's own Emby token, via GET /api/emby/users/{id} (see
 // ARCHITECTURE.md's Party chat section) -- the same per-viewer resolution
-// pattern already used for playlist item titles/posters. Resolved profiles
-// are memoized in-memory for the page's lifetime (identityCache below), not
-// persisted, so a repeat sender costs one Emby round trip, not one per
-// message.
+// pattern already used for playlist item titles/posters. Resolution,
+// caching, and avatar-vs-initials rendering now live in avatar.js, shared
+// with the sidebar's own avatar, the dashboard's host rows, and the party
+// room's Watching Now list, so a repeat sender (in any of those places, not
+// just chat) costs one Emby round trip, not one per appearance.
 import { api } from "./api.js";
 import { validateChatBody, POST_SEND_DISABLE_MS } from "./chat-format.js";
+import { resolveIdentity, renderAvatar } from "./avatar.js";
 
 const messagesEl = document.getElementById("chat-messages");
 const inputEl = document.getElementById("chat-input");
@@ -23,29 +25,6 @@ let partyId = null;
 let meUserId = null;
 let sendFn = () => {};
 let onMessageFn = () => {}; // extension point for the fullscreen overlay (added by a later PR)
-
-// userId -> { displayName, avatarUrl } | Promise<...>. A pending Promise is
-// stored (not just the eventual result) so two messages from the same
-// unresolved sender arriving close together share one in-flight request
-// instead of firing a duplicate lookup each.
-const identityCache = new Map();
-
-function chatInitials(name) {
-  return (name || "?").trim().slice(0, 1).toUpperCase();
-}
-
-// Exported so the fullscreen overlay module (chat-overlay.js) can resolve a
-// message's sender identity through this same cache, rather than firing a
-// second, duplicate Emby lookup for a sender the sidebar panel has already
-// resolved (or is already resolving).
-export function resolveIdentity(userId) {
-  if (identityCache.has(userId)) return identityCache.get(userId);
-  const promise = api(`/api/emby/users/${encodeURIComponent(userId)}`)
-    .then((res) => ({ displayName: res.display_name || userId, avatarUrl: res.avatar_url || "" }))
-    .catch(() => ({ displayName: userId, avatarUrl: "" }));
-  identityCache.set(userId, promise);
-  return promise;
-}
 
 function isScrolledToBottom() {
   return messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 40;
@@ -78,12 +57,7 @@ async function renderMessage(msg) {
   // time the identity lookup resolves -- guard against a detached node.
   if (!row.isConnected) return;
   row.querySelector(".chat-message-sender").textContent = identity.displayName;
-  const avatarEl = row.querySelector(".chat-message-avatar");
-  if (identity.avatarUrl) {
-    avatarEl.innerHTML = `<img src="${identity.avatarUrl}" alt="">`;
-  } else {
-    avatarEl.textContent = chatInitials(identity.displayName);
-  }
+  renderAvatar(row.querySelector(".chat-message-avatar"), identity);
 }
 
 async function loadHistory() {

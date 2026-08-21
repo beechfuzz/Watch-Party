@@ -4,6 +4,7 @@
 import { api, setCSRFToken } from "./api.js";
 import { wireSettingsForm } from "./settingsForm.js";
 import { initSidebar } from "./sidebar.js";
+import { resolveIdentity, renderAvatar } from "./avatar.js";
 
 const TICKS_PER_SECOND = 10_000_000;
 
@@ -50,10 +51,6 @@ function formatTicks(ticks) {
   const mm = String(m).padStart(h > 0 ? 2 : 1, "0");
   const ss = String(s).padStart(2, "0");
   return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${ss}` : `${mm}:${ss}`;
-}
-
-function initials(name) {
-  return (name || "?").trim().slice(0, 1).toUpperCase();
 }
 
 async function init() {
@@ -112,7 +109,14 @@ function renderActiveCard(p) {
     el.querySelector(".party-art-title").insertAdjacentHTML("beforeend", `<span></span>`);
     el.querySelector(".party-art-title span").textContent = p.item_title;
   }
-  el.querySelector(".host-row .avatar").textContent = initials(p.host_display_name);
+  const hostAvatarEl = el.querySelector(".host-row .avatar");
+  // Resolved via the *viewer's* own Emby token (same as chat/Watching Now),
+  // never the host's -- see ARCHITECTURE.md's Party chat section. Renders
+  // initials immediately, upgraded to a real picture once resolved.
+  renderAvatar(hostAvatarEl, { avatarUrl: "", displayName: p.host_display_name });
+  resolveIdentity(p.host_user_id).then((identity) => {
+    renderAvatar(hostAvatarEl, { avatarUrl: identity.avatarUrl, displayName: p.host_display_name });
+  });
   el.querySelector(".host-row-text").textContent = `Hosted by ${p.host_display_name}`;
   el.querySelector(".join-btn").addEventListener("click", () => {
     window.location.href = `/party/${encodeURIComponent(p.party_id)}`;

@@ -101,6 +101,10 @@ a { color: inherit; text-decoration: none; }
   display: flex; align-items: center; justify-content: center;
   font-family: var(--font-display); font-size: 13px; font-weight: 600; flex-shrink: 0; position: relative;
 }
+/* Real Emby profile picture, when avatar.js's renderAvatar() has one --
+   sized/positioned to exactly replace the initials it swaps out for, so
+   there's no layout jump between the two states. */
+.avatar img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; display: block; }
 
 .wp-mark {
   width: 30px; height: 30px; border-radius: 8px;
@@ -219,6 +223,13 @@ dialog h3 { font-family: var(--font-display); font-size: 16px; font-weight: 600;
 .nav-item.is-coming-soon .nav-label-group { display: flex; align-items: center; gap: 12px; }
 
 .sidebar-user { display: flex; align-items: center; gap: 10px; padding: 16px 18px; border-top: 1px solid var(--border-quiet); }
+/* #user-avatar-initial is a sibling of .status-dot, not the whole .avatar
+   div, so renderAvatar() can swap it for a real picture without touching
+   the status indicator. It needs its own full-size box for a nested
+   avatar img's 100%/100% sizing (the .avatar img rule above) to resolve
+   against -- by default it's just an inline text node sized to its
+   content. */
+#user-avatar-initial { display: flex; width: 100%; height: 100%; align-items: center; justify-content: center; }
 .status-dot {
   position: absolute; bottom: -1px; right: -1px; width: 9px; height: 9px; border-radius: 50%;
   background: var(--accent-teal); border: 2px solid var(--bg-sidebar);
