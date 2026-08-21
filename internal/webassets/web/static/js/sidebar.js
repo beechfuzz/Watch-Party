@@ -24,6 +24,7 @@
 // use for the right sidebar's collapse/resize state.
 import { api, clearCSRFToken } from "./api.js";
 import { loadCollapsedState, serializeCollapsedState } from "./sidebar-collapse.js";
+import { resolveIdentity, renderAvatar } from "./avatar.js";
 
 const COLLAPSE_STORAGE_KEY = "watchparty:sidebarCollapsed";
 
@@ -74,12 +75,18 @@ export function initSidebar({ onBeforeNavigate, onLoggedOut } = {}) {
 
   return {
     setUser(me) {
-      avatarInitial.textContent = initials(me.user.display_name);
+      // Own-avatar lookup: the same GET /api/emby/users/{id} resolution
+      // every other avatar in this app uses, just with the target set to
+      // the signed-in user's own id -- a user reading their own Emby
+      // profile is always permitted, so this isn't a special case for the
+      // backend (see ARCHITECTURE.md's Party chat section). Shares
+      // avatar.js's page-wide cache, so this costs a fresh round trip only
+      // if nothing else on the page already resolved this same user.
+      renderAvatar(avatarInitial, { avatarUrl: "", displayName: me.user.display_name });
+      resolveIdentity(me.user.id).then((identity) => {
+        renderAvatar(avatarInitial, identity);
+      });
       userName.textContent = me.user.display_name;
     },
   };
-}
-
-function initials(name) {
-  return (name || "?").trim().slice(0, 1).toUpperCase();
 }

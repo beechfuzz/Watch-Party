@@ -17,7 +17,8 @@
 // timer -- only one overlay is ever visible at a time (see .player-frame's
 // :not(:fullscreen) CSS guard for the belt-and-suspenders "never renders
 // outside fullscreen" rule).
-import { resolveIdentity, sendChatMessage } from "./chat.js";
+import { sendChatMessage } from "./chat.js";
+import { resolveIdentity } from "./avatar.js";
 import { truncateForOverlay, shouldShowOverlay } from "./chat-format.js";
 
 const AUTO_DISMISS_MS = 6000;

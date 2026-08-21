@@ -21,6 +21,7 @@ import {
 import { isRealPause } from "./playback-events.js";
 import { createHlsInstanceManager } from "./hls-source.js";
 import { initSidebar } from "./sidebar.js";
+import { resolveIdentity, renderAvatar } from "./avatar.js";
 import {
   PANEL_KEYS,
   loadPanelState,
@@ -464,10 +465,6 @@ function initSidebarPanels() {
 }
 initSidebarPanels();
 
-function initials(name) {
-  return (name || "?").trim().slice(0, 1).toUpperCase();
-}
-
 function renderMembers(members) {
   membersEl.innerHTML = "";
   const connectedCount = members.filter((m) => m.connection_status === "connected").length;
@@ -486,7 +483,17 @@ function renderMembers(members) {
         <div class="participant-status${m.connection_status === "connected" ? " online" : ""}"></div>
       </div>
     `;
-    row.querySelector(".avatar").textContent = initials(m.display_name);
+    const avatarEl = row.querySelector(".avatar");
+    // Resolved via the *viewing* participant's own Emby token, same as
+    // chat -- never a shared/service token, never the member's own token.
+    // Renders initials immediately, upgraded once resolved; guarded against
+    // a detached row since renderMembers fully rebuilds membersEl on every
+    // state broadcast, so a slow lookup can outlive the row it was for.
+    renderAvatar(avatarEl, { avatarUrl: "", displayName: m.display_name });
+    resolveIdentity(m.user_id).then((identity) => {
+      if (!row.isConnected) return;
+      renderAvatar(avatarEl, { avatarUrl: identity.avatarUrl, displayName: m.display_name });
+    });
     const nameEl = row.querySelector(".participant-name");
     nameEl.append(m.display_name);
     if (m.is_host) {
