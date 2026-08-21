@@ -22,6 +22,7 @@ import { isRealPause } from "./playback-events.js";
 import { createHlsInstanceManager } from "./hls-source.js";
 import { initSidebar } from "./sidebar.js";
 import { resolveIdentity, renderAvatar } from "./avatar.js";
+import { visibleAttendees } from "./attendees.js";
 import {
   PANEL_KEYS,
   loadPanelState,
@@ -465,14 +466,24 @@ function initSidebarPanels() {
 }
 initSidebarPanels();
 
-function renderMembers(members) {
+function renderMembers(members, hostReconnecting) {
   membersEl.innerHTML = "";
   const connectedCount = members.filter((m) => m.connection_status === "connected").length;
-  participantsHeading.textContent = `Watching now — ${connectedCount}`;
+  participantsHeading.textContent = `Attendees — ${connectedCount}`;
 
-  for (const m of members) {
+  // Only currently-connected accounts are shown, with one pinned exception:
+  // the host, disconnected but still inside the live host-authority grace
+  // period (hostReconnecting) -- see attendees.js and ARCHITECTURE.md's
+  // Attendees section. Any other disconnected/left account simply isn't in
+  // this list at all, rather than lingering dimmed.
+  for (const m of visibleAttendees(members, hostReconnecting)) {
     const row = document.createElement("div");
-    row.className = `participant-row${m.connection_status !== "connected" ? " is-offline" : ""}`;
+    // Any row here with connection_status !== "connected" is, by
+    // construction of visibleAttendees, the reconnecting host -- the only
+    // case the filter above lets through.
+    row.className = `participant-row${
+      m.connection_status === "connected" ? (m.is_host ? " is-host" : "") : " is-host-reconnecting"
+    }`;
     row.innerHTML = `
       <div class="pulse-avatar">
         <span class="pulse-ring"></span>
@@ -585,14 +596,24 @@ function renderCountdown() {
 
 function handleSnapshotOrControl(env) {
   const p = env.payload;
-  if (isStale(currentSeq, p.sequence_number)) return;
-  currentSeq = p.sequence_number;
-
-  const state = {
-    positionTicks: p.position_ticks,
-    isPlaying: p.is_playing,
-    serverTimestampMs: Date.parse(p.server_timestamp),
-  };
+  // Sequence-number staleness rejection exists to protect the
+  // *playback-position* stream from a reordered/delayed control message
+  // clobbering fresher state (CLAUDE.md's server-authoritative invariant) --
+  // it does not apply to a snapshot's other fields (members, party
+  // settings, item identity, the end-of-media countdown), which aren't
+  // part of that sequence-numbered stream at all and can legitimately
+  // change (a member joining/disconnecting, a settings edit) without the
+  // playback sequence number moving. Gating the whole snapshot on
+  // isStale() meant every one of those changes was silently dropped by
+  // every already-connected client whenever the party's sequence number
+  // hadn't advanced since their last applied state -- the common case for
+  // an idle or steadily-playing party -- so the Attendees list (and party
+  // name/settings) never updated live except when a play/pause/seek
+  // happened to coincide. Found via real-browser verification of the
+  // Attendees list (see ARCHITECTURE.md's Attendees section): the server
+  // was sending a correct, up-to-date members list on every periodic
+  // snapshot, but the client was discarding it.
+  const stale = isStale(currentSeq, p.sequence_number);
 
   if (env.type === "snapshot") {
     hostUserId = p.host_user_id;
@@ -603,7 +624,7 @@ function handleSnapshotOrControl(env) {
       autoplay_enabled: p.autoplay_enabled, autoplay_delay_seconds: p.autoplay_delay_seconds,
     };
     updateNextItemBanner(p);
-    renderMembers(p.members || []);
+    renderMembers(p.members || [], p.host_reconnecting);
     // The current item can change after join now (playlist advance, end of
     // playlist, or a host selecting something else) -- not just at load
     // time. A changed item_id means a new stream entirely: re-fetch (or
@@ -617,6 +638,18 @@ function handleSnapshotOrControl(env) {
       loadCurrentItem(currentItemId);
       loadPlaylist();
     }
+  }
+
+  if (stale) return;
+  currentSeq = p.sequence_number;
+
+  const state = {
+    positionTicks: p.position_ticks,
+    isPlaying: p.is_playing,
+    serverTimestampMs: Date.parse(p.server_timestamp),
+  };
+
+  if (env.type === "snapshot") {
     applyAuthoritativeState(state, { hardSeek: true });
   } else if (env.type === "seek") {
     applyAuthoritativeState(state, { hardSeek: true });
@@ -719,7 +752,7 @@ async function main() {
   updateNextItemBanner(partyInfo); // in case the page loads mid-countdown (e.g. a refresh)
   const hostMember = (partyInfo.members || []).find((m) => m.is_host);
   partySubtitleEl.textContent = hostMember ? `Hosted by ${hostMember.display_name}` : "";
-  renderMembers(partyInfo.members || []);
+  renderMembers(partyInfo.members || [], partyInfo.host_reconnecting);
 
   initPlaylist(partyId, isHost);
   loadPlaylist();

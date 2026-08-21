@@ -11,7 +11,7 @@
 // pattern already used for playlist item titles/posters. Resolution,
 // caching, and avatar-vs-initials rendering now live in avatar.js, shared
 // with the sidebar's own avatar, the dashboard's host rows, and the party
-// room's Watching Now list, so a repeat sender (in any of those places, not
+// room's Attendees list, so a repeat sender (in any of those places, not
 // just chat) costs one Emby round trip, not one per appearance.
 import { api } from "./api.js";
 import { validateChatBody, POST_SEND_DISABLE_MS } from "./chat-format.js";

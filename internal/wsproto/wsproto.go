@@ -132,6 +132,14 @@ type SnapshotPayload struct {
 	// resolved fresh at the deadline, not fixed when the countdown starts),
 	// only when the countdown ends and what happens then.
 	PendingTransition *PendingTransition `json:"pending_transition,omitempty"`
+
+	// HostReconnecting is true only while the current host is disconnected
+	// and still inside the live HOST_GRACE_PERIOD_SECONDS window — false the
+	// rest of the time, including immediately after grace expiry (whether or
+	// not a successor was found). Lets a client keep the host's row visible
+	// and pinned during a live grace-period disconnect without inferring it
+	// from ConnectionStatus alone. See ARCHITECTURE.md's Attendees section.
+	HostReconnecting bool `json:"host_reconnecting"`
 }
 
 // PendingTransition describes an in-progress end-of-media countdown.

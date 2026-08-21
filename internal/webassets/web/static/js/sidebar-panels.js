@@ -1,4 +1,4 @@
-// Pure state logic for the party page's right sidebar (Watching Now /
+// Pure state logic for the party page's right sidebar (Attendees /
 // Playlist / Chat): collapse toggling, adjacent-pane resize math, and
 // tolerant load/serialize for the persisted (localStorage) shape. Kept
 // DOM-free and unit-testable the same way playlist-select.js/hls-source.js

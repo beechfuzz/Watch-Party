@@ -360,6 +360,7 @@ func (p *Party) buildSnapshot() wsproto.SnapshotPayload {
 		AutoplayEnabled:      p.settings.AutoplayEnabled,
 		AutoplayDelaySeconds: p.settings.AutoplayDelaySeconds,
 		PendingTransition:    pending,
+		HostReconnecting:     p.hostDisconnectedAt != nil,
 	}
 }
 

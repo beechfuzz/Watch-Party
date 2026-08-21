@@ -2,7 +2,7 @@ import { api } from "./api.js";
 
 // Shared account-avatar resolution and rendering, used everywhere an
 // account's avatar appears: the sidebar's own-user avatar (sidebar.js), the
-// dashboard's per-party host row (app.js), the party room's Watching Now
+// dashboard's per-party host row (app.js), the party room's Attendees
 // list (player.js), and party chat (chat.js). All four resolve the same
 // way -- GET /api/emby/users/{id}, using the *viewing* participant's own
 // Emby token, never a shared/service token or the target's own token (see

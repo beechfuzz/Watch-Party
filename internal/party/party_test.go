@@ -525,6 +525,116 @@ func TestHostLeave_TransfersImmediately(t *testing.T) {
 	}
 }
 
+// --- Snapshot().HostReconnecting: the Attendees list's pinned-reconnecting
+// signal (see ARCHITECTURE.md's Attendees section) ---
+
+func TestSnapshot_HostReconnecting_TrueDuringGracePeriod(t *testing.T) {
+	hub := newTestHub(t)
+	seedUser(t, hub.store, "host", "Host")
+	seedUser(t, hub.store, "p1", "Participant")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
+	_, _ = p.Join("host", "Host")
+	_, _ = p.Join("p1", "Participant")
+	p.AttachConn("p1", &fakeConn{})
+
+	p.Disconnect("host")
+
+	if got := p.Snapshot().HostReconnecting; !got {
+		t.Errorf("HostReconnecting = %v, want true while host is disconnected within the grace period", got)
+	}
+}
+
+func TestSnapshot_HostReconnecting_FalseAfterReconnect(t *testing.T) {
+	hub := newTestHub(t)
+	seedUser(t, hub.store, "host", "Host")
+	seedUser(t, hub.store, "p1", "Participant")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
+	_, _ = p.Join("host", "Host")
+	_, _ = p.Join("p1", "Participant")
+	p.AttachConn("p1", &fakeConn{})
+
+	p.Disconnect("host")
+	if _, err := p.Join("host", "Host"); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := p.Snapshot().HostReconnecting; got {
+		t.Errorf("HostReconnecting = %v, want false immediately after the host reconnects", got)
+	}
+}
+
+func TestSnapshot_HostReconnecting_FalseAfterGraceExpiry(t *testing.T) {
+	hub := newTestHub(t)
+	seedUser(t, hub.store, "host", "Host")
+	seedUser(t, hub.store, "successor", "Successor")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
+	_, _ = p.Join("host", "Host")
+	_, _ = p.Join("successor", "Successor")
+	p.AttachConn("successor", &fakeConn{})
+
+	p.Disconnect("host")
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && p.HostUserID() != "successor" {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if p.HostUserID() != "successor" {
+		t.Fatal("host transfer did not happen within deadline")
+	}
+
+	if got := p.Snapshot().HostReconnecting; got {
+		t.Errorf("HostReconnecting = %v, want false once grace has expired and host authority transferred", got)
+	}
+}
+
+// TestSnapshot_HostReconnecting_FalseWhenNoSuccessor covers the edge case
+// where grace expires with nobody else connected to take over: hostUserID
+// stays with the original (still-disconnected) host, but HostReconnecting
+// must still go false — the live grace window is over, even though
+// authority never actually moved. This is what makes the departed host
+// correctly drop out of the Attendees list instead of staying pinned
+// forever.
+func TestSnapshot_HostReconnecting_FalseWhenNoSuccessor(t *testing.T) {
+	hub := newTestHub(t)
+	seedUser(t, hub.store, "host", "Host")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
+	_, _ = p.Join("host", "Host")
+
+	p.Disconnect("host")
+
+	// The grace check runs on a fixed 1s ticker (independent of
+	// HostGracePeriod's own, much shorter, test value) — poll rather than a
+	// single fixed sleep, matching TestHostGracePeriod_ExpiresAndTransfersToEarliestJoined's
+	// pattern for the same reason.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && p.Snapshot().HostReconnecting {
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if got := p.HostUserID(); got != "host" {
+		t.Fatalf("HostUserID = %q, want %q (no eligible successor, authority stays put)", got, "host")
+	}
+	if got := p.Snapshot().HostReconnecting; got {
+		t.Errorf("HostReconnecting = %v, want false once the grace window has elapsed, even with no successor", got)
+	}
+}
+
+func TestSnapshot_HostReconnecting_FalseForNonHostDisconnect(t *testing.T) {
+	hub := newTestHub(t)
+	seedUser(t, hub.store, "host", "Host")
+	seedUser(t, hub.store, "p1", "Participant")
+	p := createPartyWithItem(t, hub, "party1", "item1", 1000*10_000_000, "host")
+	_, _ = p.Join("host", "Host")
+	p.AttachConn("host", &fakeConn{})
+	_, _ = p.Join("p1", "Participant")
+
+	p.Disconnect("p1")
+
+	if got := p.Snapshot().HostReconnecting; got {
+		t.Errorf("HostReconnecting = %v, want false — the disconnected member is not the host", got)
+	}
+}
+
 // TestDisconnect_DoesNotDowngradeAlreadyLeft covers the real bug this
 // found: an explicit Leave (e.g. the frontend's leave-then-navigate flow)
 // is always followed by the same connection's read loop unwinding, which
