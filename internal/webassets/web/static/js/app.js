@@ -113,8 +113,14 @@ function renderActiveCard(p) {
   // Resolved via the *viewer's* own Emby token (same as chat/Watching Now),
   // never the host's -- see ARCHITECTURE.md's Party chat section. Renders
   // initials immediately, upgraded to a real picture once resolved.
+  // Guarded against a detached card the same way player.js's renderMembers
+  // guards its rows: loadParties() re-runs (rebuilding activeGrid from
+  // scratch) on a logout/login cycle that doesn't reload the page, so a
+  // slow lookup from a previous render can still be in flight once this
+  // card is gone.
   renderAvatar(hostAvatarEl, { avatarUrl: "", displayName: p.host_display_name });
   resolveIdentity(p.host_user_id).then((identity) => {
+    if (!hostAvatarEl.isConnected) return;
     renderAvatar(hostAvatarEl, { avatarUrl: identity.avatarUrl, displayName: p.host_display_name });
   });
   el.querySelector(".host-row-text").textContent = `Hosted by ${p.host_display_name}`;
