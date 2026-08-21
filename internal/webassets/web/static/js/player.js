@@ -485,13 +485,9 @@ function renderMembers(members, hostReconnecting) {
       m.connection_status === "connected" ? (m.is_host ? " is-host" : "") : " is-host-reconnecting"
     }`;
     row.innerHTML = `
-      <div class="pulse-avatar">
-        <span class="pulse-ring"></span>
-        <div class="avatar"></div>
-      </div>
+      <div class="avatar"></div>
       <div>
         <div class="participant-name"></div>
-        <div class="participant-status${m.connection_status === "connected" ? " online" : ""}"></div>
       </div>
     `;
     const avatarEl = row.querySelector(".avatar");
@@ -510,8 +506,6 @@ function renderMembers(members, hostReconnecting) {
     if (m.is_host) {
       nameEl.insertAdjacentHTML("beforeend", ` <svg class="host-star" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.9 6.6 7.1.6-5.4 4.7 1.7 7-6.3-3.9L5.7 21l1.7-7-5.4-4.7 7.1-.6L12 2z"/></svg>`);
     }
-    row.querySelector(".participant-status").textContent =
-      m.connection_status === "connected" ? "In sync" : m.connection_status === "disconnected" ? "Reconnecting…" : "Left";
 
     if (isHost() && !m.is_host && m.connection_status === "connected") {
       const btn = document.createElement("button");
