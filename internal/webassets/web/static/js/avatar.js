@@ -49,7 +49,7 @@ export function initials(name) {
 
 // renderAvatar fills el with either a real profile picture or the
 // initials fallback. Used for both a plain "whole element is the avatar"
-// container (host-row/pulse-avatar/chat-message-avatar's .avatar div) and
+// container (host-row/participant-row/chat-message-avatar's .avatar div) and
 // an inner initial-holder element (sidebar's #user-avatar-initial span,
 // which has to stay a sibling of the .status-dot indicator rather than
 // having its parent's markup replaced outright).

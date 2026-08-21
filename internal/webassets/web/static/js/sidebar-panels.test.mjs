@@ -43,8 +43,8 @@ test("loadPanelState: merges partial stored state over defaults, ignoring unknow
   const state = loadPanelState(raw);
   const defaults = defaultPanelState();
 
-  assert.equal(state["watching-now"].collapsed, defaults["watching-now"].collapsed);
-  assert.equal(state["watching-now"].heightPx, defaults["watching-now"].heightPx);
+  assert.equal(state.attendees.collapsed, defaults.attendees.collapsed);
+  assert.equal(state.attendees.heightPx, defaults.attendees.heightPx);
 
   assert.equal(state.playlist.collapsed, true);
   assert.equal(state.playlist.heightPx, 300);
@@ -67,7 +67,7 @@ test("toggleCollapse: flips only the targeted panel's collapsed flag", () => {
   const state = defaultPanelState();
   const next = toggleCollapse(state, "playlist");
   assert.equal(next.playlist.collapsed, true);
-  assert.equal(next["watching-now"].collapsed, false);
+  assert.equal(next.attendees.collapsed, false);
   assert.equal(next.chat.collapsed, false);
   // original state object is untouched (pure function)
   assert.equal(state.playlist.collapsed, false);
@@ -78,34 +78,34 @@ test("toggleCollapse: flips only the targeted panel's collapsed flag", () => {
 
 test("resizePanels: trades height between the dragged pair, conserving their total", () => {
   const state = defaultPanelState();
-  const totalBefore = state["watching-now"].heightPx + state.playlist.heightPx;
+  const totalBefore = state.attendees.heightPx + state.playlist.heightPx;
 
-  const next = resizePanels(state, "watching-now", "playlist", 40);
-  assert.equal(next["watching-now"].heightPx, state["watching-now"].heightPx + 40);
+  const next = resizePanels(state, "attendees", "playlist", 40);
+  assert.equal(next.attendees.heightPx, state.attendees.heightPx + 40);
   assert.equal(next.playlist.heightPx, state.playlist.heightPx - 40);
-  assert.equal(next["watching-now"].heightPx + next.playlist.heightPx, totalBefore);
+  assert.equal(next.attendees.heightPx + next.playlist.heightPx, totalBefore);
 
   // the third panel is untouched
   assert.equal(next.chat.heightPx, state.chat.heightPx);
 });
 
 test("resizePanels: clamps the shrinking panel at MIN_PANEL_HEIGHT and gives the rest to its neighbor", () => {
-  const state = defaultPanelState(); // watching-now=180, playlist=260
-  const total = state["watching-now"].heightPx + state.playlist.heightPx;
+  const state = defaultPanelState(); // attendees=180, playlist=260
+  const total = state.attendees.heightPx + state.playlist.heightPx;
 
-  // Drag far enough negative that watching-now would go below the minimum.
-  const next = resizePanels(state, "watching-now", "playlist", -1000);
-  assert.equal(next["watching-now"].heightPx, MIN_PANEL_HEIGHT);
+  // Drag far enough negative that attendees would go below the minimum.
+  const next = resizePanels(state, "attendees", "playlist", -1000);
+  assert.equal(next.attendees.heightPx, MIN_PANEL_HEIGHT);
   assert.equal(next.playlist.heightPx, total - MIN_PANEL_HEIGHT);
 });
 
 test("resizePanels: clamps the growing panel's neighbor at MIN_PANEL_HEIGHT symmetrically", () => {
   const state = defaultPanelState();
-  const total = state["watching-now"].heightPx + state.playlist.heightPx;
+  const total = state.attendees.heightPx + state.playlist.heightPx;
 
-  const next = resizePanels(state, "watching-now", "playlist", 1000);
+  const next = resizePanels(state, "attendees", "playlist", 1000);
   assert.equal(next.playlist.heightPx, MIN_PANEL_HEIGHT);
-  assert.equal(next["watching-now"].heightPx, total - MIN_PANEL_HEIGHT);
+  assert.equal(next.attendees.heightPx, total - MIN_PANEL_HEIGHT);
 });
 
 test("resizePanels: is a pure function -- does not mutate its input state", () => {
@@ -126,10 +126,10 @@ test("lastExpandedKey: collapsing the last panel hands the grow target to the ne
   assert.equal(lastExpandedKey(state), "playlist");
 });
 
-test("lastExpandedKey: collapsing the last two panels hands the grow target to watching-now", () => {
+test("lastExpandedKey: collapsing the last two panels hands the grow target to attendees", () => {
   let state = toggleCollapse(defaultPanelState(), "chat");
   state = toggleCollapse(state, "playlist");
-  assert.equal(lastExpandedKey(state), "watching-now");
+  assert.equal(lastExpandedKey(state), "attendees");
 });
 
 test("lastExpandedKey: re-expanding a panel gives it back the grow target, since it's re-derived, not sticky", () => {

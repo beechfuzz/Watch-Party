@@ -6,13 +6,13 @@
 // player.js's initSidebarPanels for the DOM/localStorage glue that calls
 // into this module.
 
-export const PANEL_KEYS = ["watching-now", "playlist", "chat"];
+export const PANEL_KEYS = ["attendees", "playlist", "chat"];
 
 // Arbitrary but reasonable starting split -- not derived from any
 // measured container height, since flexbox's own shrink behavior (see
 // .sidebar-block's flex-shrink:1 in style.css) scales these down
 // proportionally if their sum ever exceeds the column's actual height.
-const DEFAULT_HEIGHTS = { "watching-now": 180, playlist: 260, chat: 200 };
+const DEFAULT_HEIGHTS = { attendees: 180, playlist: 260, chat: 200 };
 
 export const MIN_PANEL_HEIGHT = 80;
 
