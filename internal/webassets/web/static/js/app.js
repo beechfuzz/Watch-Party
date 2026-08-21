@@ -110,7 +110,7 @@ function renderActiveCard(p) {
     el.querySelector(".party-art-title span").textContent = p.item_title;
   }
   const hostAvatarEl = el.querySelector(".host-row .avatar");
-  // Resolved via the *viewer's* own Emby token (same as chat/Watching Now),
+  // Resolved via the *viewer's* own Emby token (same as chat/Attendees),
   // never the host's -- see ARCHITECTURE.md's Party chat section. Renders
   // initials immediately, upgraded to a real picture once resolved.
   // Guarded against a detached card the same way player.js's renderMembers
