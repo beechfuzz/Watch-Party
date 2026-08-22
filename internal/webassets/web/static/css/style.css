@@ -672,9 +672,16 @@ dialog h3 { font-family: var(--font-display); font-size: 16px; font-weight: 600;
 }
 .playlist-item-body { min-width: 0; flex: 1; }
 .playlist-item-title {
-  font-size: 12.5px; font-weight: 600; color: var(--text-primary);
+  font-size: 12.5px; font-weight: 500; color: var(--text-primary);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* The reference mockup (playlist.png) shows the series-name line bolder
+   than the season/episode line under it -- but it never shows a movie
+   row, so that weight bump is scoped to the episode case specifically
+   (via is-series-name, set only when playlist.js's isEpisode is true)
+   rather than applied to .playlist-item-title itself, which a movie row's
+   title and a restricted row's placeholder title also use. */
+.playlist-item-title.is-series-name { font-weight: 600; }
 .playlist-item-series {
   font-size: 12px; font-weight: 400; color: var(--text-primary); margin-top: 1px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;

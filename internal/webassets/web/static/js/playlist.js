@@ -152,6 +152,10 @@ function renderPlaylistItem(item, posClass) {
   }
   row.querySelector(".playlist-item-title").textContent = isEpisode ? item.series_name : item.title;
   row.querySelector(".playlist-item-title").classList.toggle("is-restricted", !!item.restricted);
+  // Bolder weight for the series-name line specifically (see style.css) --
+  // scoped here rather than on .playlist-item-title itself, which a movie
+  // row's title (and a restricted row's placeholder) also use.
+  row.querySelector(".playlist-item-title").classList.toggle("is-series-name", isEpisode);
   if (isEpisode) {
     row.querySelector(".playlist-item-series").textContent = formatEpisodeLine(item);
   }
