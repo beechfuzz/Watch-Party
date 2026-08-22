@@ -471,6 +471,7 @@ function initSidebarPanels() {
       const onUp = () => {
         handle.classList.remove("is-dragging");
         handle.removeEventListener("pointermove", onMove);
+        handle.releasePointerCapture(e.pointerId);
         persist();
       };
       handle.addEventListener("pointermove", onMove);
@@ -538,6 +539,7 @@ function initSidebarColumn() {
     const onUp = () => {
       handle.classList.remove("is-dragging");
       handle.removeEventListener("pointermove", onMove);
+      handle.releasePointerCapture(e.pointerId);
       persist();
     };
     handle.addEventListener("pointermove", onMove);
