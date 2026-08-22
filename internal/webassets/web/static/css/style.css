@@ -408,11 +408,25 @@ dialog h3 { font-family: var(--font-display); font-size: 16px; font-weight: 600;
    pair already uses (ARCHITECTURE.md §7) extended one level deeper. */
 .main-content.party-main { padding: 0; display: flex; flex-direction: column; overflow: hidden; }
 
+/* The middle/right tracks are driven entirely by --party-col-handle-w/
+   --party-sidebar-w (set inline on #party-layout by player.js's
+   applyColumnState, the same "JS writes a px value, CSS just consumes it"
+   idiom sidebar-panels.js already uses for each block's flex-basis
+   height) rather than a second competing grid-template-columns rule for
+   the collapsed case -- see the .party-sidebar-col.is-collapsed comment
+   below for why that distinction matters against the 860px breakpoint. */
 .party-layout {
-  display: grid; grid-template-columns: 1fr 300px; gap: 0; align-items: stretch;
+  display: grid;
+  grid-template-columns: 1fr var(--party-col-handle-w, 9px) var(--party-sidebar-w, 300px);
+  gap: 0; align-items: stretch;
   position: relative; z-index: 1; flex: 1; min-height: 0;
 }
-.player-col { padding: 24px 24px 40px 28px; overflow-y: auto; min-height: 0; }
+/* Explicit column assignment, not left to DOM-order auto-placement --
+   each element's track membership is self-evident from its own rule and
+   stays correct even if the markup order in party.html is ever changed. */
+.player-col { grid-column: 1; padding: 24px 24px 40px 28px; overflow-y: auto; min-height: 0; }
+.party-col-resize-handle { grid-column: 2; }
+.party-sidebar-col { grid-column: 3; }
 
 .player-frame {
   position: relative; width: 100%; aspect-ratio: 16/9; border-radius: var(--radius-panel);
@@ -520,6 +534,42 @@ dialog h3 { font-family: var(--font-display); font-size: 16px; font-weight: 600;
   display: flex; flex-direction: column; min-height: 0; overflow-y: hidden;
 }
 
+/* Column-width resize handle -- a vertical analog of .sidebar-resize-handle
+   below (row-resize between blocks), col-resize here since it drags the
+   column's own width instead of a block's height. Purely cosmetic/hit-area
+   styling: the actual width comes from --party-sidebar-w on #party-layout
+   (see .party-layout above), not from anything here. */
+.party-col-resize-handle {
+  grid-row: 1; width: 9px; flex-shrink: 0; cursor: col-resize; position: relative;
+}
+.party-col-resize-handle::after {
+  content: ''; position: absolute; top: 0; bottom: 0; left: 4px; width: 1px;
+  background: var(--border-subtle);
+}
+.party-col-resize-handle:hover::after, .party-col-resize-handle.is-dragging::after { background: var(--text-tertiary); }
+.party-col-resize-handle.is-disabled { cursor: default; pointer-events: none; }
+.party-col-resize-handle.is-disabled::after { background: transparent; }
+
+/* Column collapse: --party-col-handle-w/--party-sidebar-w already resolve
+   to 0 (set inline on #party-layout by applyColumnState -- see the
+   .party-layout comment above for why this is never a second
+   grid-template-columns rule), so this only needs to zero this column's
+   own padding/border and hide its content -- nothing spills into the
+   already-0px track. */
+.party-sidebar-col.is-collapsed { padding: 0; border-left: none; overflow: hidden; }
+.party-sidebar-col.is-collapsed > * { display: none; }
+
+/* Topbar collapse toggle -- lives in .party-actions (see .icon-btn above)
+   rather than inside .party-sidebar-col itself, since a control inside the
+   column would disappear along with it once collapsed, leaving no way
+   back. aria-expanded (flipped by applyColumnState alongside the CSS
+   class, same pairing sidebar.js's left-sidebar toggle already uses)
+   drives the icon rotation directly -- no separate class needed since
+   this button has no ancestor equivalent to .sidebar.is-collapsed. */
+#party-sidebar-collapse-toggle svg { transition: transform 0.15s ease; }
+#party-sidebar-collapse-toggle[aria-expanded="false"] svg { transform: rotate(180deg); }
+@media (prefers-reduced-motion: reduce) { #party-sidebar-collapse-toggle svg { transition: none; } }
+
 /* Each block is a resizable/collapsible panel. Expanded panels carry an
    explicit flex-basis (px, set inline by sidebar-panels.js) that drives
    their height; flex-shrink:1 lets the column's own height still win if a
@@ -581,7 +631,17 @@ dialog h3 { font-family: var(--font-display); font-size: 16px; font-weight: 600;
 
 .participant-row { display: flex; align-items: center; gap: 12px; }
 
-.participant-name { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 500; }
+/* min-width:0 on the flex item wrapping the name (rather than on
+   .participant-row itself) is what lets a long display name actually
+   shrink and ellipsis instead of overflowing the row -- this never
+   mattered while the right sidebar column was a fixed 300px, but does
+   once it can be dragged down to MIN_SIDEBAR_WIDTH (sidebar-column.js). */
+.participant-info { min-width: 0; flex: 1; }
+.participant-name { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 500; min-width: 0; }
+/* The name text alone truncates -- the host star (below) is a sibling of
+   this span, not inside it, so it stays visible instead of being clipped
+   away along with an overflowing long name. */
+.participant-name-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .host-star { color: var(--accent-amber); width: 12px; height: 12px; flex-shrink: 0; }
 /* The connected, currently-authoritative host: bold amber name. */
 .participant-row.is-host .participant-name { color: var(--accent-amber); font-weight: 700; }
@@ -820,8 +880,38 @@ dialog h3 { font-family: var(--font-display); font-size: 16px; font-weight: 600;
 }
 
 @media (max-width: 860px) {
+  /* Single-column stacked layout -- the only rule anywhere that sets
+     grid-template-columns a second time, and it deliberately never
+     references --party-col-handle-w/--party-sidebar-w, so the column
+     collapse/resize feature (sidebar-column.js/player.js) can't outrank it
+     regardless of collapsed state. Dragging a column width means nothing
+     once the sidebar is stacked below the player instead of beside it,
+     so the handle is hidden entirely; the collapse toggle stays live --
+     collapsing still reclaims the vertical space the stacked column
+     takes below the video. */
   .party-layout { grid-template-columns: 1fr; }
+  /* The base rule's explicit grid-column:2/3 (see .party-layout above)
+     must be re-pinned to the single explicit column this rule declares --
+     confirmed against a real rendered instance that leaving them at 2/3
+     doesn't just get ignored, it makes the browser generate *implicit*
+     extra columns (auto-sized to content) to satisfy the placement,
+     silently reintroducing the multi-column layout this media query exists
+     to remove. .party-col-resize-handle's grid-column is moot once it's
+     display:none below (a non-rendered element isn't a grid item at all),
+     but is still pinned here too so this rule doesn't depend on that other
+     rule's presence to stay correct. Both re-pinned to column 1 land on
+     separate auto-generated rows below .player-col, same as this rule
+     already relied on implicit auto-placement to do before this session's
+     explicit grid-column assignments existed. */
+  .party-col-resize-handle, .party-sidebar-col { grid-column: 1; }
   .party-sidebar-col { border-left: none; border-top: 1px solid var(--border-quiet); padding: 24px 24px 40px; }
+  /* Collapsed + stacked: hide the column's own box entirely (not just its
+     children, per the base .is-collapsed rule above) rather than leaving
+     a stray zero-padding empty box below the player -- consistent with
+     "collapsed means fully given back," here given back as vertical
+     scroll space instead of horizontal width. */
+  .party-sidebar-col.is-collapsed { display: none; }
+  .party-col-resize-handle { display: none; }
   .player-col { padding: 20px 20px 0; }
   .party-topbar { padding: 16px 18px; }
 }

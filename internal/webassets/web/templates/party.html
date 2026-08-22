@@ -29,10 +29,13 @@
       <button class="icon-btn" id="party-settings-btn" title="Party Settings" hidden>
         <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="2.8" stroke="currentColor" stroke-width="1.7"/><path d="M19.4 13.5a1.7 1.7 0 0 0 .34 1.87l.06.06a2.05 2.05 0 1 1-2.9 2.9l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56v.17a2.05 2.05 0 1 1-4.1 0v-.09a1.7 1.7 0 0 0-1.11-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2.05 2.05 0 1 1-2.9-2.9l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1.03h-.17a2.05 2.05 0 1 1 0-4.1h.09a1.7 1.7 0 0 0 1.56-1.11 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2.05 2.05 0 1 1 2.9-2.9l.06.06a1.7 1.7 0 0 0 1.87.34H10a1.7 1.7 0 0 0 1.03-1.56v-.17a2.05 2.05 0 1 1 4.1 0v.09a1.7 1.7 0 0 0 1.03 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2.05 2.05 0 1 1 2.9 2.9l-.06.06a1.7 1.7 0 0 0-.34 1.87v.09a1.7 1.7 0 0 0 1.56 1.03h.17a2.05 2.05 0 1 1 0 4.1h-.09a1.7 1.7 0 0 0-1.56 1.03z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
       </button>
+      <button class="icon-btn" id="party-sidebar-collapse-toggle" aria-expanded="true" aria-label="Collapse sidebar" title="Collapse sidebar">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M9 5l7 7-7 7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
     </div>
   </div>
 
-  <div class="party-layout">
+  <div class="party-layout" id="party-layout">
     <div class="player-col">
       <div class="player-frame" id="player-frame">
         <video id="video" playsinline controls></video>
@@ -72,6 +75,8 @@
 
       <p class="error" id="error" hidden></p>
     </div>
+
+    <div class="party-col-resize-handle" id="party-col-resize-handle" title="Drag to resize"></div>
 
     <div class="party-sidebar-col" id="party-sidebar-col">
       <div class="sidebar-block" data-panel-key="attendees">
