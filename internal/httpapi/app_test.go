@@ -50,10 +50,24 @@ func newFakeEmby(t *testing.T, capturePlaybackInfoBody *map[string]any) *httptes
 		})
 	})
 	mux.HandleFunc("/Users/user-alice/Items/item1", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"Id": "item1", "Name": "Movie", "RunTimeTicks": int64(1200000000)})
+		json.NewEncoder(w).Encode(map[string]any{"Id": "item1", "Name": "Movie", "Type": "Movie", "RunTimeTicks": int64(1200000000)})
 	})
+	mux.HandleFunc("/Users/user-alice/Items/item-ep", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"Id": "item-ep", "Name": "Pilot", "Type": "Episode", "RunTimeTicks": int64(600000000),
+			"SeriesName": "Love Is Blind", "IndexNumber": 2, "ParentIndexNumber": 1,
+		})
+	})
+	// item-restricted is deliberately registered for the bulk (batch-add)
+	// endpoint only, not the single-item route above -- simulating an item
+	// this user could see in the browse/batch-add listing at add-time but
+	// can no longer (or never could) access individually, so
+	// handleGetPlaylist's later per-row GetItem call fails and the row
+	// falls back to the "Restricted item" placeholder.
 	mux.HandleFunc("/Users/user-alice/Items", bulkItemsHandler(map[string]map[string]any{
-		"item1": {"Id": "item1", "Name": "Movie", "RunTimeTicks": int64(1200000000)},
+		"item1":           {"Id": "item1", "Name": "Movie", "RunTimeTicks": int64(1200000000)},
+		"item-ep":         {"Id": "item-ep", "Name": "Pilot", "RunTimeTicks": int64(600000000)},
+		"item-restricted": {"Id": "item-restricted", "Name": "Secret Show", "RunTimeTicks": int64(600000000)},
 	}))
 	mux.HandleFunc("/Items/item1/PlaybackInfo", func(w http.ResponseWriter, r *http.Request) {
 		if capturePlaybackInfoBody != nil {
@@ -870,6 +884,84 @@ func TestGetPlaylist_ListsResolvedItems(t *testing.T) {
 	}
 	if entry["restricted"] != false {
 		t.Errorf("restricted = %v, want false", entry["restricted"])
+	}
+	// A movie has no series/season/episode -- these fields are omitempty on
+	// the wire, so they shouldn't be present in the decoded response at all.
+	for _, key := range []string{"series_name", "season_number", "episode_number"} {
+		if _, present := entry[key]; present {
+			t.Errorf("entry[%q] = %v, want key absent for a movie", key, entry[key])
+		}
+	}
+}
+
+func TestGetPlaylist_EpisodeMetadata(t *testing.T) {
+	_, srv := newTestApp(t)
+	c := loginTestClient(t, srv)
+	resp, created := c.do("POST", "/api/parties", map[string]string{"name": "Watch Night"}, true)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create party: status = %d body=%v", resp.StatusCode, created)
+	}
+	partyID := created["party_id"].(string)
+	if resp2, added := addPlaylistItemViaBatch(t, c, partyID, "item-ep"); resp2.StatusCode != http.StatusCreated {
+		t.Fatalf("add playlist item: status = %d body=%v", resp2.StatusCode, added)
+	}
+
+	resp3, got := c.do("GET", "/api/parties/"+partyID+"/playlist", nil, false)
+	if resp3.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d body=%v", resp3.StatusCode, got)
+	}
+	items, ok := got["items"].([]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("items = %v, want exactly one entry", got["items"])
+	}
+	entry := items[0].(map[string]any)
+	if entry["type"] != "Episode" {
+		t.Errorf("type = %v, want %q", entry["type"], "Episode")
+	}
+	if entry["series_name"] != "Love Is Blind" {
+		t.Errorf("series_name = %v, want %q", entry["series_name"], "Love Is Blind")
+	}
+	if entry["season_number"] != float64(1) {
+		t.Errorf("season_number = %v, want 1", entry["season_number"])
+	}
+	if entry["episode_number"] != float64(2) {
+		t.Errorf("episode_number = %v, want 2", entry["episode_number"])
+	}
+}
+
+func TestGetPlaylist_RestrictedItemHasNoSeriesMetadata(t *testing.T) {
+	_, srv := newTestApp(t)
+	c := loginTestClient(t, srv)
+	resp, created := c.do("POST", "/api/parties", map[string]string{"name": "Watch Night"}, true)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create party: status = %d body=%v", resp.StatusCode, created)
+	}
+	partyID := created["party_id"].(string)
+	if resp2, added := addPlaylistItemViaBatch(t, c, partyID, "item-restricted"); resp2.StatusCode != http.StatusCreated {
+		t.Fatalf("add playlist item: status = %d body=%v", resp2.StatusCode, added)
+	}
+
+	resp3, got := c.do("GET", "/api/parties/"+partyID+"/playlist", nil, false)
+	if resp3.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d body=%v", resp3.StatusCode, got)
+	}
+	items, ok := got["items"].([]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("items = %v, want exactly one entry", got["items"])
+	}
+	entry := items[0].(map[string]any)
+	if entry["restricted"] != true {
+		t.Errorf("restricted = %v, want true", entry["restricted"])
+	}
+	if entry["title"] != "Restricted item" {
+		t.Errorf("title = %v, want %q", entry["title"], "Restricted item")
+	}
+	// Real title/series metadata (the fake Emby server's "Secret Show")
+	// must never leak through, at all, for a restricted item.
+	for _, key := range []string{"series_name", "season_number", "episode_number"} {
+		if _, present := entry[key]; present {
+			t.Errorf("entry[%q] = %v, want key absent for a restricted item", key, entry[key])
+		}
 	}
 }
 

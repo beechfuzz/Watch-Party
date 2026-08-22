@@ -92,6 +92,31 @@ export function addButtonLabel(count) {
   return `Add ${count} Selected Item${count === 1 ? "" : "s"}`;
 }
 
+// "S01:E02 - Episode Title" notation for one Playlist block row -- item is
+// the playlistItemView shape GET /api/parties/{id}/playlist returns
+// (season_number, episode_number, title), zero-padded to two digits to
+// match the design reference. Distinct from formatSelectedLabel above,
+// which formats an unpadded "S1E2" for the Add to Playlist browse dialog's
+// Selected Media panel -- a different UI surface with its own established
+// format, not something this should disturb.
+export function formatEpisodeLine(item) {
+  const season = String(item.season_number).padStart(2, "0");
+  const episode = String(item.episode_number).padStart(2, "0");
+  return `S${season}:E${episode} - ${item.title}`;
+}
+
+// Where one Playlist block row sits relative to the party's current item,
+// for position-based text coloring: "above"/"current"/"below", or null
+// when there is no current item at all (idle party -- nothing to compare
+// position against, so every row falls back to the neutral/default
+// treatment rather than guessing "already played"). Pure so the
+// three-way comparison is unit-tested directly.
+export function positionRelativeToCurrent(itemPosition, currentPosition) {
+  if (currentPosition === null) return null;
+  if (itemPosition === currentPosition) return "current";
+  return itemPosition < currentPosition ? "above" : "below";
+}
+
 // Playlist reorder drag-and-drop math -- pure so the drop-position
 // arithmetic can be unit tested independent of DOM/drag events, the same
 // split as the selection logic above. Returns a new ordered id array with

@@ -675,9 +675,47 @@ dialog h3 { font-family: var(--font-display); font-size: 16px; font-weight: 600;
   font-size: 12.5px; font-weight: 500; color: var(--text-primary);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.playlist-item-title.is-restricted { color: var(--text-tertiary); font-style: italic; }
-.playlist-item-meta { font-size: 11px; color: var(--text-tertiary); margin-top: 2px; }
+/* The reference mockup (playlist.png) shows the series-name line bolder
+   than the season/episode line under it -- but it never shows a movie
+   row, so that weight bump is scoped to the episode case specifically
+   (via is-series-name, set only when playlist.js's isEpisode is true)
+   rather than applied to .playlist-item-title itself, which a movie row's
+   title and a restricted row's placeholder title also use. */
+.playlist-item-title.is-series-name { font-weight: 600; }
+.playlist-item-series {
+  font-size: 12px; font-weight: 400; color: var(--text-primary); margin-top: 1px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.playlist-item-meta { font-size: 11px; font-style: italic; color: var(--text-tertiary); margin-top: 2px; }
+
+/* Position relative to the currently-playing item -- applies uniformly to
+   every text line in the row (title, series/episode line, duration), per
+   the design reference (playlist.png). "is-current" reuses the existing
+   amber background tint above; "is-above"/"is-below" are only ever set on
+   a non-current row (see playlist.js's renderPlaylistItem) -- there's
+   deliberately no rule for "no current item" (idle party), which leaves
+   every row in its default, unstyled color instead. */
+.playlist-item.is-above .playlist-item-title,
+.playlist-item.is-above .playlist-item-series,
+.playlist-item.is-above .playlist-item-meta { color: var(--text-tertiary); }
+.playlist-item.is-below .playlist-item-title,
+.playlist-item.is-below .playlist-item-series,
+.playlist-item.is-below .playlist-item-meta { color: var(--text-primary); }
+.playlist-item.is-current .playlist-item-title,
+.playlist-item.is-current .playlist-item-series,
 .playlist-item.is-current .playlist-item-meta { color: var(--accent-amber); }
+/* Matches the position rules above's specificity (3 classes: .playlist-item
+   .playlist-item-title .is-restricted) and is declared after them, so it
+   always wins the cascade tie -- a restricted row's placeholder title
+   keeps its own fixed, distinct treatment (never amber, as if it were a
+   real currently-playing title; never blending into an ordinary
+   above/below row) regardless of where it sits in the queue. The
+   series/duration lines are unaffected -- a restricted row never has a
+   series/episode line (see playlist.js), and its duration line still
+   follows the ordinary position rules above, matching this codebase's
+   existing precedent of "is-current" already overriding the duration line
+   even when a row is restricted. */
+.playlist-item .playlist-item-title.is-restricted { color: var(--text-tertiary); font-style: italic; }
 .playlist-item-btn {
   width: 26px; height: 26px; flex-shrink: 0; border-radius: 6px; background: transparent; border: none;
   color: var(--text-tertiary); display: flex; align-items: center; justify-content: center;
