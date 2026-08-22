@@ -31,6 +31,12 @@ import {
   resizePanels,
   lastExpandedKey,
 } from "./sidebar-panels.js";
+import {
+  loadColumnState,
+  serializeColumnState,
+  toggleColumnCollapse,
+  resizeColumn,
+} from "./sidebar-column.js";
 
 const partyId = window.WATCH_PARTY_ID;
 const video = document.getElementById("video");
@@ -465,6 +471,7 @@ function initSidebarPanels() {
       const onUp = () => {
         handle.classList.remove("is-dragging");
         handle.removeEventListener("pointermove", onMove);
+        handle.releasePointerCapture(e.pointerId);
         persist();
       };
       handle.addEventListener("pointermove", onMove);
@@ -473,6 +480,73 @@ function initSidebarPanels() {
   }
 }
 initSidebarPanels();
+
+// --- right sidebar: whole-column horizontal resize + collapse ---
+// DOM/localStorage glue over sidebar-column.js's pure state logic --
+// deliberately independent of initSidebarPanels above: a separate
+// localStorage key, and a separate pair of CSS levers (the
+// --party-col-handle-w/--party-sidebar-w custom properties consumed by
+// .party-layout's grid-template-columns, vs. each block's own inline
+// flex-basis height) so neither module ever reads or writes the other's
+// state. Wired at module load, same early-apply timing as
+// initSidebarPanels/sidebar.js's initSidebar, so a returning visitor's
+// persisted width/collapse state is on screen at first paint.
+const COLUMN_STORAGE_KEY = "watchparty:partySidebarColumn";
+
+function applyColumnState(state) {
+  const layoutEl = document.getElementById("party-layout");
+  const sidebarColEl = document.getElementById("party-sidebar-col");
+  const handleEl = document.getElementById("party-col-resize-handle");
+  const toggleBtn = document.getElementById("party-sidebar-collapse-toggle");
+
+  // Both tracks are forced to 0 together on collapse -- see the
+  // .party-layout/.party-sidebar-col.is-collapsed comments in style.css
+  // for why this is the *only* thing that ever changes grid-template-columns'
+  // effective value (never a second competing rule), so the existing
+  // sub-860px stacked-layout media query can never be outranked by this.
+  layoutEl.style.setProperty("--party-sidebar-w", state.collapsed ? "0px" : `${state.widthPx}px`);
+  layoutEl.style.setProperty("--party-col-handle-w", state.collapsed ? "0px" : "9px");
+  sidebarColEl.classList.toggle("is-collapsed", state.collapsed);
+  handleEl.classList.toggle("is-disabled", state.collapsed);
+  toggleBtn.setAttribute("aria-expanded", String(!state.collapsed));
+  toggleBtn.setAttribute("aria-label", state.collapsed ? "Expand sidebar" : "Collapse sidebar");
+  toggleBtn.title = state.collapsed ? "Expand sidebar" : "Collapse sidebar";
+}
+
+function initSidebarColumn() {
+  let state = loadColumnState(localStorage.getItem(COLUMN_STORAGE_KEY));
+  applyColumnState(state);
+  const persist = () => localStorage.setItem(COLUMN_STORAGE_KEY, serializeColumnState(state));
+
+  document.getElementById("party-sidebar-collapse-toggle").addEventListener("click", () => {
+    state = toggleColumnCollapse(state);
+    applyColumnState(state);
+    persist();
+  });
+
+  const handle = document.getElementById("party-col-resize-handle");
+  handle.addEventListener("pointerdown", (e) => {
+    if (state.collapsed) return; // nothing to drag against a 0-width column
+    e.preventDefault();
+    handle.setPointerCapture(e.pointerId);
+    handle.classList.add("is-dragging");
+    let lastX = e.clientX;
+    const onMove = (moveEvent) => {
+      state = resizeColumn(state, moveEvent.clientX - lastX);
+      lastX = moveEvent.clientX;
+      applyColumnState(state);
+    };
+    const onUp = () => {
+      handle.classList.remove("is-dragging");
+      handle.removeEventListener("pointermove", onMove);
+      handle.releasePointerCapture(e.pointerId);
+      persist();
+    };
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onUp, { once: true });
+  });
+}
+initSidebarColumn();
 
 function renderMembers(members, hostReconnecting) {
   membersEl.innerHTML = "";
@@ -494,8 +568,8 @@ function renderMembers(members, hostReconnecting) {
     }`;
     row.innerHTML = `
       <div class="avatar"></div>
-      <div>
-        <div class="participant-name"></div>
+      <div class="participant-info">
+        <div class="participant-name"><span class="participant-name-text"></span></div>
       </div>
     `;
     const avatarEl = row.querySelector(".avatar");
@@ -510,7 +584,12 @@ function renderMembers(members, hostReconnecting) {
       renderAvatar(avatarEl, { avatarUrl: identity.avatarUrl, displayName: m.display_name });
     });
     const nameEl = row.querySelector(".participant-name");
-    nameEl.append(m.display_name);
+    // Display name goes in its own inner span so it alone gets ellipsis-
+    // truncated at narrow sidebar-column widths (see .participant-name-text
+    // in style.css) -- the host star below is appended as a sibling of
+    // that span, inside .participant-name itself, so it never gets
+    // clipped away along with an overflowing long name.
+    row.querySelector(".participant-name-text").append(m.display_name);
     if (m.is_host) {
       nameEl.insertAdjacentHTML("beforeend", ` <svg class="host-star" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.9 6.6 7.1.6-5.4 4.7 1.7 7-6.3-3.9L5.7 21l1.7-7-5.4-4.7 7.1-.6L12 2z"/></svg>`);
     }
