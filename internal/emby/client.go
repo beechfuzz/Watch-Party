@@ -138,25 +138,52 @@ func (c *Client) AuthenticateByName(ctx context.Context, username, password stri
 }
 
 // ItemInfo is the subset of Emby's item metadata Watch Party needs.
+// Type/SeriesName/SeasonNumber/EpisodeNumber are only meaningful for an
+// Episode-type item -- a Movie (or any other type) leaves them at their
+// zero values, which callers should treat as "not applicable" rather than
+// "unknown episode 0" (see httpapi.handleGetPlaylist).
 type ItemInfo struct {
-	ID           string
-	Name         string
-	RunTimeTicks int64
+	ID            string
+	Name          string
+	Type          string
+	RunTimeTicks  int64
+	SeriesName    string
+	SeasonNumber  int
+	EpisodeNumber int
 }
 
 // GetItem fetches metadata for a media item, used at party creation to
-// persist the authoritative duration_ticks.
+// persist the authoritative duration_ticks, and by handleGetPlaylist to
+// resolve each playlist row's display metadata (title, and now series
+// name / season+episode numbers for an episode item -- see ARCHITECTURE.md's
+// Playlist section). Fields=SeriesName is requested explicitly, the same
+// way ListEpisodes/ListSeasons already have to for that field; IndexNumber
+// and ParentIndexNumber (episode/season number) are parsed without being
+// listed in Fields, on the assumption -- unverified against a live Emby
+// server, same caveat as this package's other endpoint-shape guesses (see
+// the package doc comment and ListItems/ListSeasons/ListEpisodes) -- that
+// they're part of this endpoint's default field set, matching how
+// ListEpisodes already parses them without requesting them.
 func (c *Client) GetItem(ctx context.Context, accessToken, userID, itemID string) (*ItemInfo, error) {
-	u := fmt.Sprintf("%s/Users/%s/Items/%s", c.baseURL, url.PathEscape(userID), url.PathEscape(itemID))
+	vals := url.Values{}
+	vals.Set("Fields", "SeriesName")
+	u := fmt.Sprintf("%s/Users/%s/Items/%s?%s", c.baseURL, url.PathEscape(userID), url.PathEscape(itemID), vals.Encode())
 	var parsed struct {
-		ID           string `json:"Id"`
-		Name         string `json:"Name"`
-		RunTimeTicks int64  `json:"RunTimeTicks"`
+		ID                string `json:"Id"`
+		Name              string `json:"Name"`
+		Type              string `json:"Type"`
+		RunTimeTicks      int64  `json:"RunTimeTicks"`
+		SeriesName        string `json:"SeriesName"`
+		IndexNumber       int    `json:"IndexNumber"`
+		ParentIndexNumber int    `json:"ParentIndexNumber"` // Emby's field for the season number
 	}
 	if err := c.getJSON(ctx, u, accessToken, &parsed); err != nil {
 		return nil, err
 	}
-	return &ItemInfo{ID: parsed.ID, Name: parsed.Name, RunTimeTicks: parsed.RunTimeTicks}, nil
+	return &ItemInfo{
+		ID: parsed.ID, Name: parsed.Name, Type: parsed.Type, RunTimeTicks: parsed.RunTimeTicks,
+		SeriesName: parsed.SeriesName, SeasonNumber: parsed.ParentIndexNumber, EpisodeNumber: parsed.IndexNumber,
+	}, nil
 }
 
 // UserSummary is the subset of Emby's user profile Watch Party needs to

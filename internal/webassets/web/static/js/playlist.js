@@ -22,6 +22,8 @@ import {
   formatSelectedLabel,
   addButtonLabel,
   reorderIds,
+  formatEpisodeLine,
+  positionRelativeToCurrent,
 } from "./playlist-select.js";
 
 const playlistItemsEl = document.getElementById("playlist-items");
@@ -115,10 +117,25 @@ async function commitReorder(orderedIds) {
   }
 }
 
-function renderPlaylistItem(item) {
+// posClass is "above"/"current"/"below"/null, from
+// positionRelativeToCurrent(item.position, currentPosition) -- see
+// loadPlaylist. Only "above"/"below" ever need a class here: "current" is
+// already covered by item.is_current (which every row already carries,
+// independent of this derived value), and null (idle party, nothing
+// current) intentionally adds neither class, leaving every row in its
+// default/neutral color.
+function renderPlaylistItem(item, posClass) {
   const row = document.createElement("div");
-  row.className = `playlist-item${item.is_current ? " is-current" : ""}`;
+  const classes = ["playlist-item"];
+  if (item.is_current) classes.push("is-current");
+  else if (posClass === "above") classes.push("is-above");
+  else if (posClass === "below") classes.push("is-below");
+  row.className = classes.join(" ");
   row.dataset.itemId = String(item.id);
+  // Series/episode line only renders for an Episode-type item -- a movie
+  // (or a restricted row, which never carries `type` at all -- see
+  // handleGetPlaylist) keeps the existing 2-line title+duration layout.
+  const isEpisode = item.type === "Episode";
   row.innerHTML = `
     <button type="button" class="playlist-item-handle" title="Drag to reorder" hidden>
       <svg viewBox="0 0 24 24" fill="none"><circle cx="9" cy="6" r="1.4" fill="currentColor"/><circle cx="15" cy="6" r="1.4" fill="currentColor"/><circle cx="9" cy="12" r="1.4" fill="currentColor"/><circle cx="15" cy="12" r="1.4" fill="currentColor"/><circle cx="9" cy="18" r="1.4" fill="currentColor"/><circle cx="15" cy="18" r="1.4" fill="currentColor"/></svg>
@@ -126,14 +143,18 @@ function renderPlaylistItem(item) {
     <div class="playlist-item-thumb"></div>
     <div class="playlist-item-body">
       <div class="playlist-item-title"></div>
+      ${isEpisode ? '<div class="playlist-item-series"></div>' : ""}
       <div class="playlist-item-meta"></div>
     </div>
   `;
   if (item.poster_url) {
     row.querySelector(".playlist-item-thumb").style.backgroundImage = `url("${item.poster_url}")`;
   }
-  row.querySelector(".playlist-item-title").textContent = item.title;
+  row.querySelector(".playlist-item-title").textContent = isEpisode ? item.series_name : item.title;
   row.querySelector(".playlist-item-title").classList.toggle("is-restricted", !!item.restricted);
+  if (isEpisode) {
+    row.querySelector(".playlist-item-series").textContent = formatEpisodeLine(item);
+  }
   row.querySelector(".playlist-item-meta").textContent = item.is_current
     ? "Now playing"
     : ticksToLabel(item.duration_ticks);
@@ -205,7 +226,45 @@ function renderPlaylistItem(item) {
   return row;
 }
 
-export async function loadPlaylist() {
+// Set by loadPlaylist({ scrollToCurrent: true }) (page load only -- see
+// player.js's main()) when the Playlist block was collapsed at the moment
+// the scroll was attempted, so its scroll container had no layout box
+// (display:none) to compute a scroll position against. Retried exactly
+// once, by notifyPlaylistPanelExpanded, the first time the panel is
+// expanded -- never re-armed after that, so later collapse/expand cycles
+// don't re-trigger it.
+let pendingScrollToCurrent = false;
+
+// Scrolls the Playlist block's own scroll container (.sidebar-block-body,
+// not #playlist-items itself -- see style.css) so the currently-playing
+// row is the first one visible, without reordering the underlying list.
+// A no-op if there's no current item (idle party) or if the block is
+// currently collapsed (nothing to scroll -- see pendingScrollToCurrent
+// above for the collapsed case).
+function scrollToCurrentItem() {
+  const block = playlistItemsEl.closest(".sidebar-block");
+  const container = playlistItemsEl.closest(".sidebar-block-body");
+  if (!block || !container) return;
+  if (block.classList.contains("is-collapsed")) {
+    pendingScrollToCurrent = true;
+    return;
+  }
+  pendingScrollToCurrent = false;
+  const row = playlistItemsEl.querySelector(".playlist-item.is-current");
+  if (!row) return;
+  container.scrollTop += row.getBoundingClientRect().top - container.getBoundingClientRect().top;
+}
+
+// Called from player.js's sidebar panel-toggle handler when the Playlist
+// panel transitions from collapsed to expanded, to retry a scroll-to-current
+// that couldn't run while the block was collapsed at load. A no-op once
+// pendingScrollToCurrent has already been resolved (successfully or because
+// there was nothing to scroll to).
+export function notifyPlaylistPanelExpanded() {
+  if (pendingScrollToCurrent) scrollToCurrentItem();
+}
+
+export async function loadPlaylist({ scrollToCurrent = false } = {}) {
   let items = [];
   try {
     const result = await api(`/api/parties/${encodeURIComponent(partyId)}/playlist`);
@@ -220,9 +279,19 @@ export async function loadPlaylist() {
     empty.textContent = "Nothing queued yet.";
     playlistItemsEl.appendChild(empty);
   } else {
-    for (const item of items) playlistItemsEl.appendChild(renderPlaylistItem(item));
+    const currentItem = items.find((i) => i.is_current);
+    const currentPosition = currentItem ? currentItem.position : null;
+    for (const item of items) {
+      const posClass = positionRelativeToCurrent(item.position, currentPosition);
+      playlistItemsEl.appendChild(renderPlaylistItem(item, posClass));
+    }
   }
   addBtn.hidden = !isHostFn();
+  // Only the initial page-load call passes scrollToCurrent -- see
+  // player.js's main(). Subsequent calls (item advance, playlist_updated
+  // broadcasts) deliberately leave scroll position alone so they don't
+  // fight someone who's scrolled elsewhere in the list.
+  if (scrollToCurrent) scrollToCurrentItem();
 }
 
 // --- browse dialog: drill-down + checkbox multi-select ---

@@ -5,7 +5,7 @@
 // single source of truth; this file is a thin renderer of it.
 import { api } from "./api.js";
 import { PartyConnection } from "./ws-client.js";
-import { initPlaylist, loadPlaylist } from "./playlist.js";
+import { initPlaylist, loadPlaylist, notifyPlaylistPanelExpanded } from "./playlist.js";
 import { initChat, handleIncomingChatMessage } from "./chat.js";
 import { initChatOverlay, handleChatMessageForOverlay } from "./chat-overlay.js";
 import { wireSettingsForm } from "./settingsForm.js";
@@ -434,9 +434,17 @@ function initSidebarPanels() {
 
   for (const btn of document.querySelectorAll("[data-panel-toggle]")) {
     btn.addEventListener("click", () => {
-      state = toggleCollapse(state, btn.dataset.panelToggle);
+      const key = btn.dataset.panelToggle;
+      const wasCollapsed = state[key].collapsed;
+      state = toggleCollapse(state, key);
       applyPanelState(state);
       persist();
+      // Retries the Playlist block's deferred scroll-to-current-on-load,
+      // if it was collapsed when that scroll was first attempted -- see
+      // playlist.js's notifyPlaylistPanelExpanded.
+      if (key === "playlist" && wasCollapsed && !state[key].collapsed) {
+        notifyPlaylistPanelExpanded();
+      }
     });
   }
 
@@ -749,7 +757,7 @@ async function main() {
   renderMembers(partyInfo.members || [], partyInfo.host_reconnecting);
 
   initPlaylist(partyId, isHost);
-  loadPlaylist();
+  loadPlaylist({ scrollToCurrent: true });
 
   initChatOverlay({ meUserId: me.user.id });
   initChat({

@@ -606,6 +606,44 @@ func TestGetItem_ParsesRunTimeTicks(t *testing.T) {
 	}
 }
 
+func TestGetItem_ParsesEpisodeMetadataAndRequestsSeriesNameField(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("Fields"); got != "SeriesName" {
+			t.Errorf("Fields query param = %q, want %q", got, "SeriesName")
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"Id": "item9", "Name": "Pilot", "Type": "Episode", "RunTimeTicks": 18000000000,
+			"SeriesName": "Love Is Blind", "IndexNumber": 2, "ParentIndexNumber": 1,
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	item, err := c.GetItem(context.Background(), "tok", "user-1", "item9")
+	if err != nil {
+		t.Fatalf("GetItem: %v", err)
+	}
+	if item.Type != "Episode" || item.SeriesName != "Love Is Blind" || item.SeasonNumber != 1 || item.EpisodeNumber != 2 {
+		t.Errorf("item = %+v", item)
+	}
+}
+
+func TestGetItem_MovieHasNoEpisodeMetadata(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"Id": "item7", "Name": "Movie", "Type": "Movie", "RunTimeTicks": 72000000000})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	item, err := c.GetItem(context.Background(), "tok", "user-1", "item7")
+	if err != nil {
+		t.Fatalf("GetItem: %v", err)
+	}
+	if item.SeriesName != "" || item.SeasonNumber != 0 || item.EpisodeNumber != 0 {
+		t.Errorf("item = %+v, want zero-value series/season/episode fields for a movie", item)
+	}
+}
+
 func TestGetUser_ParsesProfileAndPrimaryImageTag(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/Users/user-2" {

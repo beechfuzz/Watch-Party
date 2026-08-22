@@ -440,6 +440,15 @@ type playlistItemView struct {
 	Position      int    `json:"position"`
 	AddedByUserID string `json:"added_by_user_id"`
 	IsCurrent     bool   `json:"is_current"`
+	// ItemType/SeriesName/SeasonNumber/EpisodeNumber are only ever
+	// populated from a successful Emby.GetItem call (see below) -- a
+	// restricted item never reaches this branch, so it has no path to
+	// leak real series/episode metadata through these fields alongside
+	// its generic "Restricted item" placeholder.
+	ItemType      string `json:"type,omitempty"`
+	SeriesName    string `json:"series_name,omitempty"`
+	SeasonNumber  int    `json:"season_number,omitempty"`
+	EpisodeNumber int    `json:"episode_number,omitempty"`
 }
 
 func (a *App) handleGetPlaylist(w http.ResponseWriter, r *http.Request) {
@@ -482,6 +491,10 @@ func (a *App) handleGetPlaylist(w http.ResponseWriter, r *http.Request) {
 		if embyItem, err := a.Emby.GetItem(r.Context(), token, user.ID, it.ItemID); err == nil {
 			view.Title = embyItem.Name
 			view.PosterURL = a.Emby.ImageURL(it.ItemID, token)
+			view.ItemType = embyItem.Type
+			view.SeriesName = embyItem.SeriesName
+			view.SeasonNumber = embyItem.SeasonNumber
+			view.EpisodeNumber = embyItem.EpisodeNumber
 		} else {
 			view.Restricted = true
 			view.Title = "Restricted item"

@@ -11,6 +11,8 @@ import {
   formatSelectedLabel,
   addButtonLabel,
   reorderIds,
+  formatEpisodeLine,
+  positionRelativeToCurrent,
 } from "./playlist-select.js";
 
 const movie = (id, title, year) => ({ type: "movie", id, title, year });
@@ -178,4 +180,29 @@ test("reorderIds: does not mutate its input", () => {
   const copy = [...ids];
   reorderIds(ids, 1, 3, true);
   assert.deepEqual(ids, copy);
+});
+
+test("formatEpisodeLine: zero-pads season and episode numbers", () => {
+  assert.equal(
+    formatEpisodeLine({ season_number: 1, episode_number: 2, title: "Episode Title" }),
+    "S01:E02 - Episode Title",
+  );
+});
+
+test("formatEpisodeLine: double-digit season/episode numbers are not truncated", () => {
+  assert.equal(
+    formatEpisodeLine({ season_number: 12, episode_number: 34, title: "Finale" }),
+    "S12:E34 - Finale",
+  );
+});
+
+test("positionRelativeToCurrent: no current item (idle party) is always null", () => {
+  assert.equal(positionRelativeToCurrent(0, null), null);
+  assert.equal(positionRelativeToCurrent(5, null), null);
+});
+
+test("positionRelativeToCurrent: above/current/below", () => {
+  assert.equal(positionRelativeToCurrent(0, 2), "above");
+  assert.equal(positionRelativeToCurrent(2, 2), "current");
+  assert.equal(positionRelativeToCurrent(3, 2), "below");
 });
