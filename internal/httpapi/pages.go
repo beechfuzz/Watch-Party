@@ -68,7 +68,14 @@ func registerPages(mux *http.ServeMux, logger *slog.Logger, title string) {
 // produce a real 500 instead of a 200 with a truncated or empty body. The
 // full error (which may name internal template/file details) is logged;
 // the client only ever sees a generic message. See ARCHITECTURE.md §11.4.
-func renderPage(w http.ResponseWriter, logger *slog.Logger, tmpl *template.Template, name string, data pageData) {
+//
+// data is any rather than pageData specifically so the setup wizard
+// (setup_wizard.go, its own setupPageData shape -- unrelated fields to
+// pageData's PartyID/ActiveNav/Title) can reuse this same helper instead
+// of a second template-execution code path; html/template.ExecuteTemplate
+// itself already takes an untyped data argument, so this is not a loss of
+// safety, just passing that through.
+func renderPage(w http.ResponseWriter, logger *slog.Logger, tmpl *template.Template, name string, data any) {
 	var buf bytes.Buffer
 	if err := tmpl.ExecuteTemplate(&buf, name, data); err != nil {
 		logger.Error("render page template", "template", name, "error", err)

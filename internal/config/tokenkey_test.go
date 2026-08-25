@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -61,6 +62,19 @@ func TestResolveTokenEncryptionKey_NeitherSet_Rejected(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "TOKEN_ENCRYPTION_KEY") || !strings.Contains(err.Error(), "TOKEN_ENCRYPTION_KEY_FILE") {
 		t.Errorf("error %q does not name both env vars", err.Error())
+	}
+}
+
+// TestResolveTokenEncryptionKey_NeitherSet_IsErrTokenEncryptionKeyRequired
+// is the regression guard for the sentinel error cmd/server's run loop
+// depends on to distinguish "config.jsonc is fine, only the key is
+// missing" (wait for a manual restart) from any other, genuinely
+// unexpected LoadFromPath failure (a hard error) after the setup wizard
+// writes a file it has already validated field-by-field.
+func TestResolveTokenEncryptionKey_NeitherSet_IsErrTokenEncryptionKeyRequired(t *testing.T) {
+	_, err := resolveTokenEncryptionKey()
+	if !errors.Is(err, ErrTokenEncryptionKeyRequired) {
+		t.Errorf("errors.Is(err, ErrTokenEncryptionKeyRequired) = false, err = %v", err)
 	}
 }
 

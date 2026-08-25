@@ -1,9 +1,21 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 )
+
+// ErrTokenEncryptionKeyRequired wraps the error returned when neither
+// TOKEN_ENCRYPTION_KEY nor TOKEN_ENCRYPTION_KEY_FILE is set, so a caller
+// can distinguish this specific, expected condition from any other config
+// failure via errors.Is. cmd/server's run loop uses this: right after the
+// setup wizard writes a config.jsonc it has already validated field-by-
+// field, the only way LoadFromPath can still fail is either this (the
+// wizard deliberately never writes the key -- see FileConfig's doc
+// comment) or a genuinely unexpected problem, and the two need different
+// handling (wait for a restart vs. a hard error).
+var ErrTokenEncryptionKeyRequired = errors.New("one of TOKEN_ENCRYPTION_KEY or TOKEN_ENCRYPTION_KEY_FILE is required (32-byte key, base64 or hex encoded; generate with: openssl rand -base64 32)")
 
 // resolveTokenEncryptionKey resolves the AES-256-GCM key used to encrypt
 // Emby AccessTokens at rest, from exactly one of two environment
@@ -30,7 +42,7 @@ func resolveTokenEncryptionKey() ([]byte, error) {
 	case rawSet && pathSet:
 		return nil, fmt.Errorf("exactly one of TOKEN_ENCRYPTION_KEY or TOKEN_ENCRYPTION_KEY_FILE must be set, but both are set")
 	case !rawSet && !pathSet:
-		return nil, fmt.Errorf("one of TOKEN_ENCRYPTION_KEY or TOKEN_ENCRYPTION_KEY_FILE is required (32-byte key, base64 or hex encoded; generate with: openssl rand -base64 32)")
+		return nil, ErrTokenEncryptionKeyRequired
 	case rawSet:
 		key, err := decodeKey(raw)
 		if err != nil {

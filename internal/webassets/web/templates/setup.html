@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Watch Party Setup</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <div class="atmosphere"></div>
+
+  <section id="setup-section">
+    <div class="login-shell">
+      <div class="login-card setup-card">
+        <div class="wp-mark">
+          <svg viewBox="0 0 24 24" fill="none"><circle cx="9" cy="12" r="7" stroke="#1A1204" stroke-width="1.6"/><circle cx="15" cy="12" r="7" stroke="#1A1204" stroke-width="1.6"/></svg>
+        </div>
+
+        {{if .Success}}
+          <h1 class="login-heading">Configuration saved</h1>
+          <p class="login-sub">config.jsonc has been written. Watch Party will switch to normal mode automatically once it has an encryption key -- if it doesn't come up within a few seconds, restart it after setting the key below.</p>
+
+          <div class="key-box">
+            <p>Your generated encryption key -- shown once, copy it now:</p>
+            <code>{{.GeneratedKey}}</code>
+            <p class="login-footnote">Set it as <code>TOKEN_ENCRYPTION_KEY</code>, or save it to a file and set <code>TOKEN_ENCRYPTION_KEY_FILE</code> to that file's path, in your environment (.env, docker-compose.yml, or the Podman quadlet's EnvironmentFile). This value is never written to config.jsonc and is not shown again.</p>
+          </div>
+        {{else}}
+          <h1 class="login-heading">Set up Watch Party</h1>
+          <p class="login-sub">No configuration file was found yet. Fill in the fields below to create one.</p>
+
+          <div class="key-box">
+            <p>Generated encryption key -- copy it now, shown once per run:</p>
+            <code>{{.GeneratedKey}}</code>
+            <p class="login-footnote">You'll need this as <code>TOKEN_ENCRYPTION_KEY</code> (or saved to a file referenced by <code>TOKEN_ENCRYPTION_KEY_FILE</code>) in your environment before Watch Party can start in normal mode. It is never written to config.jsonc.</p>
+          </div>
+
+          {{if .FormError}}<p class="error">{{.FormError}}</p>{{end}}
+
+          <form method="POST" action="/">
+            <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+
+            <h2 class="setup-section-title">Server</h2>
+            <div class="field">
+              <label for="title">Site title</label>
+              <input id="title" name="title" type="text" value="{{index .Values "title"}}" required>
+              {{with index .Errors "title"}}<p class="error">{{.}}</p>{{end}}
+            </div>
+            <div class="field">
+              <label for="log_level">Log level</label>
+              <select id="log_level" name="log_level">
+                <option value="debug" {{if eq (index .Values "log_level") "debug"}}selected{{end}}>debug</option>
+                <option value="info" {{if eq (index .Values "log_level") "info"}}selected{{end}}>info</option>
+                <option value="warn" {{if eq (index .Values "log_level") "warn"}}selected{{end}}>warn</option>
+                <option value="error" {{if eq (index .Values "log_level") "error"}}selected{{end}}>error</option>
+              </select>
+              {{with index .Errors "log_level"}}<p class="error">{{.}}</p>{{end}}
+            </div>
+            <div class="field">
+              <label for="browser_origins">Browser origins (one per line, or comma-separated)</label>
+              <textarea id="browser_origins" name="browser_origins" rows="3" placeholder="https://watchparty.example.com">{{index .Values "browser_origins"}}</textarea>
+              {{with index .Errors "browser_origins"}}<p class="error">{{.}}</p>{{end}}
+            </div>
+            <div class="field">
+              <label for="listen_address">Listen address</label>
+              <input id="listen_address" name="listen_address" type="text" value="{{index .Values "listen_address"}}" required>
+              {{with index .Errors "listen_address"}}<p class="error">{{.}}</p>{{end}}
+            </div>
+            <div class="field">
+              <label for="session_idle_timeout">Session idle timeout</label>
+              <input id="session_idle_timeout" name="session_idle_timeout" type="text" value="{{index .Values "session_idle_timeout"}}" required>
+              {{with index .Errors "session_idle_timeout"}}<p class="error">{{.}}</p>{{end}}
+            </div>
+            <div class="field">
+              <label for="session_age_timeout">Session max age</label>
+              <input id="session_age_timeout" name="session_age_timeout" type="text" value="{{index .Values "session_age_timeout"}}" required>
+              {{with index .Errors "session_age_timeout"}}<p class="error">{{.}}</p>{{end}}
+            </div>
+
+            <h2 class="setup-section-title">Party</h2>
+            <div class="field">
+              <label for="host_grace_period">Host grace period</label>
+              <input id="host_grace_period" name="host_grace_period" type="text" value="{{index .Values "host_grace_period"}}" required>
+              {{with index .Errors "host_grace_period"}}<p class="error">{{.}}</p>{{end}}
+            </div>
+            <div class="field">
+              <label for="inactivity_timeout">Party inactivity timeout</label>
+              <input id="inactivity_timeout" name="inactivity_timeout" type="text" value="{{index .Values "inactivity_timeout"}}" required>
+              {{with index .Errors "inactivity_timeout"}}<p class="error">{{.}}</p>{{end}}
+            </div>
+
+            <h2 class="setup-section-title">Playback sync</h2>
+            <div class="field">
+              <label for="progress_interval">Emby progress report interval</label>
+              <input id="progress_interval" name="progress_interval" type="text" value="{{index .Values "progress_interval"}}" required>
+              {{with index .Errors "progress_interval"}}<p class="error">{{.}}</p>{{end}}
+            </div>
+            <div class="field">
+              <label for="sync_snapshot_interval">Sync snapshot interval</label>
+              <input id="sync_snapshot_interval" name="sync_snapshot_interval" type="text" value="{{index .Values "sync_snapshot_interval"}}" required>
+              {{with index .Errors "sync_snapshot_interval"}}<p class="error">{{.}}</p>{{end}}
+            </div>
+            <div class="field">
+              <label for="sync_soft_drift">Soft drift threshold (explicit unit required, e.g. 300ms)</label>
+              <input id="sync_soft_drift" name="sync_soft_drift" type="text" value="{{index .Values "sync_soft_drift"}}" required>
+              {{with index .Errors "sync_soft_drift"}}<p class="error">{{.}}</p>{{end}}
+            </div>
+            <div class="field">
+              <label for="sync_hard_drift">Hard drift threshold (explicit unit required, e.g. 1500ms; must exceed soft drift)</label>
+              <input id="sync_hard_drift" name="sync_hard_drift" type="text" value="{{index .Values "sync_hard_drift"}}" required>
+              {{with index .Errors "sync_hard_drift"}}<p class="error">{{.}}</p>{{end}}
+            </div>
+            <div class="field">
+              <label for="sync_max_rate_adjustment">Max playback rate adjustment (between 0 and 1, exclusive)</label>
+              <input id="sync_max_rate_adjustment" name="sync_max_rate_adjustment" type="text" value="{{index .Values "sync_max_rate_adjustment"}}" required>
+              {{with index .Errors "sync_max_rate_adjustment"}}<p class="error">{{.}}</p>{{end}}
+            </div>
+
+            <h2 class="setup-section-title">Media server</h2>
+            <div class="field">
+              <label for="server_url">Emby server URL</label>
+              <input id="server_url" name="server_url" type="text" value="{{index .Values "server_url"}}" placeholder="https://emby.example.com" required>
+              {{with index .Errors "server_url"}}<p class="error">{{.}}</p>{{end}}
+            </div>
+            <div class="field">
+              <label for="public_url">Emby public URL (optional -- leave blank to default to the server URL above)</label>
+              <input id="public_url" name="public_url" type="text" value="{{index .Values "public_url"}}">
+              {{with index .Errors "public_url"}}<p class="error">{{.}}</p>{{end}}
+            </div>
+
+            <button type="submit" class="btn btn-primary">Save configuration</button>
+          </form>
+
+          <p class="login-footnote">TOKEN_ENCRYPTION_KEY / TOKEN_ENCRYPTION_KEY_FILE are never collected here -- they always come from your environment, never from this form or config.jsonc.</p>
+        {{end}}
+      </div>
+    </div>
+  </section>
+</body>
+</html>

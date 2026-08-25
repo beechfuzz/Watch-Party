@@ -40,8 +40,8 @@ func TestIsSecureRequest(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := isSecureRequest(c.req); got != c.want {
-				t.Errorf("isSecureRequest = %v, want %v", got, c.want)
+			if got := IsSecureRequest(c.req); got != c.want {
+				t.Errorf("IsSecureRequest = %v, want %v", got, c.want)
 			}
 		})
 	}
