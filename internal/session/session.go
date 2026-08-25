@@ -66,7 +66,7 @@ func (m *Manager) Create(ctx context.Context, w http.ResponseWriter, r *http.Req
 	return &sess, nil
 }
 
-// isSecureRequest reports whether r arrived over what the browser will
+// IsSecureRequest reports whether r arrived over what the browser will
 // treat as an HTTPS context — required to know per-request, not per-
 // deployment, since a single Watch Party instance can legitimately be
 // reachable at multiple origins with different schemes (e.g. an external
@@ -84,7 +84,7 @@ func (m *Manager) Create(ctx context.Context, w http.ResponseWriter, r *http.Req
 // reachable only through that proxy (e.g. watchparty.container's example
 // binds PublishPort to 127.0.0.1), not directly from untrusted clients who
 // could otherwise forge the header.
-func isSecureRequest(r *http.Request) bool {
+func IsSecureRequest(r *http.Request) bool {
 	if r != nil && r.TLS != nil {
 		return true
 	}
@@ -100,7 +100,7 @@ func (m *Manager) setCookie(w http.ResponseWriter, r *http.Request, value string
 		Value:    value,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   isSecureRequest(r),
+		Secure:   IsSecureRequest(r),
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(maxAge.Seconds()),
 	})
@@ -112,7 +112,7 @@ func (m *Manager) clearCookie(w http.ResponseWriter, r *http.Request) {
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   isSecureRequest(r),
+		Secure:   IsSecureRequest(r),
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   -1,
 	})

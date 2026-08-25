@@ -38,7 +38,7 @@ type Config struct {
 	// fine — e.g. an external https:// domain alongside an internal-only
 	// http:// LAN hostname for the same instance — since session cookie
 	// Secure-ness is now determined per-request, not from a single global
-	// flag; see internal/session.isSecureRequest and ARCHITECTURE.md §2.
+	// flag; see internal/session.IsSecureRequest and ARCHITECTURE.md §2.
 	AppOrigins []string
 
 	// Emby
@@ -107,14 +107,26 @@ type Config struct {
 // mode -- use ResolveListenAddress / ResolveLogLevel directly there
 // instead (see setupmode.go).
 func Load() (*Config, error) {
-	exists, err := FileExists(DefaultConfigPath)
+	return LoadFromPath(DefaultConfigPath)
+}
+
+// LoadFromPath is Load with the config file path made an explicit argument
+// instead of the hardcoded DefaultConfigPath. Load is just
+// LoadFromPath(DefaultConfigPath); this exists so callers that need to
+// point at a different path -- today, only tests driving the full
+// setup-required -> normal mode transition against a real temporary
+// config.jsonc (see cmd/server/run_test.go) -- don't need to touch
+// DefaultConfigPath itself, which stays the single hardcoded production
+// path everywhere else.
+func LoadFromPath(path string) (*Config, error) {
+	exists, err := FileExists(path)
 	if err != nil {
 		return nil, err
 	}
 
 	var fc *FileConfig
 	if exists {
-		fc, err = loadFile(DefaultConfigPath)
+		fc, err = loadFile(path)
 		if err != nil {
 			return nil, err
 		}
@@ -136,8 +148,8 @@ func loadFrom(fc *FileConfig) (*Config, error) {
 	var err error
 
 	cfg.Title = resolveString("SERVER_TITLE", fc.ServerSettings.Title, "Watch Party")
-	if strings.TrimSpace(cfg.Title) == "" {
-		return nil, fmt.Errorf("server_settings.title / SERVER_TITLE must not be blank")
+	if err := ValidateTitle(cfg.Title); err != nil {
+		return nil, fmt.Errorf("server_settings.title / SERVER_TITLE %w", err)
 	}
 
 	if cfg.LogLevel, err = ResolveLogLevel(fc.ServerSettings.LogLevel); err != nil {
@@ -179,15 +191,15 @@ func loadFrom(fc *FileConfig) (*Config, error) {
 	if cfg.SyncHardDriftMS, err = resolveDriftMS("SYNC_HARD_DRIFT_MS", "global_playback_settings.sync_hard_drift", fc.GlobalPlaybackSettings.SyncHardDrift, 1500); err != nil {
 		return nil, err
 	}
-	if cfg.SyncHardDriftMS <= cfg.SyncSoftDriftMS {
-		return nil, fmt.Errorf("sync_hard_drift (%dms) must be greater than sync_soft_drift (%dms)", cfg.SyncHardDriftMS, cfg.SyncSoftDriftMS)
+	if err := ValidateSyncDrift(time.Duration(cfg.SyncSoftDriftMS)*time.Millisecond, time.Duration(cfg.SyncHardDriftMS)*time.Millisecond); err != nil {
+		return nil, err
 	}
 
 	if cfg.SyncMaxRateAdjust, err = resolveFloat("SYNC_MAX_RATE_ADJUSTMENT", fc.GlobalPlaybackSettings.SyncMaxRateAdjustment, 0.05); err != nil {
 		return nil, err
 	}
-	if cfg.SyncMaxRateAdjust <= 0 || cfg.SyncMaxRateAdjust >= 1 {
-		return nil, fmt.Errorf("sync_max_rate_adjustment must be between 0 and 1 (exclusive), got %v", cfg.SyncMaxRateAdjust)
+	if err := ValidateMaxRateAdjustment(cfg.SyncMaxRateAdjust); err != nil {
+		return nil, err
 	}
 
 	if cfg.EmbyServerURL, err = resolveStringRequired("EMBY_SERVER_URL", fc.MediaServerSettings.ServerURL, "EMBY_SERVER_URL or media_server_settings.server_url is required"); err != nil {
@@ -309,26 +321,37 @@ func resolveStringRequired(envKey string, fileVal *string, errMsg string) (strin
 // resolveOrigins implements the env/file/default precedence chain for
 // AppOrigins specifically, since the two sources use different native
 // formats: the env var is comma-separated (unchanged from before the file
-// layer existed), the file value is a native JSON array.
+// layer existed), the file value is a native JSON array. The actual
+// validation (trim, drop empties, require at least one) is delegated to
+// ValidateOrigins so there is exactly one implementation of it -- see that
+// function's doc comment for why it's exported.
 func resolveOrigins(envKey string, fileVal *[]string) ([]string, error) {
 	if v, ok := os.LookupEnv(envKey); ok && v != "" {
-		origins := splitOrigins(strings.Split(v, ","))
-		if len(origins) == 0 {
-			return nil, fmt.Errorf("%s must contain at least one origin", envKey)
+		origins, err := ValidateOrigins(strings.Split(v, ","))
+		if err != nil {
+			return nil, fmt.Errorf("%s %w", envKey, err)
 		}
 		return origins, nil
 	}
 	if fileVal != nil && len(*fileVal) > 0 {
-		origins := splitOrigins(*fileVal)
-		if len(origins) == 0 {
-			return nil, fmt.Errorf("server_settings.browser_origins must contain at least one non-empty origin")
+		origins, err := ValidateOrigins(*fileVal)
+		if err != nil {
+			return nil, fmt.Errorf("server_settings.browser_origins %w", err)
 		}
 		return origins, nil
 	}
 	return nil, fmt.Errorf("APP_ORIGINS (comma-separated) or server_settings.browser_origins (JSON array) is required -- at least one allowed origin, e.g. https://watchparty.example.com")
 }
 
-func splitOrigins(raw []string) []string {
+// ValidateOrigins trims whitespace and a trailing slash from each of raw,
+// drops empty entries, and requires at least one origin survive. Exported
+// so the setup wizard can validate an operator-submitted browser_origins
+// value with exactly the same rule resolveOrigins already applies to both
+// the env var and file sources -- deliberately no stricter than that (e.g.
+// no URL-scheme validation), since the existing loader doesn't require
+// well-formed origins either and the wizard shouldn't silently diverge by
+// being pickier than the loader it's writing input for.
+func ValidateOrigins(raw []string) ([]string, error) {
 	var origins []string
 	for _, o := range raw {
 		o = strings.TrimSpace(o)
@@ -337,24 +360,27 @@ func splitOrigins(raw []string) []string {
 		}
 		origins = append(origins, strings.TrimRight(o, "/"))
 	}
-	return origins
+	if len(origins) == 0 {
+		return nil, fmt.Errorf("must contain at least one non-empty origin")
+	}
+	return origins, nil
 }
 
 // resolveDuration implements the env/file/default precedence chain for a
 // duration field. Both sources accept the same format: a bare integer
 // (seconds) or a Go duration string (e.g. "30s", "24h") -- see
-// parseDuration. fileField is a dotted path used only in the file-sourced
+// ParseDuration. fileField is a dotted path used only in the file-sourced
 // error message, so a bad value's origin is unambiguous in the error.
 func resolveDuration(envKey, fileField string, fileVal *string, def time.Duration) (time.Duration, error) {
 	if v, ok := os.LookupEnv(envKey); ok && v != "" {
-		d, err := parseDuration(v)
+		d, err := ParseDuration(v)
 		if err != nil {
 			return 0, fmt.Errorf("%s: %w", envKey, err)
 		}
 		return d, nil
 	}
 	if fileVal != nil && *fileVal != "" {
-		d, err := parseDuration(*fileVal)
+		d, err := ParseDuration(*fileVal)
 		if err != nil {
 			return 0, fmt.Errorf("%s: %w", fileField, err)
 		}
@@ -363,16 +389,16 @@ func resolveDuration(envKey, fileField string, fileVal *string, def time.Duratio
 	return def, nil
 }
 
-// parseDuration parses a duration from either an env var or a config.jsonc
+// ParseDuration parses a duration from either an env var or a config.jsonc
 // string value. For backward-compatible clarity with the env var names in
 // the spec (e.g. HOST_GRACE_PERIOD_SECONDS), a bare integer is interpreted
 // as seconds; a Go duration string (e.g. "30m", "1h") is also accepted.
 // This is the general-purpose parser used by every duration field except
 // sync_soft_drift/sync_hard_drift, which use the stricter
-// parseDurationStrict (see resolveDriftMS) precisely because the bare-
+// ParseDurationStrict (see resolveDriftMS) precisely because the bare-
 // integer-means-seconds convention here would be actively wrong for a
 // millisecond-scale field.
-func parseDuration(raw string) (time.Duration, error) {
+func ParseDuration(raw string) (time.Duration, error) {
 	if n, err := strconv.Atoi(raw); err == nil {
 		return time.Duration(n) * time.Second, nil
 	}
@@ -383,14 +409,14 @@ func parseDuration(raw string) (time.Duration, error) {
 	return d, nil
 }
 
-// parseDurationStrict parses a duration string with no bare-integer
+// ParseDurationStrict parses a duration string with no bare-integer
 // fallback -- an explicit unit is always required. Used only for
 // sync_soft_drift/sync_hard_drift's config.jsonc values (see resolveDriftMS):
 // those are millisecond-scale fields, so silently treating a unit-less
 // "300" as "300 seconds" (the convention every other duration field in
 // this config uses) would turn a sub-second drift threshold into a
 // nonsensical five-minute one.
-func parseDurationStrict(raw string) (time.Duration, error) {
+func ParseDurationStrict(raw string) (time.Duration, error) {
 	d, err := time.ParseDuration(raw)
 	if err != nil {
 		return 0, fmt.Errorf("invalid duration value %q (an explicit unit is required here, e.g. \"300ms\" -- a bare number is rejected to avoid ambiguity with the bare-integer-means-seconds convention used elsewhere in this config): %w", raw, err)
@@ -402,7 +428,7 @@ func parseDurationStrict(raw string) (time.Duration, error) {
 // SyncSoftDriftMS/SyncHardDriftMS. The two sources deliberately use
 // different formats: the env var (existing, unchanged) is a bare integer
 // number of milliseconds; the file value (new) is a duration string with
-// an explicit unit, parsed via parseDurationStrict. fileField is a dotted
+// an explicit unit, parsed via ParseDurationStrict. fileField is a dotted
 // path used only in the file-sourced error message.
 func resolveDriftMS(envKey, fileField string, fileVal *string, def int) (int, error) {
 	if v, ok := os.LookupEnv(envKey); ok && v != "" {
@@ -413,7 +439,7 @@ func resolveDriftMS(envKey, fileField string, fileVal *string, def int) (int, er
 		return n, nil
 	}
 	if fileVal != nil && *fileVal != "" {
-		d, err := parseDurationStrict(*fileVal)
+		d, err := ParseDurationStrict(*fileVal)
 		if err != nil {
 			return 0, fmt.Errorf("%s: %w", fileField, err)
 		}
@@ -439,13 +465,13 @@ func resolveFloat(envKey string, fileVal *float64, def float64) (float64, error)
 	return def, nil
 }
 
-// validateListenAddress checks that addr parses as a usable host:port (or
+// ValidateListenAddress checks that addr parses as a usable host:port (or
 // bare ":port") address -- e.g. ":8080" or "0.0.0.0:8080". Previously any
 // string was accepted verbatim into http.Server.Addr, surfacing a
 // malformed value only as a runtime ListenAndServe error; this validates
 // it at config-load time instead, so it's caught alongside every other
 // config error.
-func validateListenAddress(addr string) error {
+func ValidateListenAddress(addr string) error {
 	_, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return fmt.Errorf("invalid listen address %q: %w", addr, err)
@@ -460,14 +486,51 @@ func validateListenAddress(addr string) error {
 	return nil
 }
 
-// validateLogLevel checks level against the set logging.New recognizes.
+// ValidateLogLevel checks level against the set logging.New recognizes.
 // Previously any unrecognized value silently fell back to "info"; this
 // makes an invalid value a hard config error instead.
-func validateLogLevel(level string) error {
+func ValidateLogLevel(level string) error {
 	switch level {
 	case "debug", "info", "warn", "error":
 		return nil
 	default:
 		return fmt.Errorf("invalid log level %q: must be one of debug, info, warn, error", level)
 	}
+}
+
+// ValidateTitle rejects a blank (or all-whitespace) title. Exported --
+// alongside ValidateSyncDrift/ValidateMaxRateAdjustment below -- so the
+// setup wizard can run exactly this check on an operator-submitted title
+// instead of re-implementing "must not be blank" a second time; loadFrom
+// calls it too, so there's exactly one implementation either way.
+func ValidateTitle(title string) error {
+	if strings.TrimSpace(title) == "" {
+		return fmt.Errorf("must not be blank")
+	}
+	return nil
+}
+
+// ValidateSyncDrift enforces that hard is strictly greater than soft --
+// otherwise a "hard" drift correction (a seek) could trigger at or before
+// the "soft" one (a rate nudge) does, which makes no sense. Extracted out
+// of loadFrom (which calls this too) specifically so the setup wizard can
+// validate an operator's submitted sync_soft_drift/sync_hard_drift pair
+// with the exact same rule the loader enforces, rather than a second,
+// possibly-drifting reimplementation of ">".
+func ValidateSyncDrift(soft, hard time.Duration) error {
+	if hard <= soft {
+		return fmt.Errorf("sync_hard_drift (%s) must be greater than sync_soft_drift (%s)", hard, soft)
+	}
+	return nil
+}
+
+// ValidateMaxRateAdjustment enforces 0 < v < 1 -- a playback rate nudge of
+// 0 would never correct drift, and one >= 1 could reverse or freeze
+// playback. Extracted out of loadFrom (which calls this too) for the same
+// single-implementation reason as ValidateSyncDrift.
+func ValidateMaxRateAdjustment(v float64) error {
+	if v <= 0 || v >= 1 {
+		return fmt.Errorf("sync_max_rate_adjustment must be between 0 and 1 (exclusive), got %v", v)
+	}
+	return nil
 }

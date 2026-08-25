@@ -22,7 +22,7 @@ import (
 // as a usable host:port (or bare ":port") address.
 func ResolveListenAddress(fileVal *string) (string, error) {
 	addr := resolveString("LISTEN_ADDR", fileVal, ":8080")
-	if err := validateListenAddress(addr); err != nil {
+	if err := ValidateListenAddress(addr); err != nil {
 		return "", fmt.Errorf("listen_address: %w", err)
 	}
 	return addr, nil
@@ -32,7 +32,7 @@ func ResolveListenAddress(fileVal *string) (string, error) {
 // nil/empty) or the "info" default, and validates it's a recognized level.
 func ResolveLogLevel(fileVal *string) (string, error) {
 	level := strings.ToLower(resolveString("LOG_LEVEL", fileVal, "info"))
-	if err := validateLogLevel(level); err != nil {
+	if err := ValidateLogLevel(level); err != nil {
 		return "", fmt.Errorf("log_level: %w", err)
 	}
 	return level, nil

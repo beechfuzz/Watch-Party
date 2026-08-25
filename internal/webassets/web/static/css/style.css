@@ -180,6 +180,38 @@ dialog h3 { font-family: var(--font-display); font-size: 16px; font-weight: 600;
 
 .login-footnote { text-align: center; font-size: 12px; color: var(--text-tertiary); margin-top: 22px; line-height: 1.5; }
 
+/* ================= SETUP WIZARD ================= */
+/* Reuses .login-shell/.login-card/.field/.btn/.error from the sign-in
+   page above rather than a parallel style -- the wizard is a one-time
+   admin form, not a distinct product surface, and should look like the
+   rest of the app. .setup-card only overrides what genuinely differs
+   (wider, left-aligned form body with several sections). */
+.setup-card { max-width: 560px; text-align: left; }
+.setup-card .login-heading,
+.setup-card .login-sub { text-align: center; }
+.setup-section-title {
+  font-family: var(--font-display); font-size: 14px; font-weight: 600;
+  margin: 24px 0 12px; color: var(--text-secondary);
+}
+.setup-section-title:first-of-type { margin-top: 8px; }
+.field textarea, .field select {
+  width: 100%; background: var(--bg-input); border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-control); padding: 11px 12px; color: var(--text-primary);
+  font-size: 14px; font-family: var(--font-body);
+}
+.field textarea { resize: vertical; min-height: 64px; }
+.field textarea:focus, .field select:focus { border-color: var(--accent-teal); }
+.key-box {
+  background: var(--bg-panel-raised); border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-control); padding: 14px; margin-bottom: 20px;
+}
+.key-box p { margin: 0 0 8px; font-size: 13px; color: var(--text-secondary); }
+.key-box code {
+  display: block; word-break: break-all; font-family: var(--font-mono); font-size: 13px;
+  color: var(--accent-teal); background: var(--bg-input); border-radius: 6px; padding: 8px 10px; margin-bottom: 8px;
+}
+.key-box .login-footnote { margin: 0; text-align: left; }
+
 /* ================= HOME (dashboard) ================= */
 /* Fixed to the viewport height (not min-height) so the sidebar and main
    content are two independently scrollable panes within it, rather than
