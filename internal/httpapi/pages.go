@@ -28,6 +28,7 @@ func mustParseTemplates() *template.Template {
 type pageData struct {
 	PartyID   string
 	ActiveNav string
+	Title     string
 }
 
 // registerPages attaches the server-rendered HTML shell and static asset
@@ -35,7 +36,12 @@ type pageData struct {
 // thin shell that vanilla JS (web/static/js/*.js) fills in by calling the
 // JSON API, per the spec's "server's authoritative state is the single
 // source of truth, client is a thin renderer" design.
-func registerPages(mux *http.ServeMux, logger *slog.Logger) {
+//
+// title is the operator-configured site title (config.Config.Title /
+// server_settings.title), passed to every page template and the shared
+// sidebar partial in place of the "Watch Party" literal they used before
+// the config-file layer existed.
+func registerPages(mux *http.ServeMux, logger *slog.Logger, title string) {
 	staticSub, err := webassets.StaticFS()
 	if err != nil {
 		panic("webassets: static fs: " + err.Error())
@@ -44,7 +50,7 @@ func registerPages(mux *http.ServeMux, logger *slog.Logger) {
 	mux.Handle("GET /static/", http.StripPrefix("/static/", noCache(fileServer)))
 
 	mux.HandleFunc("GET /party/{id}", func(w http.ResponseWriter, r *http.Request) {
-		renderPage(w, logger, pageTemplates, "party.html", pageData{PartyID: r.PathValue("id")})
+		renderPage(w, logger, pageTemplates, "party.html", pageData{PartyID: r.PathValue("id"), Title: title})
 	})
 
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
@@ -52,7 +58,7 @@ func registerPages(mux *http.ServeMux, logger *slog.Logger) {
 			http.NotFound(w, r)
 			return
 		}
-		renderPage(w, logger, pageTemplates, "index.html", pageData{ActiveNav: "home"})
+		renderPage(w, logger, pageTemplates, "index.html", pageData{ActiveNav: "home", Title: title})
 	})
 }
 

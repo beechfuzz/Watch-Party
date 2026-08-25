@@ -1,6 +1,14 @@
-// Package config loads Watch Party's runtime configuration from environment
-// variables. There is no config file format — env vars only, per the project
-// spec's "all config via environment variables" requirement.
+// Package config loads Watch Party's runtime configuration by layering two
+// sources: an optional JSONC file at DefaultConfigPath, and environment
+// variables, which override the corresponding file value field-by-field
+// when set. Precedence is: environment variable, if set, wins; otherwise
+// the file value, if present; otherwise a hardcoded default, if one
+// exists. TOKEN_ENCRYPTION_KEY / TOKEN_ENCRYPTION_KEY_FILE are the one
+// exception -- environment-only, never read from the file (see
+// tokenkey.go) -- and, unlike every other field, resolved only on the
+// normal-mode startup path (Load/loadFrom), not when the server is
+// running in setup-required mode (see FileExists and
+// cmd/server/main.go's runSetupRequired).
 package config
 
 import (
@@ -8,6 +16,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -23,6 +32,7 @@ const defaultContainerID = 65532
 // Config holds all runtime configuration for the Watch Party server.
 type Config struct {
 	// Server
+	Title      string
 	ListenAddr string
 	// AppOrigins is used for WebSocket Origin validation. Mixed schemes are
 	// fine — e.g. an external https:// domain alongside an internal-only
@@ -47,6 +57,8 @@ type Config struct {
 	DatabasePath string
 
 	// Security
+	// TokenEncryptionKey is resolved only from TOKEN_ENCRYPTION_KEY /
+	// TOKEN_ENCRYPTION_KEY_FILE — never from config.jsonc. See tokenkey.go.
 	TokenEncryptionKey []byte // 32 bytes, AES-256-GCM key for encrypting Emby AccessTokens at rest
 
 	// Session lifecycle
@@ -76,7 +88,9 @@ type Config struct {
 	// and internal/privdrop): in that case the server takes ownership of
 	// its data directory and permanently drops to this UID/GID before
 	// doing anything else. Has no effect otherwise — e.g. local `go run`
-	// as a normal user during development.
+	// as a normal user during development. Env-var only: not represented
+	// in config.jsonc, since it's a container-identity concern rather than
+	// an app setting a wizard would collect.
 	PUID int
 	PGID int
 
@@ -84,69 +98,110 @@ type Config struct {
 	LogLevel string
 }
 
-// Load reads configuration from the environment. It returns an error for any
-// missing required value or value that fails validation.
+// Load reads configuration by layering config.jsonc (if DefaultConfigPath
+// exists) under environment variables, and returns an error for any
+// missing required value or value that fails validation, whichever source
+// it came from. Load is the normal-mode entrypoint: it also resolves and
+// validates TOKEN_ENCRYPTION_KEY / TOKEN_ENCRYPTION_KEY_FILE (see
+// tokenkey.go), which is why it must not be called from setup-required
+// mode -- use ResolveListenAddress / ResolveLogLevel directly there
+// instead (see setupmode.go).
 func Load() (*Config, error) {
-	cfg := &Config{
-		ListenAddr: getEnvDefault("LISTEN_ADDR", ":8080"),
-		// Defaults to the container's conventional volume mount point (see
-		// docker-compose.yml and watchparty.container, both of which mount
-		// a persistent volume at /data) — local `go run` development
-		// should set DATABASE_PATH to something writable, e.g.
-		// ./data/watchparty.db, via .env.
-		DatabasePath: getEnvDefault("DATABASE_PATH", "/data/watchparty.db"),
-		LogLevel:     strings.ToLower(getEnvDefault("LOG_LEVEL", "info")),
-	}
-
-	origins := getEnvDefault("APP_ORIGINS", "")
-	if origins == "" {
-		return nil, fmt.Errorf("APP_ORIGINS is required (comma-separated list of allowed origins, e.g. https://watchparty.example.com)")
-	}
-	for _, o := range strings.Split(origins, ",") {
-		o = strings.TrimSpace(o)
-		if o == "" {
-			continue
-		}
-		cfg.AppOrigins = append(cfg.AppOrigins, strings.TrimRight(o, "/"))
-	}
-	if len(cfg.AppOrigins) == 0 {
-		return nil, fmt.Errorf("APP_ORIGINS must contain at least one origin")
-	}
-
-	cfg.EmbyServerURL = strings.TrimRight(os.Getenv("EMBY_SERVER_URL"), "/")
-	if cfg.EmbyServerURL == "" {
-		return nil, fmt.Errorf("EMBY_SERVER_URL is required")
-	}
-	cfg.EmbyPublicURL = strings.TrimRight(os.Getenv("EMBY_PUBLIC_URL"), "/")
-
-	keyRaw := os.Getenv("TOKEN_ENCRYPTION_KEY")
-	if keyRaw == "" {
-		return nil, fmt.Errorf("TOKEN_ENCRYPTION_KEY is required (32-byte key, base64 or hex encoded; generate with: openssl rand -base64 32)")
-	}
-	key, err := decodeKey(keyRaw)
+	exists, err := FileExists(DefaultConfigPath)
 	if err != nil {
-		return nil, fmt.Errorf("TOKEN_ENCRYPTION_KEY: %w", err)
+		return nil, err
 	}
-	cfg.TokenEncryptionKey = key
 
-	if cfg.SessionIdleTimeout, err = getEnvDuration("SESSION_IDLE_TIMEOUT", 24*time.Hour); err != nil {
+	var fc *FileConfig
+	if exists {
+		fc, err = loadFile(DefaultConfigPath)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return loadFrom(fc)
+}
+
+// loadFrom merges fc (nil if config.jsonc doesn't exist -- every field then
+// falls through to its environment variable or hardcoded default, matching
+// today's env-only behavior exactly) with environment variable overrides,
+// validating every field regardless of which source produced it.
+func loadFrom(fc *FileConfig) (*Config, error) {
+	if fc == nil {
+		fc = &FileConfig{}
+	}
+
+	cfg := &Config{}
+	var err error
+
+	cfg.Title = resolveString("SERVER_TITLE", fc.ServerSettings.Title, "Watch Party")
+	if strings.TrimSpace(cfg.Title) == "" {
+		return nil, fmt.Errorf("server_settings.title / SERVER_TITLE must not be blank")
+	}
+
+	if cfg.LogLevel, err = ResolveLogLevel(fc.ServerSettings.LogLevel); err != nil {
 		return nil, err
 	}
-	if cfg.SessionMaxAge, err = getEnvDuration("SESSION_MAX_AGE", 30*24*time.Hour); err != nil {
+
+	if cfg.AppOrigins, err = resolveOrigins("APP_ORIGINS", fc.ServerSettings.BrowserOrigins); err != nil {
 		return nil, err
 	}
-	if cfg.HostGracePeriod, err = getEnvDuration("HOST_GRACE_PERIOD_SECONDS", 20*time.Second); err != nil {
+
+	if cfg.ListenAddr, err = ResolveListenAddress(fc.ServerSettings.ListenAddress); err != nil {
 		return nil, err
 	}
-	if cfg.PartyInactivityTimeout, err = getEnvDuration("PARTY_INACTIVITY_TIMEOUT", 48*time.Hour); err != nil {
+
+	if cfg.SessionIdleTimeout, err = resolveDuration("SESSION_IDLE_TIMEOUT", "server_settings.session_idle_timeout", fc.ServerSettings.SessionIdleTimeout, 24*time.Hour); err != nil {
 		return nil, err
 	}
-	if cfg.SyncSnapshotInterval, err = getEnvDuration("SYNC_SNAPSHOT_INTERVAL", 4*time.Second); err != nil {
+	if cfg.SessionMaxAge, err = resolveDuration("SESSION_MAX_AGE", "server_settings.session_age_timeout", fc.ServerSettings.SessionAgeTimeout, 30*24*time.Hour); err != nil {
 		return nil, err
 	}
-	if cfg.EmbyProgressInterval, err = getEnvDuration("EMBY_PROGRESS_INTERVAL", 10*time.Second); err != nil {
+
+	if cfg.HostGracePeriod, err = resolveDuration("HOST_GRACE_PERIOD_SECONDS", "global_party_settings.host_grace_period", fc.GlobalPartySettings.HostGracePeriod, 20*time.Second); err != nil {
 		return nil, err
 	}
+	if cfg.PartyInactivityTimeout, err = resolveDuration("PARTY_INACTIVITY_TIMEOUT", "global_party_settings.inactivity_timeout", fc.GlobalPartySettings.InactivityTimeout, 48*time.Hour); err != nil {
+		return nil, err
+	}
+
+	if cfg.EmbyProgressInterval, err = resolveDuration("EMBY_PROGRESS_INTERVAL", "global_playback_settings.progress_interval", fc.GlobalPlaybackSettings.ProgressInterval, 10*time.Second); err != nil {
+		return nil, err
+	}
+	if cfg.SyncSnapshotInterval, err = resolveDuration("SYNC_SNAPSHOT_INTERVAL", "global_playback_settings.sync_snapshot_interval", fc.GlobalPlaybackSettings.SyncSnapshotInterval, 4*time.Second); err != nil {
+		return nil, err
+	}
+
+	if cfg.SyncSoftDriftMS, err = resolveDriftMS("SYNC_SOFT_DRIFT_MS", "global_playback_settings.sync_soft_drift", fc.GlobalPlaybackSettings.SyncSoftDrift, 300); err != nil {
+		return nil, err
+	}
+	if cfg.SyncHardDriftMS, err = resolveDriftMS("SYNC_HARD_DRIFT_MS", "global_playback_settings.sync_hard_drift", fc.GlobalPlaybackSettings.SyncHardDrift, 1500); err != nil {
+		return nil, err
+	}
+	if cfg.SyncHardDriftMS <= cfg.SyncSoftDriftMS {
+		return nil, fmt.Errorf("sync_hard_drift (%dms) must be greater than sync_soft_drift (%dms)", cfg.SyncHardDriftMS, cfg.SyncSoftDriftMS)
+	}
+
+	if cfg.SyncMaxRateAdjust, err = resolveFloat("SYNC_MAX_RATE_ADJUSTMENT", fc.GlobalPlaybackSettings.SyncMaxRateAdjustment, 0.05); err != nil {
+		return nil, err
+	}
+	if cfg.SyncMaxRateAdjust <= 0 || cfg.SyncMaxRateAdjust >= 1 {
+		return nil, fmt.Errorf("sync_max_rate_adjustment must be between 0 and 1 (exclusive), got %v", cfg.SyncMaxRateAdjust)
+	}
+
+	if cfg.EmbyServerURL, err = resolveStringRequired("EMBY_SERVER_URL", fc.MediaServerSettings.ServerURL, "EMBY_SERVER_URL or media_server_settings.server_url is required"); err != nil {
+		return nil, err
+	}
+	cfg.EmbyServerURL = strings.TrimRight(cfg.EmbyServerURL, "/")
+
+	cfg.EmbyPublicURL = strings.TrimRight(resolveString("EMBY_PUBLIC_URL", fc.MediaServerSettings.PublicURL, ""), "/")
+
+	// Env-only fields: no config.jsonc representation (see CLAUDE.md /
+	// ARCHITECTURE.md for why -- container identity and filesystem path,
+	// not app settings a wizard would collect). Unchanged from before the
+	// file layer existed.
+	cfg.DatabasePath = getEnvDefault("DATABASE_PATH", "/data/watchparty.db")
 
 	cfg.PUID = getEnvInt("PUID", defaultContainerID)
 	cfg.PGID = getEnvInt("PGID", defaultContainerID)
@@ -157,18 +212,8 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("PGID must not be negative, got %d", cfg.PGID)
 	}
 
-	cfg.SyncSoftDriftMS = getEnvInt("SYNC_SOFT_DRIFT_MS", 300)
-	cfg.SyncHardDriftMS = getEnvInt("SYNC_HARD_DRIFT_MS", 1500)
-	if cfg.SyncHardDriftMS <= cfg.SyncSoftDriftMS {
-		return nil, fmt.Errorf("SYNC_HARD_DRIFT_MS (%d) must be greater than SYNC_SOFT_DRIFT_MS (%d)", cfg.SyncHardDriftMS, cfg.SyncSoftDriftMS)
-	}
-
-	cfg.SyncMaxRateAdjust, err = getEnvFloat("SYNC_MAX_RATE_ADJUSTMENT", 0.05)
-	if err != nil {
+	if cfg.TokenEncryptionKey, err = resolveTokenEncryptionKey(); err != nil {
 		return nil, err
-	}
-	if cfg.SyncMaxRateAdjust <= 0 || cfg.SyncMaxRateAdjust >= 1 {
-		return nil, fmt.Errorf("SYNC_MAX_RATE_ADJUSTMENT must be between 0 and 1 (exclusive), got %v", cfg.SyncMaxRateAdjust)
 	}
 
 	return cfg, nil
@@ -235,33 +280,194 @@ func getEnvInt(key string, def int) int {
 	return n
 }
 
-func getEnvFloat(key string, def float64) (float64, error) {
-	v, ok := os.LookupEnv(key)
-	if !ok || v == "" {
-		return def, nil
+// resolveString implements the env/file/default precedence chain for a
+// plain string field. An empty string from either env or file is treated
+// as "not set" (falls through to the next source), matching this
+// project's pre-existing env-var convention (see the old getEnvDefault).
+func resolveString(envKey string, fileVal *string, def string) string {
+	if v, ok := os.LookupEnv(envKey); ok && v != "" {
+		return v
 	}
-	f, err := strconv.ParseFloat(v, 64)
-	if err != nil {
-		return 0, fmt.Errorf("%s: invalid float value %q: %w", key, v, err)
+	if fileVal != nil && *fileVal != "" {
+		return *fileVal
 	}
-	return f, nil
+	return def
 }
 
-// getEnvDuration parses a duration from the environment. For backward-
-// compatible clarity with the env var names in the spec (e.g.
-// HOST_GRACE_PERIOD_SECONDS), a bare integer is interpreted as seconds; a
-// Go duration string (e.g. "30m", "1h") is also accepted.
-func getEnvDuration(key string, def time.Duration) (time.Duration, error) {
-	v, ok := os.LookupEnv(key)
-	if !ok || v == "" {
-		return def, nil
+// resolveStringRequired is resolveString without a default: if neither
+// source provides a non-empty value, it returns errMsg as the error.
+func resolveStringRequired(envKey string, fileVal *string, errMsg string) (string, error) {
+	if v, ok := os.LookupEnv(envKey); ok && v != "" {
+		return v, nil
 	}
-	if n, err := strconv.Atoi(v); err == nil {
+	if fileVal != nil && *fileVal != "" {
+		return *fileVal, nil
+	}
+	return "", fmt.Errorf("%s", errMsg)
+}
+
+// resolveOrigins implements the env/file/default precedence chain for
+// AppOrigins specifically, since the two sources use different native
+// formats: the env var is comma-separated (unchanged from before the file
+// layer existed), the file value is a native JSON array.
+func resolveOrigins(envKey string, fileVal *[]string) ([]string, error) {
+	if v, ok := os.LookupEnv(envKey); ok && v != "" {
+		origins := splitOrigins(strings.Split(v, ","))
+		if len(origins) == 0 {
+			return nil, fmt.Errorf("%s must contain at least one origin", envKey)
+		}
+		return origins, nil
+	}
+	if fileVal != nil && len(*fileVal) > 0 {
+		origins := splitOrigins(*fileVal)
+		if len(origins) == 0 {
+			return nil, fmt.Errorf("server_settings.browser_origins must contain at least one non-empty origin")
+		}
+		return origins, nil
+	}
+	return nil, fmt.Errorf("APP_ORIGINS (comma-separated) or server_settings.browser_origins (JSON array) is required -- at least one allowed origin, e.g. https://watchparty.example.com")
+}
+
+func splitOrigins(raw []string) []string {
+	var origins []string
+	for _, o := range raw {
+		o = strings.TrimSpace(o)
+		if o == "" {
+			continue
+		}
+		origins = append(origins, strings.TrimRight(o, "/"))
+	}
+	return origins
+}
+
+// resolveDuration implements the env/file/default precedence chain for a
+// duration field. Both sources accept the same format: a bare integer
+// (seconds) or a Go duration string (e.g. "30s", "24h") -- see
+// parseDuration. fileField is a dotted path used only in the file-sourced
+// error message, so a bad value's origin is unambiguous in the error.
+func resolveDuration(envKey, fileField string, fileVal *string, def time.Duration) (time.Duration, error) {
+	if v, ok := os.LookupEnv(envKey); ok && v != "" {
+		d, err := parseDuration(v)
+		if err != nil {
+			return 0, fmt.Errorf("%s: %w", envKey, err)
+		}
+		return d, nil
+	}
+	if fileVal != nil && *fileVal != "" {
+		d, err := parseDuration(*fileVal)
+		if err != nil {
+			return 0, fmt.Errorf("%s: %w", fileField, err)
+		}
+		return d, nil
+	}
+	return def, nil
+}
+
+// parseDuration parses a duration from either an env var or a config.jsonc
+// string value. For backward-compatible clarity with the env var names in
+// the spec (e.g. HOST_GRACE_PERIOD_SECONDS), a bare integer is interpreted
+// as seconds; a Go duration string (e.g. "30m", "1h") is also accepted.
+// This is the general-purpose parser used by every duration field except
+// sync_soft_drift/sync_hard_drift, which use the stricter
+// parseDurationStrict (see resolveDriftMS) precisely because the bare-
+// integer-means-seconds convention here would be actively wrong for a
+// millisecond-scale field.
+func parseDuration(raw string) (time.Duration, error) {
+	if n, err := strconv.Atoi(raw); err == nil {
 		return time.Duration(n) * time.Second, nil
 	}
-	d, err := time.ParseDuration(v)
+	d, err := time.ParseDuration(raw)
 	if err != nil {
-		return 0, fmt.Errorf("%s: invalid duration value %q (use e.g. \"30s\", \"24h\", or a bare integer for seconds): %w", key, v, err)
+		return 0, fmt.Errorf("invalid duration value %q (use e.g. \"30s\", \"24h\", or a bare integer for seconds): %w", raw, err)
 	}
 	return d, nil
+}
+
+// parseDurationStrict parses a duration string with no bare-integer
+// fallback -- an explicit unit is always required. Used only for
+// sync_soft_drift/sync_hard_drift's config.jsonc values (see resolveDriftMS):
+// those are millisecond-scale fields, so silently treating a unit-less
+// "300" as "300 seconds" (the convention every other duration field in
+// this config uses) would turn a sub-second drift threshold into a
+// nonsensical five-minute one.
+func parseDurationStrict(raw string) (time.Duration, error) {
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("invalid duration value %q (an explicit unit is required here, e.g. \"300ms\" -- a bare number is rejected to avoid ambiguity with the bare-integer-means-seconds convention used elsewhere in this config): %w", raw, err)
+	}
+	return d, nil
+}
+
+// resolveDriftMS implements the env/file/default precedence chain for
+// SyncSoftDriftMS/SyncHardDriftMS. The two sources deliberately use
+// different formats: the env var (existing, unchanged) is a bare integer
+// number of milliseconds; the file value (new) is a duration string with
+// an explicit unit, parsed via parseDurationStrict. fileField is a dotted
+// path used only in the file-sourced error message.
+func resolveDriftMS(envKey, fileField string, fileVal *string, def int) (int, error) {
+	if v, ok := os.LookupEnv(envKey); ok && v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return 0, fmt.Errorf("%s: invalid integer value %q: %w", envKey, v, err)
+		}
+		return n, nil
+	}
+	if fileVal != nil && *fileVal != "" {
+		d, err := parseDurationStrict(*fileVal)
+		if err != nil {
+			return 0, fmt.Errorf("%s: %w", fileField, err)
+		}
+		return int(d.Milliseconds()), nil
+	}
+	return def, nil
+}
+
+// resolveFloat implements the env/file/default precedence chain for a
+// float field. The file value is already a native JSON number (no text
+// parsing needed); only the env var needs parsing.
+func resolveFloat(envKey string, fileVal *float64, def float64) (float64, error) {
+	if v, ok := os.LookupEnv(envKey); ok && v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			return 0, fmt.Errorf("%s: invalid float value %q: %w", envKey, v, err)
+		}
+		return f, nil
+	}
+	if fileVal != nil {
+		return *fileVal, nil
+	}
+	return def, nil
+}
+
+// validateListenAddress checks that addr parses as a usable host:port (or
+// bare ":port") address -- e.g. ":8080" or "0.0.0.0:8080". Previously any
+// string was accepted verbatim into http.Server.Addr, surfacing a
+// malformed value only as a runtime ListenAndServe error; this validates
+// it at config-load time instead, so it's caught alongside every other
+// config error.
+func validateListenAddress(addr string) error {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("invalid listen address %q: %w", addr, err)
+	}
+	if port == "" {
+		return fmt.Errorf("invalid listen address %q: missing port", addr)
+	}
+	p, err := strconv.Atoi(port)
+	if err != nil || p < 0 || p > 65535 {
+		return fmt.Errorf("invalid listen address %q: port must be a number between 0 and 65535", addr)
+	}
+	return nil
+}
+
+// validateLogLevel checks level against the set logging.New recognizes.
+// Previously any unrecognized value silently fell back to "info"; this
+// makes an invalid value a hard config error instead.
+func validateLogLevel(level string) error {
+	switch level {
+	case "debug", "info", "warn", "error":
+		return nil
+	default:
+		return fmt.Errorf("invalid log level %q: must be one of debug, info, warn, error", level)
+	}
 }

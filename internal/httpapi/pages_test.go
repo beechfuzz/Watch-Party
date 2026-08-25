@@ -51,7 +51,7 @@ func TestRenderPage_Success_ReturnsContent(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
 
 	rec := httptest.NewRecorder()
-	renderPage(rec, logger, pageTemplates, "index.html", pageData{ActiveNav: "home"})
+	renderPage(rec, logger, pageTemplates, "index.html", pageData{ActiveNav: "home", Title: "Watch Party"})
 
 	if rec.Code != 200 {
 		t.Fatalf("status = %d, want 200 (log: %s)", rec.Code, logBuf.String())
