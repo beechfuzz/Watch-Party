@@ -54,7 +54,7 @@ labels:
 
 ### Running it
 
-1. Copy `.env.example` to `.env` and fill in `EMBY_SERVER_URL`, `APP_ORIGINS`, and a generated `TOKEN_ENCRYPTION_KEY` (`openssl rand -base64 32`, or run the binary once with `--generate-key`). Review the other variables — the defaults are reasonable but the file documents what each one does.
+1. Copy `.env.example` to `.env` and fill in `EMBY_SERVER_URL`, `APP_ORIGINS`, and a generated `TOKEN_ENCRYPTION_KEY` (`openssl rand -base64 32`, or run the binary once with `--generate-key`). Review the other variables — the defaults are reasonable but the file documents what each one does. Alternatively, everything except `TOKEN_ENCRYPTION_KEY`/`TOKEN_ENCRYPTION_KEY_FILE` can instead be provided via a `/data/config/config.jsonc` file — see [Config file (`config.jsonc`)](#config-file-configjsonc) below. If neither is set up yet, the server still starts, in a setup-required mode that serves a placeholder until one is.
 2. `docker compose up -d --build` (see `docker-compose.yml`), or install `watchparty.container` under Podman Quadlet (see the comments in that file for install paths) and `systemctl start watchparty`.
 3. Confirm `GET /healthz` returns 200 from whatever's checking container health — the image is distroless (no shell), so health must be checked externally against this endpoint rather than via a Docker/Podman exec-based healthcheck; see the comments in `docker-compose.yml` and `watchparty.container`.
 4. Visit the app, sign in with an Emby account, and create a party for an Emby item.
@@ -71,14 +71,16 @@ Running directly with `go run` (no reverse proxy in front) over plain `http://lo
 
 ## Environment variables
 
-Every variable Watch Party recognizes, with its default — all of these can be set the same way whether you're running via `docker run`/`docker compose`, `podman run`, or a Podman Quadlet `.container` unit (as plain `Environment=`/`EnvironmentFile=` entries — see the comments in `watchparty.container`). `.env.example` has the same list with longer inline explanations.
+Every variable Watch Party recognizes, with its default — all of these can be set the same way whether you're running via `docker run`/`docker compose`, `podman run`, or a Podman Quadlet `.container` unit (as plain `Environment=`/`EnvironmentFile=` entries — see the comments in `watchparty.container`). `.env.example` has the same list with longer inline explanations. Every variable below except `TOKEN_ENCRYPTION_KEY`/`TOKEN_ENCRYPTION_KEY_FILE`/`DATABASE_PATH`/`PUID`/`PGID` can alternatively (or additionally) be set via `config.jsonc` — see [Config file (`config.jsonc`)](#config-file-configjsonc) below; if both are set for the same setting, the environment variable here wins.
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `APP_ORIGINS` | *(required)* | Comma-separated origins this app is served from, e.g. `https://watchparty.example.com`. Enforced on WebSocket connections. Mixed HTTP/HTTPS origins are fine — see below. |
 | `EMBY_SERVER_URL` | *(required)* | Your Emby server's base URL, reachable from the Watch Party container/process itself. |
 | `EMBY_PUBLIC_URL` | *(defaults to `EMBY_SERVER_URL`)* | Emby's base URL as reached by a participant's browser, if that's different from `EMBY_SERVER_URL` — see [Internal vs. public Emby address](#internal-vs-public-emby-address) below. |
-| `TOKEN_ENCRYPTION_KEY` | *(required)* | 32-byte key (base64 or hex) encrypting stored Emby tokens at rest. Never stored in SQLite. Generate with `openssl rand -base64 32` or `./watchparty --generate-key`. |
+| `TOKEN_ENCRYPTION_KEY` | *(required — exactly one of this or `TOKEN_ENCRYPTION_KEY_FILE`)* | 32-byte key (base64 or hex) encrypting stored Emby tokens at rest. Never stored in SQLite. Generate with `openssl rand -base64 32` or `./watchparty --generate-key`. Never settable via `config.jsonc`. |
+| `TOKEN_ENCRYPTION_KEY_FILE` | *(required — exactly one of this or `TOKEN_ENCRYPTION_KEY`)* | Path to a file containing the key value instead of the raw value inline — e.g. a Docker/Podman secret mounted at `/run/secrets/...`. Setting both this and `TOKEN_ENCRYPTION_KEY` (or neither) is a startup error. |
+| `SERVER_TITLE` | `Watch Party` | Site title shown in the page `<title>` and the sidebar. |
 | `DATABASE_PATH` | `/data/watchparty.db` | Path to the SQLite database file; the directory is created (and chowned to `PUID:PGID`, if running as root) if missing. Point this somewhere writable instead, e.g. `./data/watchparty.db`, for local `go run` development. |
 | `EMBY_PROGRESS_INTERVAL` | `10s` | How often each participant's watch progress is reported back to their own Emby account. |
 | `HOST_GRACE_PERIOD_SECONDS` | `20` | How long a disconnected host has to reconnect before host status transfers. |
@@ -95,6 +97,40 @@ Every variable Watch Party recognizes, with its default — all of these can be 
 | `SYNC_SOFT_DRIFT_MS` | `300` | Drift below this (milliseconds) is left uncorrected. |
 
 `SESSION_IDLE_TIMEOUT`, `SESSION_MAX_AGE`, `HOST_GRACE_PERIOD_SECONDS`, and `PARTY_INACTIVITY_TIMEOUT` accept either a bare integer (seconds) or a Go duration string (`30m`, `24h`).
+
+### Config file (`config.jsonc`)
+
+As an alternative (or supplement) to environment variables, most settings above can instead live in a JSON-with-comments file at `/data/config/config.jsonc`, grouped into `server_settings`, `global_party_settings`, `global_playback_settings`, and `media_server_settings`. Whichever environment variable corresponds to a given setting still wins if it's set — the file only fills in what the environment doesn't. `TOKEN_ENCRYPTION_KEY`/`TOKEN_ENCRYPTION_KEY_FILE`, `DATABASE_PATH`, and `PUID`/`PGID` are never read from this file, environment variables only.
+
+```jsonc
+{
+  "server_settings": {
+    "title": "Watch Party",
+    "log_level": "info",
+    "browser_origins": ["https://watchparty.example.com"],
+    "listen_address": ":8080",
+    "session_idle_timeout": "24h",
+    "session_age_timeout": "720h"
+  },
+  "global_party_settings": {
+    "host_grace_period": "20s",
+    "inactivity_timeout": "48h"
+  },
+  "global_playback_settings": {
+    "progress_interval": "10s",
+    "sync_snapshot_interval": "4s",
+    "sync_soft_drift": "300ms",
+    "sync_hard_drift": "1500ms",
+    "sync_max_rate_adjustment": 0.05
+  },
+  "media_server_settings": {
+    "server_url": "https://emby.example.com",
+    "public_url": ""
+  }
+}
+```
+
+`sync_soft_drift`/`sync_hard_drift` must carry an explicit unit here (e.g. `"300ms"`) — unlike every other duration setting in this file, a bare number is rejected rather than silently treated as seconds, since that would turn a sub-second drift threshold into a multi-minute one. If `config.jsonc` doesn't exist, the server starts in a **setup-required mode**: `GET /healthz` still returns `200`, but every other route returns a `503` placeholder until the file is created (there is no wizard UI to create it yet — that's planned for a follow-up; for now, write the file by hand, matching the shape above, then restart the process). See `ARCHITECTURE.md` §16 for the full design.
 
 ### Mixing HTTP and HTTPS origins
 

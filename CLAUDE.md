@@ -19,12 +19,13 @@ These must never be silently violated. If a change requires bending one, stop an
 - **Emby credentials, tokens, session cookies, and authenticated playback URLs are never logged — at any log level, including debug.** There is no automated redaction; this is enforced by not putting these values in a log call in the first place. Before adding a log statement near auth, sessions, or `emby.Client`, check what you're passing.
 - **Media authorization is re-validated per participant, for whatever item is currently loaded — not inherited from the host, and not just checked once at join.** A party's current item can change after join (playlist advance, or a host selecting a different item), so the check re-fires every time it does, at the point each participant fetches a playback URL for it (`handlePlaybackURL`) — not only at the join-time gate, which only covers the item current *at that moment*. Being the host, or another member already having access, never implicitly grants anyone else access to an item they couldn't already see in Emby themselves.
 - **Every party mutation is host-gated, except chat send.** `HandleControl`, `HandleHostTransfer`, every playlist mutation, and `UpdateSettings` all check `userID == p.hostUserID`. Chat (`HandleChatSend`) is the sole, deliberate exception — authorized by party membership instead, because it doesn't touch playback state, the playlist, or Emby (see `ARCHITECTURE.md` §12.3). Don't extend membership-only authorization to any other mutation without equally deliberate design and a documented reason — the host-only pattern is the default for a reason.
+- **No secrets in `config.jsonc`.** `TOKEN_ENCRYPTION_KEY`/`TOKEN_ENCRYPTION_KEY_FILE` are resolved from the environment only, never from the config file (`internal/config.FileConfig` has no field for it, and any attempt to set one is rejected as an unknown field). A wizard that later writes this file must never gain a code path that writes a secret into it.
 
 ## Where things live
 
 ```
-cmd/server/main.go        Process entrypoint: config load, privdrop, DB open, wiring, graceful shutdown.
-internal/config/          Env-var config loading and validation. No config files.
+cmd/server/main.go        Process entrypoint: startup-mode dispatch, config load, privdrop, DB open, wiring, graceful shutdown.
+internal/config/          Config loading and validation, layered: env var > config.jsonc (/data/config/config.jsonc, JSONC) > hardcoded default. TOKEN_ENCRYPTION_KEY(_FILE) is env-only, never in the file.
 internal/dbx/             SQLite schema (migrations/), models, and the data access layer (store.go).
 internal/session/         Opaque cookie sessions + synchronizer-token CSRF. No JWTs, no signing secret.
 internal/emby/            Emby HTTP client: auth, item metadata, playback URL construction, progress reporting.
@@ -41,11 +42,12 @@ internal/webassets/web/   Server-rendered templates + static frontend (JS mirror
 - **Emby client:** `internal/emby/client.go` — every call takes the requesting user's own access token; nothing here accepts a shared/service token.
 - **Session handling:** `internal/session/session.go` — cookie issuance/validation, CSRF token comparison.
 - **Migrations:** `internal/dbx/migrations/*.up.sql` / `*.down.sql` — never edit a shipped migration; add a new one.
+- **Startup mode:** `cmd/server/main.go`'s `run()` checks `config.FileExists(config.DefaultConfigPath)` before anything else. Missing → `runSetupRequired()` (minimal placeholder server, `internal/httpapi/setup_placeholder.go`; no DB, no privdrop, no encryption-key requirement — session 2's setup wizard replaces this). Present → `runNormal()`, today's full startup path via `config.Load()`.
 
 ## Build, test, run
 
 ```
-go run ./cmd/server                                          # needs env vars from .env.example set
+go run ./cmd/server                                          # needs env vars from .env.example set (or a config.jsonc — see below)
 go build ./...
 go test ./...                                                 # unit + integration tests
 go test -race ./...
@@ -53,7 +55,7 @@ node --test internal/webassets/web/static/js/*.test.mjs       # frontend JS test
 docker compose up -d --build                                  # or: podman quadlet, see watchparty.container
 ```
 
-Copy `.env.example` to `.env` first; `EMBY_SERVER_URL`, `APP_ORIGINS`, and `TOKEN_ENCRYPTION_KEY` (`openssl rand -base64 32`, or `./watchparty --generate-key`) are required. `internal/privdrop`'s tests that exercise real privilege-drop syscalls only run when `go test` itself runs as root; expect them skipped locally and in most CI.
+Copy `.env.example` to `.env` first; `TOKEN_ENCRYPTION_KEY` or `TOKEN_ENCRYPTION_KEY_FILE` (exactly one — `openssl rand -base64 32`, or `./watchparty --generate-key`) is always required via the environment, regardless of `config.jsonc`. Every other setting (`EMBY_SERVER_URL`, `APP_ORIGINS`, etc.) can come from either an env var or `/data/config/config.jsonc` — env wins if both are set; if `config.jsonc` doesn't exist at all, the server starts in **setup-required mode** instead of failing (see `internal/config` and `ARCHITECTURE.md` §16). `internal/privdrop`'s tests that exercise real privilege-drop syscalls only run when `go test` itself runs as root; expect them skipped locally and in most CI.
 
 ## Further reading
 

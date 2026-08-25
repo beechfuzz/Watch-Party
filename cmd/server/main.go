@@ -43,14 +43,73 @@ func main() {
 	}
 }
 
+// run dispatches between the two startup modes based solely on whether
+// config.DefaultConfigPath exists -- there is no separate
+// "enable_setup_wizard" flag. If it doesn't exist, the server starts in
+// setup-required mode: a minimal, dependency-free placeholder server (see
+// runSetupRequired) that doesn't open the database, construct the token
+// cipher, or require TOKEN_ENCRYPTION_KEY/_FILE to be set at all. If it
+// exists, the server starts normally (runNormal), which is the only path
+// that resolves and validates the encryption key.
 func run() error {
+	exists, err := config.FileExists(config.DefaultConfigPath)
+	if err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+	if !exists {
+		return runSetupRequired()
+	}
+	return runNormal()
+}
+
+// runSetupRequired serves the temporary "please finish setup" placeholder
+// (see httpapi.RegisterSetupRequiredRoutes) when config.DefaultConfigPath
+// doesn't exist. It deliberately does the minimum possible: resolve just
+// enough config to bind a listener and pick a log level, and nothing else
+// -- no database, no privilege drop, no Emby client, no party hub, and no
+// TOKEN_ENCRYPTION_KEY/_FILE requirement, since none of those have valid
+// inputs yet and requiring the key here would block the setup wizard (a
+// later phase) from ever being reachable to tell an operator about it.
+func runSetupRequired() error {
+	listenAddr, err := config.ResolveListenAddress(nil)
+	if err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+	logLevel, err := config.ResolveLogLevel(nil)
+	if err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+
+	logger := logging.New(logLevel)
+	logger.Info("starting watch party in setup-required mode",
+		"listen_addr", listenAddr,
+		"reason", "no config file found at "+config.DefaultConfigPath,
+	)
+
+	mux := http.NewServeMux()
+	httpapi.RegisterSetupRequiredRoutes(mux, logger)
+
+	srv := &http.Server{
+		Addr:              listenAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	return serveUntilShutdown(srv, logger, nil)
+}
+
+// runNormal is today's startup path, driven by the full env+file config
+// merge (config.Load). This is the only path that resolves and validates
+// TOKEN_ENCRYPTION_KEY/TOKEN_ENCRYPTION_KEY_FILE.
+func runNormal() error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
 
 	logger := logging.New(cfg.LogLevel)
-	logger.Info("starting watch party", "listen_addr", cfg.ListenAddr, "app_origins", cfg.AppOrigins)
+	logger.Info("starting watch party", "listen_addr", cfg.ListenAddr, "app_origins", cfg.AppOrigins, "title", cfg.Title)
+	logTokenKeySource(logger)
 	if nonHTTPS := cfg.NonHTTPSOrigins(); len(nonHTTPS) > 0 {
 		logger.Warn("APP_ORIGINS includes non-HTTPS origin(s); session cookies issued for these will not be marked Secure, matching what browsers require for a plain HTTP page — make sure they're only reachable on a trusted network", "origins", nonHTTPS)
 	}
@@ -122,6 +181,7 @@ func run() error {
 		Logger:               logger,
 		AppOrigins:           cfg.AppOrigins,
 		EmbyProgressInterval: cfg.EmbyProgressInterval,
+		Title:                cfg.Title,
 	})
 
 	srv := &http.Server{
@@ -130,9 +190,34 @@ func run() error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
+	return serveUntilShutdown(srv, logger, func(shutdownCtx context.Context) {
+		hub.Shutdown(shutdownCtx)
+	})
+}
+
+// logTokenKeySource logs which of TOKEN_ENCRYPTION_KEY /
+// TOKEN_ENCRYPTION_KEY_FILE supplied the encryption key -- and, when it
+// was the file variant, the file's path -- never the key value or file
+// contents. By the time this is called, config.Load has already
+// succeeded, so exactly one of the two is guaranteed to be set.
+func logTokenKeySource(logger *slog.Logger) {
+	if os.Getenv("TOKEN_ENCRYPTION_KEY") != "" {
+		logger.Info("token encryption key loaded", "source", "env")
+		return
+	}
+	logger.Info("token encryption key loaded", "source", "file", "path", os.Getenv("TOKEN_ENCRYPTION_KEY_FILE"))
+}
+
+// serveUntilShutdown starts srv, blocks until a SIGTERM/SIGINT or a fatal
+// listen error, then drains it with a bounded shutdown timeout. onShutdown,
+// if non-nil, runs after the HTTP server itself has stopped accepting new
+// requests but before "shutdown complete" is logged -- runNormal uses it to
+// flush the party hub's in-memory state to SQLite; runSetupRequired has
+// nothing to flush, so it passes nil.
+func serveUntilShutdown(srv *http.Server, logger *slog.Logger, onShutdown func(ctx context.Context)) error {
 	serveErr := make(chan error, 1)
 	go func() {
-		logger.Info("listening", "addr", cfg.ListenAddr)
+		logger.Info("listening", "addr", srv.Addr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serveErr <- err
 		}
@@ -158,7 +243,9 @@ func run() error {
 		logger.Error("http server shutdown error", "error", err)
 	}
 
-	hub.Shutdown(shutdownCtx)
+	if onShutdown != nil {
+		onShutdown(shutdownCtx)
+	}
 
 	logger.Info("shutdown complete")
 	return nil

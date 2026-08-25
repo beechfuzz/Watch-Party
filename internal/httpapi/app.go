@@ -30,6 +30,12 @@ type App struct {
 	AppOrigins []string
 
 	EmbyProgressInterval time.Duration
+
+	// Title is the operator-configured site title (config.Config.Title /
+	// server_settings.title), rendered into the page <title> and the
+	// sidebar's brand name in place of the old hardcoded "Watch Party"
+	// literal.
+	Title string
 }
 
 // RegisterRoutes attaches every Watch Party HTTP/WS route to mux.
@@ -64,5 +70,5 @@ func RegisterRoutes(mux *http.ServeMux, app *App) {
 
 	mux.HandleFunc("GET /ws/parties/{id}", app.handleWebSocket) // auth + origin validated inside (cookie-based; see ws.go)
 
-	registerPages(mux, app.Logger)
+	registerPages(mux, app.Logger, app.Title)
 }
