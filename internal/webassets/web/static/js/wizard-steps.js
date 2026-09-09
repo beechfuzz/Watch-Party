@@ -629,6 +629,24 @@ function wireListenAddress(doc, form, onChange) {
   });
   ipEl.addEventListener("input", sync);
 
+  // Keyboard up/down cycling -- matches wireDurationField's countEl keydown
+  // handler exactly (wizard-steps.js's duration fields): a plain keydown
+  // listener on the text input itself (the up/down buttons are
+  // tabindex="-1" and never receive focus), no custom repeat interval --
+  // holding the key repeats via the browser's own native key-repeat firing
+  // this same handler again, the same as the duration fields. bumpPort's
+  // existing 1-65535 clamp (no sentinel) applies unchanged since this reuses
+  // the same bump() the mouse handlers below already call.
+  portEl.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      bump(1);
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault();
+      bump(-1);
+    }
+  });
+
   // Port's increment/decrement arrows -- same press-and-hold shape as
   // wireRateField's spinbox (400ms initial delay, then repeat every 55ms),
   // reusing only that visual/interaction pattern: no unit, no sentinel,
