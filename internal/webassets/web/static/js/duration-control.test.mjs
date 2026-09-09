@@ -5,6 +5,7 @@ import {
   FIELD_CONFIG,
   pluralizeUnit,
   parseTypedSuffix,
+  typedNegativeState,
   clampCount,
   sentinelUnitFor,
   restoreUnitOnRaise,
@@ -54,6 +55,38 @@ test("parseTypedSuffix: a suffix typed while the numeric value is 0 is ignored",
 test("parseTypedSuffix: no letters at all returns null (caller falls back to plain-number handling)", () => {
   assert.equal(parseTypedSuffix("42", groupA), null);
   assert.equal(parseTypedSuffix("", groupA), null);
+});
+
+test("typedNegativeState: does not apply without a leading minus, or on a field with no negative sentinel", () => {
+  assert.deepEqual(typedNegativeState("5", groupA), { applies: false });
+  assert.deepEqual(typedNegativeState("", groupA), { applies: false });
+  assert.deepEqual(typedNegativeState("-5", { ...groupA, negativeSentinel: null }), { applies: false });
+});
+
+test("typedNegativeState: a lone leading minus (or minus followed only by 0) is 'pending', not yet committed -- mirrors the design source's own onNumField exactly", () => {
+  assert.deepEqual(typedNegativeState("-", groupA), { applies: true, pending: true });
+  assert.deepEqual(typedNegativeState("-0", groupA), { applies: true, pending: true });
+  assert.deepEqual(typedNegativeState("-", groupB), { applies: true, pending: true });
+});
+
+test("typedNegativeState: any other digit after the minus commits immediately to -1 and the field's negative sentinel unit -- live, not just on blur", () => {
+  assert.deepEqual(typedNegativeState("-5", groupA), { applies: true, pending: false, count: -1, unit: "never" });
+  assert.deepEqual(typedNegativeState("-5", groupB), { applies: true, pending: false, count: -1, unit: "forever" });
+  assert.deepEqual(typedNegativeState("-100", groupB), { applies: true, pending: false, count: -1, unit: "forever" });
+  assert.deepEqual(typedNegativeState("-05", groupA), { applies: true, pending: false, count: -1, unit: "never" });
+});
+
+test("typedNegativeState: applies uniformly across every field that carries a negative sentinel, not just Group B -- both groups now have one per Mark's Round 5 decision", () => {
+  for (const field of Object.keys(FIELD_CONFIG)) {
+    const config = FIELD_CONFIG[field];
+    assert.equal(config.negativeSentinel != null, true, `${field} is expected to carry a negative sentinel`);
+    assert.deepEqual(typedNegativeState("-9", config), {
+      applies: true,
+      pending: false,
+      count: -1,
+      unit: config.negativeSentinel,
+    });
+  }
 });
 
 test("clampCount: Group B (zeroSentinel !== null) is a plain floor/ceiling, 0 is a normal resting value", () => {

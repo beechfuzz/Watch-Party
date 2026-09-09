@@ -13,6 +13,7 @@ import {
   sentinelUnitFor,
   restoreUnitOnRaise,
   parseTypedSuffix,
+  typedNegativeState,
   pluralizeUnit,
 } from "./duration-control.js";
 
@@ -349,35 +350,15 @@ export function wireWizardSteps(doc) {
   render();
 }
 
-// Resolves a duration spin box's raw typed text (on blur) into a
-// normalized {count, unit}, reusing duration-control.js's pure functions
-// rather than re-deriving the sentinel/clamp rules here: a recognized
-// typed suffix (e.g. "5d") wins outright; otherwise a leading minus (on a
-// field that has a negative sentinel) clamps straight to -1, and any other
-// value is treated as a plain digit string (empty -> 0). The result is
-// then normalized into the field's actual valid number line -- Group A has
-// no 0 (so 0 or below always becomes -1, matching the "typing 0 is an
-// unambiguous disable" rule), Group B floors at -1 (or 0 with no negative
-// sentinel) -- the same shape clampCount already enforces for stepping,
-// applied here to a typed value instead of a step.
-function resolveDurationBlur(raw, prevUnit, config) {
-  const suffix = parseTypedSuffix(raw, config);
-  let n;
-  let unit = null;
-  if (suffix) {
-    n = suffix.count;
-    unit = suffix.unit;
-  } else {
-    const trimmed = raw.trim();
-    if (trimmed === "") {
-      n = 0;
-    } else if (config.negativeSentinel && /^-/.test(trimmed)) {
-      n = -1;
-    } else {
-      const digits = trimmed.replace(/[^0-9]/g, "");
-      n = digits === "" ? 0 : Math.min(9999, parseInt(digits, 10));
-    }
-  }
+// Normalizes a resolved (count, explicit-unit-or-null) pair into the
+// field's actual valid number line -- Group A has no 0 (so 0 or below
+// always becomes -1, matching the "typing 0 is an unambiguous disable"
+// rule), Group B floors at -1 (or 0 with no negative sentinel) -- the same
+// shape clampCount already enforces for stepping, applied here to a typed
+// value instead of a step. Shared by resolveDurationBlur below and by
+// wireDurationField's live negative-clamp handler, so there is exactly one
+// place this normalization rule lives.
+function finalizeTypedCount(n, explicitUnit, prevUnit, config) {
   if (config.zeroSentinel === null) {
     if (n <= 0) n = -1;
   } else if (config.negativeSentinel) {
@@ -386,7 +367,35 @@ function resolveDurationBlur(raw, prevUnit, config) {
     n = 0;
   }
   const sentinel = sentinelUnitFor(n, config);
-  return { count: n, unit: unit || sentinel || restoreUnitOnRaise(prevUnit, config) };
+  return { count: n, unit: explicitUnit || sentinel || restoreUnitOnRaise(prevUnit, config) };
+}
+
+// Resolves a duration spin box's raw typed text (on blur) into a
+// normalized {count, unit}, reusing duration-control.js's pure functions
+// rather than re-deriving the sentinel/clamp rules here: a recognized
+// typed suffix (e.g. "5d") wins outright; otherwise typedNegativeState
+// handles a leading minus the same way the live per-keystroke handler in
+// wireDurationField does (a lone pending "-" left at blur without ever
+// being followed by a digit still resolves to the disable sentinel here,
+// matching the design source's own blur-time handling for that case); any
+// other value is treated as a plain digit string (empty -> 0). By the time
+// blur actually runs, live typing (see wireDurationField) will already
+// have committed a real negative value to -1, so this negative branch is
+// primarily a defensive fallback for the lone-pending-minus case and
+// programmatic value changes that never fired an input event.
+function resolveDurationBlur(raw, prevUnit, config) {
+  const suffix = parseTypedSuffix(raw, config);
+  if (suffix) {
+    return finalizeTypedCount(suffix.count, suffix.unit, prevUnit, config);
+  }
+  const neg = typedNegativeState(raw, config);
+  if (neg.applies) {
+    return finalizeTypedCount(-1, config.negativeSentinel, prevUnit, config);
+  }
+  const trimmed = raw.trim();
+  const digits = trimmed.replace(/[^0-9]/g, "");
+  const n = digits === "" ? 0 : Math.min(9999, parseInt(digits, 10));
+  return finalizeTypedCount(n, null, prevUnit, config);
 }
 
 // Wires one duration field's spin box (count input + unit select + up/down
@@ -447,6 +456,23 @@ function wireDurationField(doc, form, field, config, onChange) {
     apply(nextCount, sentinel || restoreUnitOnRaise(unit, config));
   }
 
+  // Live, per-keystroke negative clamp -- verified directly against the
+  // design source's own onNumField (not just its README) that typing a
+  // negative value commits to the disable sentinel immediately, on every
+  // keystroke, not only on blur. A lone leading minus with nothing (or
+  // just "0") after it yet is left showing as a bare "-" so the operator
+  // can keep typing; any other digit after the minus commits right away.
+  // Normal (non-negative) typing is untouched here -- typedNegativeState
+  // only ever applies when the raw text has a leading minus.
+  countEl.addEventListener("input", () => {
+    const neg = typedNegativeState(countEl.value, config);
+    if (!neg.applies) return;
+    if (neg.pending) {
+      countEl.value = "-";
+      return;
+    }
+    apply(neg.count, neg.unit);
+  });
   countEl.addEventListener("blur", () => {
     const resolved = resolveDurationBlur(countEl.value, unit, config);
     apply(resolved.count, resolved.unit);

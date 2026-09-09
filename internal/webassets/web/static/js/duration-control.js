@@ -144,6 +144,24 @@ export function parseTypedSuffix(raw, config) {
   return { count: Math.min(MAX_DURATION_COUNT, count), unit };
 }
 
+// Live, per-keystroke read of a leading minus sign, mirroring the design
+// source's onNumField exactly: verified directly against the source (not
+// just the README) that typing a negative value clamps to the disable
+// sentinel immediately, on every keystroke, not only on blur. A bare
+// leading minus with no digits after it yet -- or "-0" -- is still
+// "pending": the source keeps the field showing a literal "-" rather than
+// committing early, so the operator can keep typing more digits. Any other
+// digit after the minus commits immediately to the sentinel. Returns
+// `{applies: false}` when the field has no negative sentinel at all or raw
+// has no leading minus, meaning the caller's normal (non-negative) typed-
+// value handling applies instead.
+export function typedNegativeState(raw, config) {
+  if (!config.negativeSentinel || !/^\s*-/.test(raw)) return { applies: false };
+  const digits = raw.replace(/[^0-9]/g, "");
+  if (digits === "" || digits === "0") return { applies: true, pending: true };
+  return { applies: true, pending: false, count: -1, unit: config.negativeSentinel };
+}
+
 // Steps cur by delta and returns the new count, honoring each config's
 // number-line shape:
 //   - Group B (zeroSentinel !== null): plain floor/ceiling, 0 <= n <= 9999,
