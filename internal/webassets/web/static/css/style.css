@@ -387,6 +387,8 @@ body.wizard-advanced-on .setup-card--wizard .field[data-advanced-field] { displa
 .wizard-disclosure-toggle svg { width: 13px; height: 13px; transition: transform .15s ease; }
 .wizard-disclosure[data-open="true"] .wizard-disclosure-toggle svg { transform: rotate(180deg); }
 .wizard-disclosure-body { padding: 0 14px 14px 35px; font-size: 13px; color: var(--text-secondary); line-height: 1.5; }
+.wizard-disclosure-body p { margin: 0 0 10px; }
+.wizard-disclosure-body p:last-child { margin-bottom: 0; }
 /* Wraps a plain, attribute-free <code> (kept bare so
    setup_wizard_test.go's `<code>([^<]+)</code>` extraction regex, shared
    with the post-save success page's own key display, matches this one

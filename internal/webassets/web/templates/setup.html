@@ -80,7 +80,9 @@
                   <span id="wizard-disclosure-label">Show More Info...</span>
                 </button>
                 <div class="wizard-disclosure-body" id="wizard-disclosure-body" hidden>
-                  When a user logs in, Emby issues an access token for that user's account. Watch Party persists this token so that user doesn't need to re-authenticate with Emby on every visit -- it's encrypted with this key before it's ever written to disk, and decrypted only in memory when a request needs it (e.g. fetching a playback URL on that user's behalf).
+                  <p>To use Watch Party, users must authenticate through your Emby server. If successful, Emby issues back an <strong>access token</strong> — a bearer credential that lets Watch Party make API calls to Emby on behalf of the user without ever seeing or storing their actual password.</p>
+                  <p>Watch Party saves their Emby access token so it doesn't have to ask them to log in every time they visit — but it never saves that token in plain text. Instead, it encrypts the token using this <strong>Encryption Key</strong> before writing it to disk. Without this key, the stored tokens are just unreadable noise, even to someone who steals the database file. Watch Party will need this key supplied every time the container restarts — otherwise users will have to re-authenticate into Emby whenever the key changes.</p>
+                  <p><strong>After completing this setup wizard:</strong> Store the key as a Docker or Podman secret rather than a plain environment variable in a compose file or shell history. Point <code class="wizard-inline-code">TOKEN_ENCRYPTION_KEY_FILE</code> at the secret's mounted path (e.g. <code class="wizard-inline-code">/run/secrets/token_encryption_key</code>) instead of setting <code class="wizard-inline-code">TOKEN_ENCRYPTION_KEY</code> directly — Watch Party requires exactly one of the two to be set, never both. This keeps the key out of process listings and image layers while guaranteeing it stays identical across restarts and redeploys.</p>
                 </div>
               </div>
             </section>
