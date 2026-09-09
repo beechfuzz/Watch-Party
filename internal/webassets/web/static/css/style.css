@@ -377,6 +377,10 @@ body.wizard-advanced-on .setup-card--wizard .field[data-advanced-field] { displa
 .wizard-rate-field { width: 110px; }
 .wizard-port-field { width: 110px; }
 
+/* Encryption Key step: the two paragraphs directly above .wizard-key-block
+   (distinct from .wizard-disclosure-body's paragraphs below it). */
+.wizard-key-intro { font-size: 13px; color: var(--text-secondary); margin: 0 0 8px; }
+
 /* Encryption Key step disclosure panel */
 .wizard-disclosure { background: var(--bg-panel-raised); border: 1px solid var(--border-subtle); border-radius: var(--radius-control); overflow: hidden; margin-bottom: 20px; }
 .wizard-disclosure-toggle {
