@@ -70,9 +70,6 @@
 
             <!-- Step 1: Encryption Key -->
             <section data-step="1">
-              <h2>Encryption Key</h2>
-              <p class="wizard-step-sub">Protect your users' Emby tokens</p>
-
               <p>Set this key as <span class="wizard-inline-code">TOKEN_ENCRYPTION_KEY</span> (env) or <span class="wizard-inline-code">TOKEN_ENCRYPTION_KEY_FILE</span> (secret file).</p>
               <p>This key is never written to disk and will not be shown again.</p>
               <div class="wizard-key-block"><code>{{.GeneratedKey}}</code></div>
@@ -90,9 +87,6 @@
 
             <!-- Step 2: General Settings -->
             <section data-step="2" hidden>
-              <h2>General Settings</h2>
-              <p class="wizard-step-sub">Title, logging, network basics</p>
-
               <div class="field">
                 <label for="title">Site Title</label>
                 <input id="title" name="title" type="text" value="{{index .Values "title"}}">
@@ -153,9 +147,6 @@
 
             <!-- Step 3: Party & Playback Settings -->
             <section data-step="3" hidden>
-              <h2>Party &amp; Playback Settings</h2>
-              <p class="wizard-step-sub">Tune sync and connect to your media server</p>
-
               <div class="field">
                 <label for="host_grace_period__count">Disconnected Party Host Grace Period</label>
                 <p class="field-helper">How much time a Party Host has to reconnect to the party before the "Host" status transfers to a different Attendee in the party.</p>
