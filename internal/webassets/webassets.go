@@ -28,9 +28,24 @@ func StaticFS() (fs.FS, error) {
 	return fs.Sub(staticFS, "web/static")
 }
 
+// DurationCtl is the {Field, Value} pair the setup wizard's shared
+// "duration_control" template block (setup.html) renders from -- one
+// field's hidden true-value input name/initial value, wired up client-side
+// by wizard-steps.js's wireDurationField. Exported so setup.html's
+// {{durationCtl "field" value}} calls have a template.FuncMap entry to
+// call; the field itself has no other consumer.
+type DurationCtl struct {
+	Field string
+	Value string
+}
+
 // Templates parses every embedded *.html template. html/template
 // auto-escapes all dynamic values, which matters here since page content
 // includes user-controlled Emby display names.
 func Templates() (*template.Template, error) {
-	return template.ParseFS(templatesFS, "web/templates/*.html")
+	return template.New("").Funcs(template.FuncMap{
+		"durationCtl": func(field, value string) DurationCtl {
+			return DurationCtl{Field: field, Value: value}
+		},
+	}).ParseFS(templatesFS, "web/templates/*.html")
 }

@@ -215,6 +215,15 @@ func (h *Hub) lastActivityAt(ctx context.Context, partyID string, createdAt time
 // lingering active forever. See ARCHITECTURE.md §8. Returns the number of
 // parties ended, for logging by the caller's periodic loop.
 func (h *Hub) SweepInactiveParties(ctx context.Context, maxIdle time.Duration) int {
+	if maxIdle < 0 {
+		// "Forever" (see config.ValidateDisableableDuration) -- the sweep is
+		// disabled entirely. Explicit guard for what was previously only an
+		// accidental consequence of `idleFor < maxIdle` always being false
+		// against a negative maxIdle: now that an operator can deliberately
+		// choose this value, it shouldn't depend on that comparison's
+		// direction never changing underneath it.
+		return 0
+	}
 	ended := 0
 	for _, p := range h.All() {
 		row, err := h.store.GetParty(ctx, p.ID)

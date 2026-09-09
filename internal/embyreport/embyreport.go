@@ -55,8 +55,22 @@ func New(hub *party.Hub, store *dbx.Store, embyClient *emby.Client, cipher *cryp
 // reporting until ctx is cancelled (server shutdown).
 func (rp *Reporter) Run(ctx context.Context) {
 	events := rp.hub.Events()
-	ticker := time.NewTicker(rp.interval)
-	defer ticker.Stop()
+	// A negative interval is the "Never" sentinel (see
+	// config.ValidateDisableableDuration) -- periodic progress reporting is
+	// disabled entirely rather than starting a ticker at all. time.NewTicker
+	// panics on a non-positive duration, so this guard also stands as the
+	// last line of defense against a zero value that should already have
+	// been rejected at config load time. tickerCh stays nil (never fires in
+	// the select below) when disabled; event-triggered reporting
+	// (RecordPlaySession/handleEvent) is unaffected either way.
+	var tickerCh <-chan time.Time
+	if rp.interval < 0 {
+		rp.logger.Info("emby progress report interval disabled (negative interval)")
+	} else {
+		ticker := time.NewTicker(rp.interval)
+		defer ticker.Stop()
+		tickerCh = ticker.C
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -66,7 +80,7 @@ func (rp *Reporter) Run(ctx context.Context) {
 				return
 			}
 			rp.handleEvent(ctx, evt)
-		case <-ticker.C:
+		case <-tickerCh:
 			rp.reportAllProgress(ctx)
 		}
 	}

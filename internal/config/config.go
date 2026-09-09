@@ -167,7 +167,13 @@ func loadFrom(fc *FileConfig) (*Config, error) {
 	if cfg.SessionIdleTimeout, err = resolveDuration("SESSION_IDLE_TIMEOUT", "server_settings.session_idle_timeout", fc.ServerSettings.SessionIdleTimeout, 24*time.Hour); err != nil {
 		return nil, err
 	}
+	if err := ValidateDisableableDuration("session_idle_timeout", cfg.SessionIdleTimeout); err != nil {
+		return nil, err
+	}
 	if cfg.SessionMaxAge, err = resolveDuration("SESSION_MAX_AGE", "server_settings.session_age_timeout", fc.ServerSettings.SessionAgeTimeout, 30*24*time.Hour); err != nil {
+		return nil, err
+	}
+	if err := ValidateDisableableDuration("session_age_timeout", cfg.SessionMaxAge); err != nil {
 		return nil, err
 	}
 
@@ -181,14 +187,26 @@ func loadFrom(fc *FileConfig) (*Config, error) {
 	if cfg.EmbyProgressInterval, err = resolveDuration("EMBY_PROGRESS_INTERVAL", "global_playback_settings.progress_interval", fc.GlobalPlaybackSettings.ProgressInterval, 10*time.Second); err != nil {
 		return nil, err
 	}
+	if err := ValidateDisableableDuration("progress_interval", cfg.EmbyProgressInterval); err != nil {
+		return nil, err
+	}
 	if cfg.SyncSnapshotInterval, err = resolveDuration("SYNC_SNAPSHOT_INTERVAL", "global_playback_settings.sync_snapshot_interval", fc.GlobalPlaybackSettings.SyncSnapshotInterval, 4*time.Second); err != nil {
+		return nil, err
+	}
+	if err := ValidateDisableableDuration("sync_snapshot_interval", cfg.SyncSnapshotInterval); err != nil {
 		return nil, err
 	}
 
 	if cfg.SyncSoftDriftMS, err = resolveDriftMS("SYNC_SOFT_DRIFT_MS", "global_playback_settings.sync_soft_drift", fc.GlobalPlaybackSettings.SyncSoftDrift, 300); err != nil {
 		return nil, err
 	}
+	if err := ValidateDisableableDuration("sync_soft_drift", time.Duration(cfg.SyncSoftDriftMS)*time.Millisecond); err != nil {
+		return nil, err
+	}
 	if cfg.SyncHardDriftMS, err = resolveDriftMS("SYNC_HARD_DRIFT_MS", "global_playback_settings.sync_hard_drift", fc.GlobalPlaybackSettings.SyncHardDrift, 1500); err != nil {
+		return nil, err
+	}
+	if err := ValidateDisableableDuration("sync_hard_drift", time.Duration(cfg.SyncHardDriftMS)*time.Millisecond); err != nil {
 		return nil, err
 	}
 	if err := ValidateSyncDrift(time.Duration(cfg.SyncSoftDriftMS)*time.Millisecond, time.Duration(cfg.SyncHardDriftMS)*time.Millisecond); err != nil {
@@ -517,9 +535,37 @@ func ValidateTitle(title string) error {
 // validate an operator's submitted sync_soft_drift/sync_hard_drift pair
 // with the exact same rule the loader enforces, rather than a second,
 // possibly-drifting reimplementation of ">".
+//
+// A negative value disables the corresponding correction entirely (see
+// ValidateDisableableDuration) -- ordering between "disabled" and any other
+// value, including another disabled value, isn't a meaningful comparison,
+// so the ordering check is skipped whenever either side is negative. Without
+// this exemption, disabling both (e.g. both -1s) would fail hard<=soft even
+// though "disable both drift corrections" is a legitimate configuration.
 func ValidateSyncDrift(soft, hard time.Duration) error {
+	if soft < 0 || hard < 0 {
+		return nil
+	}
 	if hard <= soft {
 		return fmt.Errorf("sync_hard_drift (%s) must be greater than sync_soft_drift (%s)", hard, soft)
+	}
+	return nil
+}
+
+// ValidateDisableableDuration rejects exactly zero for a duration field
+// that supports "disabled" via a negative value instead. Zero is never a
+// safe or meaningful value for these fields: fed into time.NewTicker it
+// panics outright (internal/party's snapshot ticker,
+// internal/embyreport's progress ticker); fed into a plain comparison it
+// silently inverts the field's intended meaning (e.g. internal/syncalg's
+// drift comparisons would fire on every nonzero drift, and a session idle
+// timeout of zero would expire every session on its very next request,
+// rather than disabling anything). A negative value is accepted here and
+// left for the consuming code to treat as "disabled" -- only the literal,
+// dangerous zero is rejected at load time.
+func ValidateDisableableDuration(fieldName string, d time.Duration) error {
+	if d == 0 {
+		return fmt.Errorf("%s must not be exactly 0 -- use a negative value (e.g. \"-1s\") to disable this feature, or a positive duration to set it", fieldName)
 	}
 	return nil
 }

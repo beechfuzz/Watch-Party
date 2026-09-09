@@ -28,6 +28,16 @@ var (
 	ErrCSRFMismatch   = errors.New("session: csrf token mismatch")
 )
 
+// neverExpiresAt is stored as a session's ExpiresAt when maxAge is negative
+// ("Never" -- see config.ValidateDisableableDuration and Manager.Create).
+// A real, far-future timestamp is used rather than a sentinel value checked
+// specially in Authenticate, so that dbx.Store.DeleteExpiredSessions's
+// separate `WHERE expires_at < ?` sweep -- which has no visibility into
+// Manager.maxAge -- also leaves the session alone, instead of immediately
+// deleting a session whose ExpiresAt would otherwise be a moment in the past
+// (now.Add(negative duration)).
+var neverExpiresAt = time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)
+
 type Manager struct {
 	store       *dbx.Store
 	idleTimeout time.Duration
@@ -51,12 +61,16 @@ func (m *Manager) Create(ctx context.Context, w http.ResponseWriter, r *http.Req
 		return nil, err
 	}
 	now := time.Now()
+	expiresAt := now.Add(m.maxAge)
+	if m.maxAge < 0 { // "Never" -- see neverExpiresAt's doc comment
+		expiresAt = neverExpiresAt
+	}
 	sess := dbx.Session{
 		ID:         id,
 		UserID:     userID,
 		CreatedAt:  now,
 		LastSeenAt: now,
-		ExpiresAt:  now.Add(m.maxAge),
+		ExpiresAt:  expiresAt,
 		CSRFToken:  csrfToken,
 	}
 	if err := m.store.CreateSession(ctx, sess); err != nil {
@@ -135,7 +149,12 @@ func (m *Manager) Authenticate(ctx context.Context, r *http.Request) (*dbx.Sessi
 		return nil, err
 	}
 	now := time.Now()
-	if now.After(sess.ExpiresAt) || now.Sub(sess.LastSeenAt) > m.idleTimeout {
+	// idleTimeout < 0 is "Never" -- unlike maxAge (whose ExpiresAt is
+	// resolved once, at creation, into neverExpiresAt), idleTimeout is
+	// re-checked fresh against m.idleTimeout on every call, so it needs its
+	// own explicit guard here rather than a stored sentinel.
+	idleExpired := m.idleTimeout >= 0 && now.Sub(sess.LastSeenAt) > m.idleTimeout
+	if now.After(sess.ExpiresAt) || idleExpired {
 		_ = m.store.DeleteSession(ctx, sess.ID)
 		return nil, ErrSessionExpired
 	}
