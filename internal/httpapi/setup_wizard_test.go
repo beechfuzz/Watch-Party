@@ -318,6 +318,76 @@ func TestSetupWizard_PostValidValues_WritesFileSignalsAndShowsSuccess(t *testing
 	}
 }
 
+// TestSetupWizard_GetRoot_PrefillsBrowserOriginsServerURLPublicURL and
+// TestSetupWizard_PostUneditedDefaults_ValidatesAndWritesPlaceholdersVerbatim
+// cover ARCHITECTURE.md §16.20: browser_origins/server_url/public_url now
+// ship with a real, non-blank, wizard-only suggested value (an operator
+// decision, not a config.loadFrom default) instead of blank, so a fresh
+// install always lands on step 1 instead of being routed to step 2 by
+// wizard-steps.js's required-field gate.
+func TestSetupWizard_GetRoot_PrefillsBrowserOriginsServerURLPublicURL(t *testing.T) {
+	srv, _, _ := newSetupWizardServer(t)
+	defer srv.Close()
+
+	_, body := mustGetBody(t, newJarClient(t), srv.URL+"/")
+
+	if !strings.Contains(body, `id="browser_origins" name="browser_origins" rows="3">https://watchparty.example.com<`) {
+		t.Errorf("browser_origins textarea not prefilled with the expected placeholder:\n%s", body)
+	}
+	if !strings.Contains(body, `id="server_url" name="server_url" type="text" value="http://emby:8096"`) {
+		t.Errorf("server_url not prefilled with the expected placeholder:\n%s", body)
+	}
+	if !strings.Contains(body, `id="public_url" name="public_url" type="text" value="http://emby:8096"`) {
+		t.Errorf("public_url not prefilled with the expected placeholder:\n%s", body)
+	}
+}
+
+// TestSetupWizard_PostUneditedDefaults_ValidatesAndWritesPlaceholdersVerbatim
+// proves the accepted tradeoff from ARCHITECTURE.md §16.20 directly rather
+// than only in prose: submit_time validation is unchanged by this default
+// -- buildFileConfig re-validates every submitted field regardless of
+// source -- so an unedited placeholder is syntactically valid and passes,
+// exactly like any other operator-typed value would.
+func TestSetupWizard_PostUneditedDefaults_ValidatesAndWritesPlaceholdersVerbatim(t *testing.T) {
+	srv, configPath, _ := newSetupWizardServer(t)
+	defer srv.Close()
+
+	client := newJarClient(t)
+	_, getBody := mustGetBody(t, client, srv.URL+"/")
+	token := extractCSRFToken(t, getBody)
+
+	form := url.Values{}
+	for field, val := range defaultSetupFieldValues() {
+		form.Set(field, val)
+	}
+	form.Set("csrf_token", token)
+
+	resp, err := client.PostForm(srv.URL+"/", form)
+	if err != nil {
+		t.Fatalf("POST /: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (an unedited placeholder should validate cleanly); body:\n%s", resp.StatusCode, body)
+	}
+
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("reading written config.jsonc: %v", err)
+	}
+	written := string(raw)
+	if !strings.Contains(written, `"browser_origins": ["https://watchparty.example.com"]`) {
+		t.Errorf("written config.jsonc missing verbatim browser_origins placeholder:\n%s", written)
+	}
+	if !strings.Contains(written, `"server_url": "http://emby:8096"`) {
+		t.Errorf("written config.jsonc missing verbatim server_url placeholder:\n%s", written)
+	}
+	if !strings.Contains(written, `"public_url": "http://emby:8096"`) {
+		t.Errorf("written config.jsonc missing verbatim public_url placeholder:\n%s", written)
+	}
+}
+
 func TestSetupWizard_CatchAllOtherPaths_Return503(t *testing.T) {
 	srv, _, _ := newSetupWizardServer(t)
 	defer srv.Close()

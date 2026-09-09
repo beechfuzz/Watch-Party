@@ -286,14 +286,28 @@ func (sw *setupWizard) validateCSRF(r *http.Request) error {
 }
 
 // defaultSetupFieldValues returns the pre-filled defaults shown on a
-// fresh GET /, matching FileConfig's documented defaults (see
-// internal/config/config.go's loadFrom and README.md's config.jsonc
-// example) field-for-field.
+// fresh GET /. Every field except browser_origins/server_url/public_url
+// matches FileConfig's documented defaults (see internal/config/config.go's
+// loadFrom and README.md's config.jsonc example) field-for-field.
+//
+// browser_origins/server_url/public_url are the deliberate exception: an
+// operator decision (not a loadFrom match -- see ARCHITECTURE.md §16.20) to
+// give these three a real, non-blank wizard-only suggested value instead of
+// shipping blank, so a fresh install always lands on Step 1 instead of
+// being routed straight to Step 2 by wizard-steps.js's required-field gate.
+// internal/config.loadFrom itself is unchanged and still has no fallback
+// for either browser_origins or server_url -- these values are reused
+// as-is from the verified design source's own illustrative example data
+// (its initial component state and README-documented "Default" for these
+// fields), not invented here, and an operator who never touches them and
+// submits anyway will get exactly these values written to config.jsonc:
+// syntactically valid, so nothing rejects them, but almost certainly wrong
+// for their specific deployment.
 func defaultSetupFieldValues() map[string]string {
 	return map[string]string{
 		"title":                    "Watch Party",
 		"log_level":                "info",
-		"browser_origins":          "",
+		"browser_origins":          "https://watchparty.example.com",
 		"listen_address":           ":8080",
 		"session_idle_timeout":     "24h",
 		"session_age_timeout":      "720h",
@@ -304,8 +318,8 @@ func defaultSetupFieldValues() map[string]string {
 		"sync_soft_drift":          "300ms",
 		"sync_hard_drift":          "1500ms",
 		"sync_max_rate_adjustment": "0.05",
-		"server_url":               "",
-		"public_url":               "",
+		"server_url":               "http://emby:8096",
+		"public_url":               "http://emby:8096",
 	}
 }
 

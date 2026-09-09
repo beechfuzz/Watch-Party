@@ -25,6 +25,13 @@ import {
 // instead on blur-to-default. Added here as agreed defense-in-depth so the
 // wizard's own gating matches everything the server actually requires, not
 // just what the design mockup happened to pulse.
+//
+// As of ARCHITECTURE.md §16.20, browser_origins/server_url ship with a
+// real wizard-only suggested value on load (setup_wizard.go's
+// defaultSetupFieldValues) rather than blank -- internal/config.loadFrom
+// itself still has no fallback for either, so this list and the gating
+// below are unchanged and still needed: an operator who clears one back to
+// blank must still be blocked exactly as before.
 export const REQUIRED_FIELDS = ["title", "browser_origins", "server_url"];
 
 export function requiredFieldsMissing(values) {
@@ -40,17 +47,22 @@ export const FIELD_STEP = { title: 2, browser_origins: 2, server_url: 2 };
 // fields: the lowest-numbered step holding one of them, or step 1 if
 // nothing is missing. Needed because the required-field gate is global
 // (blocks Next/Back/every rail item, not just the step the field lives
-// on) -- title always has a non-blank default, but browser_origins and
-// server_url do not (there's no sensible site-generic default for either),
-// so a fresh page load can start with fields already missing. Without
-// this, the operator would land on step 1, see no offending field
-// anywhere on it, and have no way to reach the step that needs their
-// attention: Next and every rail item -- including the one for the step
-// that actually holds the blank field -- are disabled by the very same
-// gate. This mirrors the same "open the step that needs attention" idea
-// Round 3's plan already anticipated for a server-side error re-render
-// (there, driven by which fields the server rejected; here, by which
-// required fields are blank on first load).
+// on) -- originally written because browser_origins/server_url had no
+// sensible site-generic default (unlike title) and so a fresh page load
+// could start with fields already missing, landing the operator on step 1
+// with no offending field anywhere on it and no way to reach the step that
+// needs attention (Next and every rail item, including the one for the
+// step that actually holds the blank field, disabled by that same gate).
+// As of ARCHITECTURE.md §16.20, browser_origins/server_url now ship with a
+// real (if operator-decided, wizard-only) suggested default too, so a
+// fresh load normally has nothing missing and this now simply returns 1 --
+// but the function itself is unchanged and still the correct thing to call
+// for the cases where something genuinely is missing: an operator who
+// clears a required field back to blank, or a server-side validation-error
+// re-render. This mirrors the same "open the step that needs attention"
+// idea Round 3's plan already anticipated for that server-side re-render
+// case (there, driven by which fields the server rejected; here, by
+// whichever required fields are actually blank right now).
 export function firstStepWithMissingField(missing, fieldStep = FIELD_STEP) {
   if (missing.length === 0) return 1;
   return Math.min(...missing.map((f) => fieldStep[f] ?? 1));
@@ -301,7 +313,16 @@ export function wireWizardSteps(doc) {
         display[field] = values.listen_address || "";
         previewValues[field] = values.listen_address || "";
       } else if (field === "public_url") {
-        display[field] = values.public_url ? values.public_url : "(same as server URL)";
+        // "(same as server URL)" triggers on value-equality, not just
+        // blankness (ARCHITECTURE.md §16.20): public_url now ships
+        // defaulted to the same wizard-only suggested value as server_url,
+        // so an operator who edits neither would otherwise see two
+        // identical, unannotated URLs here instead of the "these are
+        // intentionally the same" context this annotation exists to give.
+        // Display-only -- previewValues (the actual submitted/written
+        // value) is unaffected either way.
+        const sameAsServer = !values.public_url || values.public_url === values.server_url;
+        display[field] = sameAsServer ? "(same as server URL)" : values.public_url;
         previewValues[field] = values.public_url || values.server_url || "";
       } else if (field === "sync_max_rate_adjustment") {
         const n = parseFloat(values.sync_max_rate_adjustment);
