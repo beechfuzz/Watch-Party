@@ -569,7 +569,14 @@ function wireListenAddress(doc, form, onChange) {
   // in 0.0.0.0 the first time it's touched, matching the design source.
   const lastColon = String(hidden.value || "").lastIndexOf(":");
   if (lastColon !== -1) {
-    ipEl.value = hidden.value.slice(0, lastColon);
+    // hidden.value's default is the bare ":8080" (config.ResolveListenAddress's
+    // own default -- no host, meaning "all interfaces" to net.SplitHostPort),
+    // which splits to an empty ip substring here. Falling back to "0.0.0.0"
+    // matches what reassembleListenAddress already does for the hidden field
+    // on every sync() below -- without it, the visible ip box would ship
+    // empty (placeholder only) instead of the design source's real prefilled
+    // "0.0.0.0" default.
+    ipEl.value = hidden.value.slice(0, lastColon) || "0.0.0.0";
     portEl.value = hidden.value.slice(lastColon + 1);
   }
 

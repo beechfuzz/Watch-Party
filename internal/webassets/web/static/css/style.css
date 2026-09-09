@@ -222,7 +222,14 @@ dialog h3 { font-family: var(--font-display); font-size: 16px; font-weight: 600;
    Success page and every other .setup-card/.login-card consumer are
    unaffected. */
 .setup-card--wizard {
-  max-width: 900px;
+  /* min(80%, 1500px): 80% matches the verified .dc.html source's own
+     max-width exactly (see ARCHITECTURE.md's setup wizard section -- the
+     900px this replaced was lifted from the design README's prose, which
+     disagreed with the prototype's real source). The 1500px ceiling has no
+     basis in that source at all -- it's a deliberate operator-added cap on
+     top of the verified fix, kept here rather than a bare 80% so the card
+     doesn't grow unbounded on very wide (1440p/ultrawide/4K) viewports. */
+  max-width: min(80%, 1500px);
   background: var(--bg-panel);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-panel);
@@ -236,7 +243,13 @@ dialog h3 { font-family: var(--font-display); font-size: 16px; font-weight: 600;
 .setup-card--wizard .login-heading,
 .setup-card--wizard .login-sub { text-align: left; margin: 0; }
 
-.wizard-shell { display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 32px 20px; }
+/* align-items: stretch (not center) plus a real fixed height (not just
+   min-height) matches the verified .dc.html source's own wrapper exactly --
+   together with .setup-card--wizard's max-height: 100% above, this is what
+   keeps the card's height constant per viewport instead of collapsing to
+   fit whichever step's content is currently shown. padding: 40px 20px also
+   matches the verified source (was 32px 20px). */
+.wizard-shell { display: flex; align-items: stretch; justify-content: center; min-height: 100vh; height: 100vh; max-height: 100vh; padding: 40px 20px; }
 
 .wizard-header {
   padding: 28px 32px 22px; border-bottom: 1px solid var(--border-quiet);
