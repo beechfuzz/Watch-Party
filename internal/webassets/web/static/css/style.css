@@ -272,6 +272,15 @@ dialog h3 { font-family: var(--font-display); font-size: 16px; font-weight: 600;
 .wizard-toggle-knob { width: 14px; height: 14px; border-radius: 50%; background: var(--bg-void); transition: transform .15s ease; transform: translateX(0); }
 .wizard-advanced-toggle[aria-checked="true"] .wizard-toggle-knob { transform: translateX(16px); }
 
+/* #wizard-form (not .wizard-body directly) is the flex item that needs to
+   fill the card's remaining height below .wizard-header: .wizard-body and
+   .wizard-footer are both children of the <form>, and a plain <form>
+   defaults to display:block, which would otherwise make their flex/
+   flex-shrink rules below no-ops (see ARCHITECTURE.md's wizard overflow
+   follow-up -- the prototype has no <form> at all, so this wrapper has no
+   equivalent to copy from). */
+#wizard-form { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+
 .wizard-body { display: flex; flex: 1; min-height: 0; overflow: hidden; }
 
 .wizard-rail {
@@ -308,6 +317,12 @@ dialog h3 { font-family: var(--font-display); font-size: 16px; font-weight: 600;
   display: flex; align-items: center; flex-shrink: 0;
 }
 .wizard-footer .wizard-spacer { flex: 1; }
+/* .login-card .btn-primary (sign-in page's full-width submit button) would
+   otherwise also match #wizard-next/#wizard-save, since .setup-card--wizard
+   carries the .login-card class -- the prototype's Next/Save buttons have
+   no width rule at all, sized by their own padding (see ARCHITECTURE.md's
+   wizard overflow follow-up). */
+.setup-card--wizard .wizard-footer .btn-primary { width: auto; }
 
 /* Field styling: JetBrains Mono for values, matching the approved
    Option-B font decision (Inter/Space Grotesk stay app-wide; only the
