@@ -442,7 +442,9 @@ func TestSetupWizard_StaticAssets_Served(t *testing.T) {
 
 func TestRegisterAwaitingRestartRoutes_HealthzOKWizardRoutesGone(t *testing.T) {
 	mux := http.NewServeMux()
-	RegisterAwaitingRestartRoutes(mux, slog.Default())
+	if err := RegisterAwaitingRestartRoutes(mux, slog.Default()); err != nil {
+		t.Fatalf("RegisterAwaitingRestartRoutes: %v", err)
+	}
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
@@ -467,6 +469,37 @@ func TestRegisterAwaitingRestartRoutes_HealthzOKWizardRoutesGone(t *testing.T) {
 	}
 	if strings.Contains(string(rootBody), "csrf_token") {
 		t.Error("awaiting-restart mode still serves the wizard form; wizard routes must be structurally absent once config.jsonc exists")
+	}
+}
+
+// TestRegisterAwaitingRestartRoutes_StaticAssetsServed is the regression
+// test for the second root cause behind the "confirmation page loads
+// unstyled" bug (see ARCHITECTURE.md §16.25): unlike the race in the
+// key-already-set transition, this one was fully deterministic -- this
+// mux never registered GET /static/ at all, so the setup wizard's own
+// "Configuration saved" page (rendered and sent to the browser by the
+// *previous* mux, just before this one took over) 503'd on every load of
+// its own stylesheet for as long as the operator hadn't yet restarted with
+// TOKEN_ENCRYPTION_KEY set -- not a timing window, every single time.
+func TestRegisterAwaitingRestartRoutes_StaticAssetsServed(t *testing.T) {
+	mux := http.NewServeMux()
+	if err := RegisterAwaitingRestartRoutes(mux, slog.Default()); err != nil {
+		t.Fatalf("RegisterAwaitingRestartRoutes: %v", err)
+	}
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/static/css/style.css")
+	if err != nil {
+		t.Fatalf("GET /static/css/style.css: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GET /static/css/style.css status = %d, want 200; body:\n%s", resp.StatusCode, body)
+	}
+	if len(body) == 0 {
+		t.Error("GET /static/css/style.css returned an empty body")
 	}
 }
 

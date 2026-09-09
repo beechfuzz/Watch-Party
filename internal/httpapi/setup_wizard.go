@@ -138,18 +138,37 @@ func RegisterSetupWizardRoutes(mux *http.ServeMux, logger *slog.Logger, configPa
 // initiated restart (after they set it) can finish the job; see
 // cmd/server/main.go's runAwaitingRestart for the full reasoning.
 //
-// No wizard routes are registered here at all -- config.jsonc already
+// No wizard *form* routes are registered here -- config.jsonc already
 // exists, so re-running the wizard against it must be structurally
 // impossible, the same "different mux, nothing to disable" pattern this
-// project already uses for setup-required vs. normal mode.
-func RegisterAwaitingRestartRoutes(mux *http.ServeMux, logger *slog.Logger) {
+// project already uses for setup-required vs. normal mode. GET /static/ is
+// the one exception, registered identically to the other two muxes
+// (setup-required's and normal mode's -- see setup_wizard.go's own
+// RegisterSetupWizardRoutes and pages.go's RegisterRoutes): the setup
+// wizard's own POST / response -- the "Configuration saved" confirmation
+// page the operator is looking at right now, served by the *previous*
+// mux just before this one took over -- links this mux's /static/css/
+// style.css, and without this route every load of that already-rendered
+// page's stylesheet 503s for as long as this placeholder is up, which is
+// however long it takes the operator to notice, set the key, and restart
+// (see ARCHITECTURE.md §16.25 -- found and fixed alongside the unrelated
+// listener-handoff race that motivated that section, not because this
+// path is racy itself; it isn't, it's simply never served here at all).
+func RegisterAwaitingRestartRoutes(mux *http.ServeMux, logger *slog.Logger) error {
 	mux.HandleFunc("GET /healthz", Healthz)
+
+	staticSub, err := webassets.StaticFS()
+	if err != nil {
+		return fmt.Errorf("awaiting-restart placeholder: webassets static fs: %w", err)
+	}
+	mux.Handle("GET /static/", http.StripPrefix("/static/", noCache(http.FileServer(http.FS(staticSub)))))
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		w.Write([]byte("Watch Party: configuration saved. Set TOKEN_ENCRYPTION_KEY or TOKEN_ENCRYPTION_KEY_FILE in the environment and restart the server to finish setup.\n"))
 	})
+	return nil
 }
 
 // serveSetupUnavailable is the 503 fallback for every path/method the

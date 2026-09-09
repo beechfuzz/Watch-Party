@@ -72,15 +72,26 @@ const (
 // drive it directly against a real temporary configPath and a test-
 // controlled ctx, instead of the hardcoded config.DefaultConfigPath and
 // real OS signals main() uses. listening, if non-nil, receives the actual
-// bound address every time a new server incarnation starts listening --
-// nil in production (main always binds the configured LISTEN_ADDR and has
-// no need to observe it), non-nil in tests using LISTEN_ADDR=127.0.0.1:0
-// to learn which ephemeral port was actually chosen, without sleeping or
-// polling.
+// bound address every time acquireListener performs a real bind -- nil in
+// production (main always binds the configured LISTEN_ADDR and has no need
+// to observe it), non-nil in tests using LISTEN_ADDR=127.0.0.1:0 to learn
+// which ephemeral port was actually chosen, without sleeping or polling.
 //
 // Three incarnations can run in this process's lifetime, one at a time,
-// each on the same listen address, none of them ever exiting the process
-// to transition to the next:
+// each on the same listen address in the common case, none of them ever
+// exiting the process to transition to the next. acquireListener (the
+// closure below) reuses one persistent connBroker across a transition
+// whenever the desired address is unchanged from the previous incarnation
+// (see listener.go and ARCHITECTURE.md §16.25): the real OS socket is
+// never closed and rebound on that path, which is what closes the race
+// that used to exist between one incarnation's listener closing and the
+// next one's binding -- a request arriving in that window (e.g. the setup
+// wizard's own confirmation page fetching its stylesheet right after the
+// automatic transition to normal mode) used to get refused outright; now
+// it simply waits until the next incarnation's http.Server starts Serve.
+// A change in the desired address (operator-edited listen_address with no
+// LISTEN_ADDR env override) or an explicitly ephemeral ":0" request still
+// closes the old socket for real and binds a fresh one, same as before.
 //
 //  1. runSetupRequired, whenever configPath doesn't exist yet. Ends either
 //     because ctx was cancelled (a real shutdown -- runLoop returns nil,
@@ -101,6 +112,50 @@ const (
 //     and the shared ctx instead of loading it again and building its own
 //     signal context.
 func runLoop(ctx context.Context, configPath string, listening chan<- string) error {
+	// One connBroker is reused across every incarnation that shares the
+	// same listen address (see listener.go and ARCHITECTURE.md §16.25) --
+	// acquireListener below only tears it down for real (via realClose)
+	// when the desired address actually changes, or when addr is an
+	// ephemeral ":0"-style request, which always means "give me a new
+	// port" rather than "reuse the last one." This defer is what closes it
+	// for real when runLoop itself returns (a genuine process shutdown),
+	// regardless of which branch got there.
+	var broker *connBroker
+	var brokerAddr string
+	defer func() {
+		if broker != nil {
+			broker.realClose()
+		}
+	}()
+
+	// acquireListener only decides which underlying socket the next
+	// incarnation will use (reuse the existing broker, or really bind a
+	// new one) -- it deliberately does NOT send on listening itself. That
+	// send happens later, inside serveUntilShutdown/
+	// serveSetupRequiredUntilDone, at the exact point (right before
+	// srv.Serve starts) the pre-listener-reuse code used to send it: for
+	// runNormalWithConfig specifically, that's *after* privdrop/DB-open/
+	// hub-construction have already succeeded, which existing tests rely
+	// on (a value on listening has always meant "this incarnation's setup
+	// work is done, not just that a socket exists") -- see
+	// TestRunLoop_KeyAlreadySet_TransitionsInProcessWithoutExiting's
+	// cgo-privdrop skip path, which depends on privdrop failures
+	// surfacing via `result` before anything ever arrives on `listening`.
+	acquireListener := func(addr string) (*handoff, error) {
+		if broker == nil || brokerAddr != addr || isEphemeralAddr(addr) {
+			if broker != nil {
+				broker.realClose()
+			}
+			l, err := net.Listen("tcp", addr)
+			if err != nil {
+				return nil, fmt.Errorf("listen on %q: %w", addr, err)
+			}
+			broker = newConnBroker(l)
+			brokerAddr = addr
+		}
+		return broker.newHandoff(), nil
+	}
+
 	for {
 		exists, err := config.FileExists(configPath)
 		if err != nil {
@@ -108,7 +163,15 @@ func runLoop(ctx context.Context, configPath string, listening chan<- string) er
 		}
 
 		if !exists {
-			outcome, err := runSetupRequired(ctx, configPath, listening)
+			addr, err := config.ResolveListenAddress(nil)
+			if err != nil {
+				return fmt.Errorf("config: %w", err)
+			}
+			l, err := acquireListener(addr)
+			if err != nil {
+				return err
+			}
+			outcome, err := runSetupRequired(ctx, configPath, l, listening)
 			if err != nil {
 				return err
 			}
@@ -120,28 +183,40 @@ func runLoop(ctx context.Context, configPath string, listening chan<- string) er
 
 		cfg, cfgErr := config.LoadFromPath(configPath)
 		if cfgErr != nil && errors.Is(cfgErr, config.ErrTokenEncryptionKeyRequired) {
-			return runAwaitingRestart(ctx, listening)
+			addr, err := config.ResolveListenAddress(nil)
+			if err != nil {
+				return fmt.Errorf("config: %w", err)
+			}
+			l, err := acquireListener(addr)
+			if err != nil {
+				return err
+			}
+			return runAwaitingRestart(ctx, l, listening)
 		}
 		if cfgErr != nil {
 			return fmt.Errorf("config: %w", cfgErr)
 		}
-		return runNormalWithConfig(ctx, cfg, listening)
+		l, err := acquireListener(cfg.ListenAddr)
+		if err != nil {
+			return err
+		}
+		return runNormalWithConfig(ctx, cfg, l, listening)
 	}
 }
 
 // runSetupRequired serves the setup wizard (see
 // httpapi.RegisterSetupWizardRoutes) when configPath doesn't exist. It
-// deliberately does the minimum possible beyond the wizard itself: resolve
-// just enough config to bind a listener and pick a log level -- no
-// database, no privilege drop, no Emby client, no party hub, and no
-// TOKEN_ENCRYPTION_KEY/_FILE requirement, since none of those have valid
-// inputs yet and requiring the key here would block the wizard from ever
-// being reachable to tell an operator about it.
-func runSetupRequired(ctx context.Context, configPath string, listening chan<- string) (runOutcome, error) {
-	listenAddr, err := config.ResolveListenAddress(nil)
-	if err != nil {
-		return outcomeShutdown, fmt.Errorf("config: %w", err)
-	}
+// deliberately does the minimum possible beyond the wizard itself: pick a
+// log level -- no database, no privilege drop, no Emby client, no party
+// hub, and no TOKEN_ENCRYPTION_KEY/_FILE requirement, since none of those
+// have valid inputs yet and requiring the key here would block the wizard
+// from ever being reachable to tell an operator about it. l is already
+// bound and, in the common case, will keep being reused by the next
+// incarnation this process transitions to -- see runLoop's acquireListener
+// and ARCHITECTURE.md §16.25. listening is passed straight through to
+// serveSetupRequiredUntilDone -- see its doc comment for why the send
+// happens there rather than at acquisition time.
+func runSetupRequired(ctx context.Context, configPath string, l net.Listener, listening chan<- string) (runOutcome, error) {
 	logLevel, err := config.ResolveLogLevel(nil)
 	if err != nil {
 		return outcomeShutdown, fmt.Errorf("config: %w", err)
@@ -149,7 +224,7 @@ func runSetupRequired(ctx context.Context, configPath string, listening chan<- s
 
 	logger := logging.New(logLevel)
 	logger.Info("starting watch party in setup-required mode",
-		"listen_addr", listenAddr,
+		"listen_addr", l.Addr().String(),
 		"reason", "no config file found at "+configPath,
 	)
 
@@ -161,12 +236,11 @@ func runSetupRequired(ctx context.Context, configPath string, listening chan<- s
 	}
 
 	srv := &http.Server{
-		Addr:              listenAddr,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	return serveSetupRequiredUntilDone(ctx, srv, logger, configWritten, listening)
+	return serveSetupRequiredUntilDone(ctx, srv, l, logger, configWritten, listening)
 }
 
 // runAwaitingRestart serves the minimal "configuration saved, restart me"
@@ -177,12 +251,10 @@ func runSetupRequired(ctx context.Context, configPath string, listening chan<- s
 // it -- specifically so this process never crash-loops or relies on any
 // orchestrator's restart-on-exit-code behavior; see runLoop's doc comment
 // and ARCHITECTURE.md §16 for the Compose-vs-quadlet asymmetry this
-// sidesteps entirely by never exiting as part of this transition.
-func runAwaitingRestart(ctx context.Context, listening chan<- string) error {
-	listenAddr, err := config.ResolveListenAddress(nil)
-	if err != nil {
-		return fmt.Errorf("config: %w", err)
-	}
+// sidesteps entirely by never exiting as part of this transition. l is
+// already bound -- see runSetupRequired's doc comment. listening is passed
+// straight through to serveUntilShutdown.
+func runAwaitingRestart(ctx context.Context, l net.Listener, listening chan<- string) error {
 	logLevel, err := config.ResolveLogLevel(nil)
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
@@ -190,26 +262,32 @@ func runAwaitingRestart(ctx context.Context, listening chan<- string) error {
 
 	logger := logging.New(logLevel)
 	logger.Info("configuration saved but TOKEN_ENCRYPTION_KEY/TOKEN_ENCRYPTION_KEY_FILE is not set; waiting for a manual restart with the key set",
-		"listen_addr", listenAddr,
+		"listen_addr", l.Addr().String(),
 	)
 
 	mux := http.NewServeMux()
-	httpapi.RegisterAwaitingRestartRoutes(mux, logger)
+	if err := httpapi.RegisterAwaitingRestartRoutes(mux, logger); err != nil {
+		return fmt.Errorf("awaiting-restart placeholder: %w", err)
+	}
 
 	srv := &http.Server{
-		Addr:              listenAddr,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	return serveUntilShutdown(ctx, srv, logger, nil, listening)
+	return serveUntilShutdown(ctx, srv, l, logger, nil, listening)
 }
 
 // runNormalWithConfig is today's startup path, driven by an already-loaded
 // *config.Config (runLoop calls config.LoadFromPath itself, once, so this
 // function doesn't load it again) and the shared ctx (see run()'s doc
-// comment for why it's shared rather than constructed here).
-func runNormalWithConfig(ctx context.Context, cfg *config.Config, listening chan<- string) error {
+// comment for why it's shared rather than constructed here). l is already
+// bound -- see runSetupRequired's doc comment. listening is passed straight
+// through to serveUntilShutdown, which sends on it only once this
+// function's own setup work (privilege drop, DB open, hub construction)
+// has already succeeded -- see runLoop's acquireListener doc comment for
+// why that ordering matters to existing tests.
+func runNormalWithConfig(ctx context.Context, cfg *config.Config, l net.Listener, listening chan<- string) error {
 	logger := logging.New(cfg.LogLevel)
 	logger.Info("starting watch party", "listen_addr", cfg.ListenAddr, "app_origins", cfg.AppOrigins, "title", cfg.Title)
 	logTokenKeySource(logger)
@@ -288,12 +366,11 @@ func runNormalWithConfig(ctx context.Context, cfg *config.Config, listening chan
 	})
 
 	srv := &http.Server{
-		Addr:              cfg.ListenAddr,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	return serveUntilShutdown(ctx, srv, logger, func(shutdownCtx context.Context) {
+	return serveUntilShutdown(ctx, srv, l, logger, func(shutdownCtx context.Context) {
 		hub.Shutdown(shutdownCtx)
 	}, listening)
 }
@@ -311,27 +388,30 @@ func logTokenKeySource(logger *slog.Logger) {
 	logger.Info("token encryption key loaded", "source", "file", "path", os.Getenv("TOKEN_ENCRYPTION_KEY_FILE"))
 }
 
-// serveUntilShutdown binds srv.Addr (via net.Listen, not
-// srv.ListenAndServe, so the actual bound address is known before serving
-// starts -- see the listening parameter), starts serving, blocks until ctx
-// is cancelled or a fatal listen/serve error occurs, then drains srv with
-// a bounded shutdown timeout. onShutdown, if non-nil, runs after the HTTP
-// server itself has stopped accepting new requests but before "shutdown
-// complete" is logged -- runNormalWithConfig uses it to flush the party
-// hub's in-memory state to SQLite; runSetupRequired/runAwaitingRestart
-// have nothing to flush, so they pass nil (runSetupRequired doesn't use
-// this function directly at all -- see serveSetupRequiredUntilDone, which
-// duplicates this function's bind/serve/drain shape specifically because
-// it needs a third, config-written select case this one doesn't).
+// serveUntilShutdown serves on the already-bound l (see runLoop's
+// acquireListener -- l is typically a *handoff sharing a persistent
+// connBroker with whatever incarnation preceded this one, not a
+// freshly-bound listener; see ARCHITECTURE.md §16.25), blocks until ctx is
+// cancelled or a fatal serve error occurs, then drains srv with a bounded
+// shutdown timeout. onShutdown, if non-nil, runs after the HTTP server
+// itself has stopped accepting new requests but before "shutdown complete"
+// is logged -- runNormalWithConfig uses it to flush the party hub's
+// in-memory state to SQLite; runSetupRequired/runAwaitingRestart have
+// nothing to flush, so they pass nil (runSetupRequired doesn't use this
+// function directly at all -- see serveSetupRequiredUntilDone, which
+// duplicates this function's serve/drain shape specifically because it
+// needs a third, config-written select case this one doesn't).
 //
-// listening, if non-nil, receives the real bound address
-// (listener.Addr().String()) right after the bind succeeds; production
-// callers pass nil.
-func serveUntilShutdown(ctx context.Context, srv *http.Server, logger *slog.Logger, onShutdown func(ctx context.Context), listening chan<- string) error {
-	l, err := net.Listen("tcp", srv.Addr)
-	if err != nil {
-		return fmt.Errorf("listen on %q: %w", srv.Addr, err)
-	}
+// listening, if non-nil, receives l's address right here, immediately
+// before srv.Serve starts -- deliberately not any earlier (e.g. at
+// listener-acquisition time in runLoop), because for runNormalWithConfig
+// this is the point after privilege drop, DB open, and hub construction
+// have already succeeded. Existing tests depend on that ordering: a value
+// on listening has always meant "this incarnation's setup work is done,"
+// not merely "a socket exists" -- see
+// TestRunLoop_KeyAlreadySet_TransitionsInProcessWithoutExiting's
+// cgo-privdrop skip path.
+func serveUntilShutdown(ctx context.Context, srv *http.Server, l net.Listener, logger *slog.Logger, onShutdown func(ctx context.Context), listening chan<- string) error {
 	if listening != nil {
 		listening <- l.Addr().String()
 	}
@@ -375,12 +455,13 @@ func serveUntilShutdown(ctx context.Context, srv *http.Server, logger *slog.Logg
 // httpapi.RegisterSetupWizardRoutes). On that case, srv is drained exactly
 // as on a real shutdown, but the returned outcome tells runLoop to loop
 // back around and attempt a transition to normal mode instead of exiting
-// the process.
-func serveSetupRequiredUntilDone(ctx context.Context, srv *http.Server, logger *slog.Logger, configWritten <-chan struct{}, listening chan<- string) (runOutcome, error) {
-	l, err := net.Listen("tcp", srv.Addr)
-	if err != nil {
-		return outcomeShutdown, fmt.Errorf("listen on %q: %w", srv.Addr, err)
-	}
+// the process. l is already bound -- see serveUntilShutdown's doc comment;
+// the same reuse applies here, which is precisely what lets the setup
+// wizard's own confirmation page (served by the incarnation this call
+// belongs to) keep its static assets reachable through the handoff to
+// whatever incarnation runLoop starts next. listening, if non-nil, is sent
+// to synchronously, same as serveUntilShutdown.
+func serveSetupRequiredUntilDone(ctx context.Context, srv *http.Server, l net.Listener, logger *slog.Logger, configWritten <-chan struct{}, listening chan<- string) (runOutcome, error) {
 	if listening != nil {
 		listening <- l.Addr().String()
 	}
