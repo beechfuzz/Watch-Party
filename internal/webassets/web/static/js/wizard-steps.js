@@ -195,6 +195,18 @@ export function clampPort(raw) {
   return Math.min(65535, Math.max(1, parseInt(digits, 10)));
 }
 
+// The Port field's spinbox step: +/-1 from whatever's currently there
+// (blank/non-numeric treated as 0, not clampPort's own blank->8080
+// fallback -- that fallback is a blur-time "give me a sane default"
+// behavior, not what a bare increment/decrement click should do), then
+// clamped to the same 1-65535 range clampPort already enforces everywhere
+// else for this field. No unit, no disable sentinel -- unlike
+// duration-control.js's clampCount, there's no gap in this number line.
+export function bumpPort(raw, dir) {
+  const n = parseInt(String(raw).replace(/[^0-9]/g, ""), 10);
+  return clampPort(String((Number.isNaN(n) ? 0 : n) + dir));
+}
+
 export function reassembleListenAddress(ip, port) {
   return `${String(ip).trim() || "0.0.0.0"}:${port}`;
 }
@@ -313,16 +325,15 @@ export function wireWizardSteps(doc) {
         display[field] = values.listen_address || "";
         previewValues[field] = values.listen_address || "";
       } else if (field === "public_url") {
-        // "(same as server URL)" triggers on value-equality, not just
-        // blankness (ARCHITECTURE.md §16.20): public_url now ships
-        // defaulted to the same wizard-only suggested value as server_url,
-        // so an operator who edits neither would otherwise see two
-        // identical, unannotated URLs here instead of the "these are
-        // intentionally the same" context this annotation exists to give.
-        // Display-only -- previewValues (the actual submitted/written
-        // value) is unaffected either way.
-        const sameAsServer = !values.public_url || values.public_url === values.server_url;
-        display[field] = sameAsServer ? "(same as server URL)" : values.public_url;
+        // Always the real value -- ARCHITECTURE.md §16.20's "(same as
+        // server URL)" annotation was a deliberate design decision, later
+        // deliberately reversed (see the section documenting this
+        // reversal); the Review row no longer has any equality- or
+        // blank-based display logic. previewValues (the Advanced-mode JSON
+        // preview pane, not the submitted/written value) keeps its own
+        // pre-existing fallback-to-server_url behavior unchanged -- that's
+        // a separate, out-of-scope concern from this row's display.
+        display[field] = values.public_url || "";
         previewValues[field] = values.public_url || values.server_url || "";
       } else if (field === "sync_max_rate_adjustment") {
         const n = parseFloat(values.sync_max_rate_adjustment);
@@ -617,6 +628,45 @@ function wireListenAddress(doc, form, onChange) {
     sync();
   });
   ipEl.addEventListener("input", sync);
+
+  // Port's increment/decrement arrows -- same press-and-hold shape as
+  // wireRateField's spinbox (400ms initial delay, then repeat every 55ms),
+  // reusing only that visual/interaction pattern: no unit, no sentinel,
+  // just bumpPort's plain +/-1 clamped to 1-65535.
+  const upEl = doc.getElementById("listen_port__up");
+  const downEl = doc.getElementById("listen_port__down");
+  let holdTimer = null;
+  let holdInterval = null;
+  function stopHold() {
+    clearTimeout(holdTimer);
+    clearInterval(holdInterval);
+  }
+  function bump(dir) {
+    portEl.value = String(bumpPort(portEl.value, dir));
+    sync();
+  }
+  function startHold(dir) {
+    stopHold();
+    bump(dir);
+    holdTimer = setTimeout(() => {
+      holdInterval = setInterval(() => bump(dir), 55);
+    }, 400);
+  }
+  for (const [btn, dir] of [
+    [upEl, 1],
+    [downEl, -1],
+  ]) {
+    if (!btn) continue;
+    btn.addEventListener("mousedown", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      startHold(dir);
+    });
+    btn.addEventListener("mouseup", stopHold);
+    btn.addEventListener("mouseleave", stopHold);
+  }
+  doc.defaultView?.addEventListener("mouseup", stopHold);
+
   sync();
 }
 
