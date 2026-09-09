@@ -717,6 +717,24 @@ function wireRateField(doc, form, onChange) {
   function bump(dir) {
     set((parseFloat(el.value) || 0) + dir * 0.01);
   }
+
+  // Keyboard up/down cycling -- matches wireDurationField's countEl keydown
+  // handler and wireListenAddress's portEl keydown handler exactly: a plain
+  // keydown listener on the text input itself (the up/down buttons are
+  // tabindex="-1" and never receive focus), no custom repeat interval --
+  // holding the key repeats via the browser's own native key-repeat firing
+  // this same handler again. Reuses bump()'s existing 0.01 step and
+  // set()/clamp()'s existing 0.00-1.00 floor/ceiling unchanged, since this
+  // is the same bump() the mouse handlers below already call.
+  el.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      bump(1);
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault();
+      bump(-1);
+    }
+  });
   function startHold(dir) {
     stopHold();
     bump(dir);
