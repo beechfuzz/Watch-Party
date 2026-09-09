@@ -14,6 +14,7 @@ import {
   driftOrderValid,
   rateInRange,
   clampPort,
+  bumpPort,
   reassembleListenAddress,
 } from "./wizard-steps.js";
 
@@ -200,6 +201,16 @@ test("clampPort: digits only, clamped to 1-65535, blank falls back to 8080", () 
   assert.equal(clampPort("0"), 1);
   assert.equal(clampPort("99999999"), 65535);
   assert.equal(clampPort(""), 8080);
+});
+
+test("bumpPort: steps +/-1 from the current value, clamped to 1-65535, no sentinel", () => {
+  assert.equal(bumpPort("8080", 1), 8081);
+  assert.equal(bumpPort("8080", -1), 8079);
+  assert.equal(bumpPort("65535", 1), 65535);
+  assert.equal(bumpPort("1", -1), 1);
+  assert.equal(bumpPort("", 1), 1);
+  assert.equal(bumpPort("", -1), 1);
+  assert.equal(bumpPort("abc", 1), 1);
 });
 
 test("reassembleListenAddress: joins ip:port, blank ip falls back to 0.0.0.0", () => {

@@ -352,8 +352,7 @@ body.wizard-advanced-on .setup-card--wizard .field[data-advanced-field] { displa
 
 /* Listen Address: IP + Port on one row */
 .wizard-listen-row { display: flex; align-items: center; gap: 8px; }
-.wizard-listen-row input#listen_ip { flex: 1; }
-.wizard-listen-row input#listen_port { width: 110px; text-align: center; }
+.wizard-listen-row input#listen_ip { flex: 1; max-width: 150px; }
 .wizard-listen-sep { color: var(--text-tertiary); font-family: var(--font-mono); }
 
 /* Duration control: spin box + unit select */
@@ -376,6 +375,7 @@ body.wizard-advanced-on .setup-card--wizard .field[data-advanced-field] { displa
 .duration-spin-arrows svg { width: 9px; height: 9px; }
 .duration-unit { flex: 1; max-width: 180px; }
 .wizard-rate-field { width: 110px; }
+.wizard-port-field { width: 110px; }
 
 /* Encryption Key step disclosure panel */
 .wizard-disclosure { background: var(--bg-panel-raised); border: 1px solid var(--border-subtle); border-radius: var(--radius-control); overflow: hidden; margin-bottom: 20px; }
@@ -402,7 +402,6 @@ body.wizard-advanced-on .setup-card--wizard .field[data-advanced-field] { displa
 .wizard-review-dl {
   display: grid; grid-template-columns: 45% 1fr; column-gap: 16px; margin: 0 0 22px;
 }
-.wizard-review-dl:last-child { margin-bottom: 0; }
 .wizard-review-dl dt,
 .wizard-review-dl dd {
   padding: 7px 0; border-bottom: 1px solid var(--border-quiet); font-size: 13px; margin: 0;

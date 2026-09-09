@@ -115,7 +115,13 @@
                 <div class="wizard-listen-row">
                   <input id="listen_ip" type="text" placeholder="0.0.0.0">
                   <span class="wizard-listen-sep">:</span>
-                  <input id="listen_port" type="text" inputmode="numeric" placeholder="8080">
+                  <div class="duration-spin wizard-port-field">
+                    <input id="listen_port" type="text" inputmode="numeric" placeholder="8080">
+                    <div class="duration-spin-arrows">
+                      <button type="button" id="listen_port__up" tabindex="-1" aria-label="Increase"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M18 15l-6-6-6 6"/></svg></button>
+                      <button type="button" id="listen_port__down" tabindex="-1" aria-label="Decrease"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M6 9l6 6 6-6"/></svg></button>
+                    </div>
+                  </div>
                 </div>
                 {{with index .Errors "listen_address"}}<p class="error">{{.}}</p>{{end}}
               </div>
