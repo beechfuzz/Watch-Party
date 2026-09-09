@@ -160,6 +160,36 @@ func decodeSnapshot(t *testing.T, env wsproto.Envelope) wsproto.SnapshotPayload 
 	return s
 }
 
+// TestPartyRun_NegativeSnapshotInterval_DisablesTickerWithoutPanicking
+// guards the sentinel fix: SnapshotInterval < 0 ("Never" -- see
+// config.ValidateDisableableDuration) must not reach time.NewTicker at
+// all, since a non-positive duration panics there. If run() still tried to
+// construct one, the actor goroutine would crash the process before this
+// test could observe anything; proving the actor is still alive and
+// responsive after startup is the strongest signal available here that no
+// panic occurred, short of instrumenting run() directly.
+func TestPartyRun_NegativeSnapshotInterval_DisablesTickerWithoutPanicking(t *testing.T) {
+	store := testStore(t)
+	tuning := testTuning()
+	tuning.SnapshotInterval = -1 * time.Second
+	hub := NewHub(store, tuning, testLogger())
+	t.Cleanup(func() { hub.Shutdown(context.Background()) })
+
+	seedUser(t, store, "host", "Host")
+	p, err := hub.CreateParty(context.Background(), "party1", "Test Party", testSettings(), "host")
+	if err != nil {
+		t.Fatalf("CreateParty: %v", err)
+	}
+
+	done := make(chan struct{})
+	p.do(func() { close(done) })
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("party actor did not respond -- run() likely panicked constructing the snapshot ticker")
+	}
+}
+
 // --- host authorization ---
 
 func TestHandleControl_NonHostRejected(t *testing.T) {
@@ -1476,6 +1506,57 @@ func TestSweepInactiveParties_EndsPartyIdleLongerThanTimeout(t *testing.T) {
 	}
 	if row.Status != dbx.PartyStatusEnded {
 		t.Errorf("party status = %v, want ended", row.Status)
+	}
+}
+
+// TestSweepInactiveParties_NegativeMaxIdle_Forever_NeverSweeps locks in,
+// via an explicit guard, behavior that was previously only an accidental
+// consequence of `idleFor < maxIdle` always being false against a negative
+// maxIdle: "Forever" (see config.ValidateDisableableDuration) must disable
+// the sweep entirely, even for a party idle far longer than any realistic
+// timeout.
+func TestSweepInactiveParties_NegativeMaxIdle_Forever_NeverSweeps(t *testing.T) {
+	dir := t.TempDir()
+	db, err := dbx.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store := dbx.NewStore(db)
+	ctx := context.Background()
+	seedUser(t, store, "host", "Host")
+
+	staleTime := time.Now().Add(-500 * time.Hour)
+	if err := store.CreateParty(ctx, dbx.Party{
+		ID: "forever-party", HostUserID: "host", Name: "Forever Party",
+		CreatedAt: staleTime, Status: dbx.PartyStatusActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertPlaybackState(ctx, dbx.PlaybackState{
+		PartyID: "forever-party", PositionTicks: 0, IsPlaying: false,
+		SequenceNumber: 0, ServerTimestamp: staleTime, UpdatedByClientType: dbx.ClientTypeSystem,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertMember(ctx, dbx.PartyMember{
+		PartyID: "forever-party", UserID: "host", JoinedAt: staleTime,
+		LastConnectedAt: &staleTime, ConnectionStatus: dbx.ConnDisconnected,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	hub := NewHub(store, testTuning(), testLogger())
+	defer hub.Shutdown(ctx)
+	if err := hub.RecoverActiveParties(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if ended := hub.SweepInactiveParties(ctx, -1*time.Second); ended != 0 {
+		t.Errorf("SweepInactiveParties with Forever (-1s) returned %d, want 0", ended)
+	}
+	if _, ok := hub.Get("forever-party"); !ok {
+		t.Error("forever-party should still be in the hub after a Forever sweep")
 	}
 }
 

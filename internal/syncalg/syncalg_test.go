@@ -143,6 +143,46 @@ func TestClassifyDrift_HardSeek(t *testing.T) {
 	}
 }
 
+// TestClassifyDrift_NegativeSoftDrift_NeverNudges guards the sentinel fix:
+// a negative SoftDriftMS ("Never") must disable the soft-correction branch
+// entirely, not fire it on every nonzero drift (absMS > a negative number
+// is always true). Hard-seek must still be independently evaluated.
+func TestClassifyDrift_NegativeSoftDrift_NeverNudges(t *testing.T) {
+	thresholds := DriftThresholds{SoftDriftMS: -1, HardDriftMS: 1500, MaxRateAdjustment: 0.05}
+
+	tinyDrift := int64(1) * TicksPerSecond / 1000 // 1ms -- would trigger nudge if soft were 0/positive-small
+	_, action := ClassifyDrift(tinyDrift, 0, thresholds)
+	if action != DriftNone {
+		t.Errorf("action = %v, want DriftNone: disabled soft threshold must never nudge", action)
+	}
+
+	hardDrift := int64(2000) * TicksPerSecond / 1000 // 2000ms, past the still-enabled hard threshold
+	_, action = ClassifyDrift(hardDrift, 0, thresholds)
+	if action != DriftHardSeek {
+		t.Errorf("action = %v, want DriftHardSeek: hard threshold must still fire independently", action)
+	}
+}
+
+// TestClassifyDrift_NegativeHardDrift_NeverHardSeeks is the symmetric case:
+// a negative HardDriftMS ("Never") must disable hard-seek entirely, even
+// for drift that would otherwise be enormous, while soft-nudge correction
+// (if enabled) still applies.
+func TestClassifyDrift_NegativeHardDrift_NeverHardSeeks(t *testing.T) {
+	thresholds := DriftThresholds{SoftDriftMS: 300, HardDriftMS: -1, MaxRateAdjustment: 0.05}
+
+	hugeDrift := int64(60) * TicksPerSecond // 60 full seconds of drift
+	_, action := ClassifyDrift(hugeDrift, 0, thresholds)
+	if action != DriftNudgeRate {
+		t.Errorf("action = %v, want DriftNudgeRate: disabled hard threshold must never hard-seek, but soft is still enabled", action)
+	}
+
+	bothDisabled := DriftThresholds{SoftDriftMS: -1, HardDriftMS: -1, MaxRateAdjustment: 0.05}
+	_, action = ClassifyDrift(hugeDrift, 0, bothDisabled)
+	if action != DriftNone {
+		t.Errorf("action = %v, want DriftNone when both thresholds are disabled", action)
+	}
+}
+
 func TestRecommendedPlaybackRate_AheadSlowsDown(t *testing.T) {
 	driftTicks := int64(750) * TicksPerSecond / 1000 // ahead by 750ms, halfway to hard(1500)
 	rate := RecommendedPlaybackRate(driftTicks, defaultThresholds())
@@ -284,5 +324,25 @@ func TestHostGraceExpired(t *testing.T) {
 	}
 	if !HostGraceExpired(disconnectedAt, disconnectedAt.Add(30*time.Second), grace) {
 		t.Error("grace period should be expired at 30s")
+	}
+}
+
+// TestHostGraceExpired_Forever_NeverExpires guards the sentinel fix: a
+// negative grace period ("Forever") must never report expired, no matter
+// how much time has passed -- without the guard, now.Sub(disconnectedAt) >=
+// a negative duration is true almost immediately, which is the exact
+// opposite of "the host never loses status".
+func TestHostGraceExpired_Forever_NeverExpires(t *testing.T) {
+	disconnectedAt := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	forever := -1 * time.Second
+
+	if HostGraceExpired(disconnectedAt, disconnectedAt, forever) {
+		t.Error("Forever grace period should not be expired at 0s elapsed")
+	}
+	if HostGraceExpired(disconnectedAt, disconnectedAt.Add(24*time.Hour), forever) {
+		t.Error("Forever grace period should not be expired even after a full day")
+	}
+	if HostGraceExpired(disconnectedAt, disconnectedAt.Add(365*24*time.Hour), forever) {
+		t.Error("Forever grace period should not be expired even after a full year")
 	}
 }

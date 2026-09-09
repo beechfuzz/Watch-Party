@@ -175,6 +175,62 @@ func TestAuthenticate_ExpiredByIdleTimeout(t *testing.T) {
 	}
 }
 
+// TestAuthenticate_NegativeIdleTimeout_NeverExpiresFromIdle guards the
+// sentinel fix: a negative idleTimeout ("Never") must never expire a
+// session on idle grounds, however long it's been since LastSeenAt --
+// without the guard, now.Sub(LastSeenAt) > a negative duration is true
+// almost immediately, which is the opposite of "never".
+func TestAuthenticate_NegativeIdleTimeout_NeverExpiresFromIdle(t *testing.T) {
+	store := testStore(t)
+	m := NewManager(store, -1*time.Second, 24*time.Hour)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "http://watchparty.home/api/auth/login", nil)
+	if _, err := m.Create(context.Background(), rec, req, "user1"); err != nil {
+		t.Fatal(err)
+	}
+
+	authReq := httptest.NewRequest("GET", "http://watchparty.home/api/me", nil)
+	authReq.AddCookie(findCookie(t, rec.Result().Cookies()))
+
+	time.Sleep(30 * time.Millisecond)
+	if _, err := m.Authenticate(context.Background(), authReq); err != nil {
+		t.Errorf("Authenticate with negative (Never) idle timeout = %v, want nil", err)
+	}
+}
+
+// TestCreate_NegativeMaxAge_SessionSurvivesDeleteExpiredSessions guards the
+// other half of the sentinel fix: a negative maxAge must store a real,
+// far-future ExpiresAt (not now.Add(negative), which would already be in
+// the past) so that both Authenticate's own check and the independent
+// dbx.Store.DeleteExpiredSessions sweep -- which has no visibility into
+// Manager.maxAge at all -- leave a "Never" session alone.
+func TestCreate_NegativeMaxAge_SessionSurvivesDeleteExpiredSessions(t *testing.T) {
+	store := testStore(t)
+	m := NewManager(store, time.Hour, -1*time.Second)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "http://watchparty.home/api/auth/login", nil)
+	sess, err := m.Create(context.Background(), rec, req, "user1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.DeleteExpiredSessions(context.Background(), time.Now()); err != nil {
+		t.Fatalf("DeleteExpiredSessions: %v", err)
+	}
+
+	authReq := httptest.NewRequest("GET", "http://watchparty.home/api/me", nil)
+	authReq.AddCookie(findCookie(t, rec.Result().Cookies()))
+	got, err := m.Authenticate(context.Background(), authReq)
+	if err != nil {
+		t.Fatalf("Authenticate after DeleteExpiredSessions with negative (Never) maxAge = %v, want nil", err)
+	}
+	if got.ID != sess.ID {
+		t.Errorf("got session %q, want %q", got.ID, sess.ID)
+	}
+}
+
 func TestValidateCSRF(t *testing.T) {
 	sess := &dbx.Session{CSRFToken: "secret-token"}
 

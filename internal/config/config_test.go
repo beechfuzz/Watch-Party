@@ -491,6 +491,76 @@ func TestLoadFrom_SyncMaxRateAdjustment_OutOfRange_FromFile(t *testing.T) {
 	}
 }
 
+// --- Disableable-duration fields (session idle/max-age, progress/snapshot
+// intervals, soft/hard drift): a literal zero must be rejected at load
+// time -- see ValidateDisableableDuration's doc comment for why zero is
+// dangerous (a crash for the two ticker-driven intervals, inverted
+// semantics for the rest) rather than merely a no-op. A negative value
+// ("disabled") must load successfully. ---
+
+func TestLoadFrom_DisableableDurationFields_ZeroFromFile_Rejected(t *testing.T) {
+	setRequiredEnv(t)
+	cases := []struct {
+		name  string
+		apply func(fc *FileConfig)
+	}{
+		{"session_idle_timeout", func(fc *FileConfig) { fc.ServerSettings.SessionIdleTimeout = strp("0s") }},
+		{"session_age_timeout", func(fc *FileConfig) { fc.ServerSettings.SessionAgeTimeout = strp("0s") }},
+		{"progress_interval", func(fc *FileConfig) { fc.GlobalPlaybackSettings.ProgressInterval = strp("0s") }},
+		{"sync_snapshot_interval", func(fc *FileConfig) { fc.GlobalPlaybackSettings.SyncSnapshotInterval = strp("0s") }},
+		{"sync_soft_drift", func(fc *FileConfig) { fc.GlobalPlaybackSettings.SyncSoftDrift = strp("0ms") }},
+		{"sync_hard_drift", func(fc *FileConfig) { fc.GlobalPlaybackSettings.SyncHardDrift = strp("0ms") }},
+	}
+	for _, tc := range cases {
+		fc := fullFileConfig()
+		tc.apply(fc)
+		_, err := loadFrom(fc)
+		if err == nil {
+			t.Errorf("%s: expected an error for a literal 0 duration, got nil", tc.name)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.name) {
+			t.Errorf("%s: error %q does not name the offending field", tc.name, err.Error())
+		}
+	}
+}
+
+func TestLoadFrom_DisableableDurationFields_NegativeFromFile_OK(t *testing.T) {
+	setRequiredEnv(t)
+	fc := fullFileConfig()
+	fc.ServerSettings.SessionIdleTimeout = strp("-1s")
+	fc.ServerSettings.SessionAgeTimeout = strp("-1s")
+	fc.GlobalPlaybackSettings.ProgressInterval = strp("-1s")
+	fc.GlobalPlaybackSettings.SyncSnapshotInterval = strp("-1s")
+	fc.GlobalPlaybackSettings.SyncSoftDrift = strp("-1ms")
+	fc.GlobalPlaybackSettings.SyncHardDrift = strp("-1ms")
+	cfg, err := loadFrom(fc)
+	if err != nil {
+		t.Fatalf("loadFrom with negative (disabled) durations = %v, want nil", err)
+	}
+	if cfg.SessionIdleTimeout != -time.Second || cfg.SessionMaxAge != -time.Second {
+		t.Errorf("SessionIdleTimeout/SessionMaxAge = %v/%v, want -1s/-1s", cfg.SessionIdleTimeout, cfg.SessionMaxAge)
+	}
+	if cfg.EmbyProgressInterval != -time.Second || cfg.SyncSnapshotInterval != -time.Second {
+		t.Errorf("EmbyProgressInterval/SyncSnapshotInterval = %v/%v, want -1s/-1s", cfg.EmbyProgressInterval, cfg.SyncSnapshotInterval)
+	}
+	if cfg.SyncSoftDriftMS != -1 || cfg.SyncHardDriftMS != -1 {
+		t.Errorf("SyncSoftDriftMS/SyncHardDriftMS = %d/%d, want -1/-1", cfg.SyncSoftDriftMS, cfg.SyncHardDriftMS)
+	}
+}
+
+func TestLoadFrom_DisableableDurationFields_ZeroFromEnv_Rejected(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("SESSION_IDLE_TIMEOUT", "0")
+	_, err := loadFrom(nil)
+	if err == nil {
+		t.Fatal("expected an error for SESSION_IDLE_TIMEOUT=0")
+	}
+	if !strings.Contains(err.Error(), "session_idle_timeout") {
+		t.Errorf("error %q does not name the offending field", err.Error())
+	}
+}
+
 // --- TOKEN_ENCRYPTION_KEY: still required on the normal-mode (loadFrom)
 // path -- proves the round-2 change narrowed WHERE the check runs
 // (setup-required mode no longer needs it -- see setupmode_test.go)

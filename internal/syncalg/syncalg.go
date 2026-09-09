@@ -97,13 +97,24 @@ type DriftThresholds struct {
 // ClassifyDrift compares actual player position to expected position (both
 // in PositionTicks) and returns the correction action. driftTicks is
 // signed: positive means the player is ahead of where it should be.
+//
+// A negative threshold means that correction is disabled entirely (see
+// config.ValidateDisableableDuration) -- without the explicit hardEnabled/
+// softEnabled checks below, a negative threshold would make "absMS >
+// negative" true for any nonzero drift, firing that correction constantly
+// instead of never. Zero should never reach here in practice (rejected at
+// config load time), but is treated as an enabled, always-triggering
+// threshold like any other non-negative value if it does, since this
+// function's job is to interpret whatever it's given, not to reject it.
 func ClassifyDrift(actualPositionTicks, expectedPositionTicks int64, t DriftThresholds) (driftTicks int64, action DriftAction) {
 	driftTicks = actualPositionTicks - expectedPositionTicks
 	absMS := absTicksToMS(driftTicks)
+	hardEnabled := t.HardDriftMS >= 0
+	softEnabled := t.SoftDriftMS >= 0
 	switch {
-	case absMS > t.HardDriftMS:
+	case hardEnabled && absMS > t.HardDriftMS:
 		action = DriftHardSeek
-	case absMS > t.SoftDriftMS:
+	case softEnabled && absMS > t.SoftDriftMS:
 		action = DriftNudgeRate
 	default:
 		action = DriftNone
@@ -178,7 +189,16 @@ func SelectNewHost(members []Member, excludeUserID string) (string, bool) {
 // and transfer authority; the former host does not automatically reclaim
 // host status by reconnecting afterward (it must be granted again, e.g. via
 // an explicit host_transfer from the new host).
+//
+// A negative gracePeriod is the "Forever" sentinel -- the host should never
+// automatically lose status. Without this guard, now.Sub(disconnectedAt) >=
+// a negative gracePeriod would be true almost immediately (any non-negative
+// elapsed time satisfies it), producing the exact opposite of "never
+// expires".
 func HostGraceExpired(disconnectedAt, now time.Time, gracePeriod time.Duration) bool {
+	if gracePeriod < 0 {
+		return false
+	}
 	return now.Sub(disconnectedAt) >= gracePeriod
 }
 

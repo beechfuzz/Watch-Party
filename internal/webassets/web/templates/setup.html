@@ -9,132 +9,249 @@
 <body>
   <div class="atmosphere"></div>
 
+  {{if .Success}}
   <section id="setup-section">
     <div class="login-shell">
       <div class="login-card setup-card">
         <div class="wp-mark">
           <svg viewBox="0 0 24 24" fill="none"><circle cx="9" cy="12" r="7" stroke="#1A1204" stroke-width="1.6"/><circle cx="15" cy="12" r="7" stroke="#1A1204" stroke-width="1.6"/></svg>
         </div>
+        <h1 class="login-heading">Configuration saved</h1>
+        <p class="login-sub">config.jsonc has been written. Watch Party will switch to normal mode automatically once it has an encryption key -- if it doesn't come up within a few seconds, restart it after setting the key below.</p>
 
-        {{if .Success}}
-          <h1 class="login-heading">Configuration saved</h1>
-          <p class="login-sub">config.jsonc has been written. Watch Party will switch to normal mode automatically once it has an encryption key -- if it doesn't come up within a few seconds, restart it after setting the key below.</p>
-
-          <div class="key-box">
-            <p>Your generated encryption key -- shown once, copy it now:</p>
-            <code>{{.GeneratedKey}}</code>
-            <p class="login-footnote">Set it as <code>TOKEN_ENCRYPTION_KEY</code>, or save it to a file and set <code>TOKEN_ENCRYPTION_KEY_FILE</code> to that file's path, in your environment (.env, docker-compose.yml, or the Podman quadlet's EnvironmentFile). This value is never written to config.jsonc and is not shown again.</p>
-          </div>
-        {{else}}
-          <h1 class="login-heading">Set up Watch Party</h1>
-          <p class="login-sub">No configuration file was found yet. Fill in the fields below to create one.</p>
-
-          <div class="key-box">
-            <p>Generated encryption key -- copy it now, shown once per run:</p>
-            <code>{{.GeneratedKey}}</code>
-            <p class="login-footnote">You'll need this as <code>TOKEN_ENCRYPTION_KEY</code> (or saved to a file referenced by <code>TOKEN_ENCRYPTION_KEY_FILE</code>) in your environment before Watch Party can start in normal mode. It is never written to config.jsonc.</p>
-          </div>
-
-          {{if .FormError}}<p class="error">{{.FormError}}</p>{{end}}
-
-          <form method="POST" action="/">
-            <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-
-            <h2 class="setup-section-title">Server</h2>
-            <div class="field">
-              <label for="title">Site title</label>
-              <input id="title" name="title" type="text" value="{{index .Values "title"}}" required>
-              {{with index .Errors "title"}}<p class="error">{{.}}</p>{{end}}
-            </div>
-            <div class="field">
-              <label for="log_level">Log level</label>
-              <select id="log_level" name="log_level">
-                <option value="debug" {{if eq (index .Values "log_level") "debug"}}selected{{end}}>debug</option>
-                <option value="info" {{if eq (index .Values "log_level") "info"}}selected{{end}}>info</option>
-                <option value="warn" {{if eq (index .Values "log_level") "warn"}}selected{{end}}>warn</option>
-                <option value="error" {{if eq (index .Values "log_level") "error"}}selected{{end}}>error</option>
-              </select>
-              {{with index .Errors "log_level"}}<p class="error">{{.}}</p>{{end}}
-            </div>
-            <div class="field">
-              <label for="browser_origins">Browser origins (one per line, or comma-separated)</label>
-              <textarea id="browser_origins" name="browser_origins" rows="3" placeholder="https://watchparty.example.com">{{index .Values "browser_origins"}}</textarea>
-              {{with index .Errors "browser_origins"}}<p class="error">{{.}}</p>{{end}}
-            </div>
-            <div class="field">
-              <label for="listen_address">Listen address</label>
-              <input id="listen_address" name="listen_address" type="text" value="{{index .Values "listen_address"}}" required>
-              {{with index .Errors "listen_address"}}<p class="error">{{.}}</p>{{end}}
-            </div>
-            <div class="field">
-              <label for="session_idle_timeout">Session idle timeout</label>
-              <input id="session_idle_timeout" name="session_idle_timeout" type="text" value="{{index .Values "session_idle_timeout"}}" required>
-              {{with index .Errors "session_idle_timeout"}}<p class="error">{{.}}</p>{{end}}
-            </div>
-            <div class="field">
-              <label for="session_age_timeout">Session max age</label>
-              <input id="session_age_timeout" name="session_age_timeout" type="text" value="{{index .Values "session_age_timeout"}}" required>
-              {{with index .Errors "session_age_timeout"}}<p class="error">{{.}}</p>{{end}}
-            </div>
-
-            <h2 class="setup-section-title">Party</h2>
-            <div class="field">
-              <label for="host_grace_period">Host grace period</label>
-              <input id="host_grace_period" name="host_grace_period" type="text" value="{{index .Values "host_grace_period"}}" required>
-              {{with index .Errors "host_grace_period"}}<p class="error">{{.}}</p>{{end}}
-            </div>
-            <div class="field">
-              <label for="inactivity_timeout">Party inactivity timeout</label>
-              <input id="inactivity_timeout" name="inactivity_timeout" type="text" value="{{index .Values "inactivity_timeout"}}" required>
-              {{with index .Errors "inactivity_timeout"}}<p class="error">{{.}}</p>{{end}}
-            </div>
-
-            <h2 class="setup-section-title">Playback sync</h2>
-            <div class="field">
-              <label for="progress_interval">Emby progress report interval</label>
-              <input id="progress_interval" name="progress_interval" type="text" value="{{index .Values "progress_interval"}}" required>
-              {{with index .Errors "progress_interval"}}<p class="error">{{.}}</p>{{end}}
-            </div>
-            <div class="field">
-              <label for="sync_snapshot_interval">Sync snapshot interval</label>
-              <input id="sync_snapshot_interval" name="sync_snapshot_interval" type="text" value="{{index .Values "sync_snapshot_interval"}}" required>
-              {{with index .Errors "sync_snapshot_interval"}}<p class="error">{{.}}</p>{{end}}
-            </div>
-            <div class="field">
-              <label for="sync_soft_drift">Soft drift threshold (explicit unit required, e.g. 300ms)</label>
-              <input id="sync_soft_drift" name="sync_soft_drift" type="text" value="{{index .Values "sync_soft_drift"}}" required>
-              {{with index .Errors "sync_soft_drift"}}<p class="error">{{.}}</p>{{end}}
-            </div>
-            <div class="field">
-              <label for="sync_hard_drift">Hard drift threshold (explicit unit required, e.g. 1500ms; must exceed soft drift)</label>
-              <input id="sync_hard_drift" name="sync_hard_drift" type="text" value="{{index .Values "sync_hard_drift"}}" required>
-              {{with index .Errors "sync_hard_drift"}}<p class="error">{{.}}</p>{{end}}
-            </div>
-            <div class="field">
-              <label for="sync_max_rate_adjustment">Max playback rate adjustment (between 0 and 1, exclusive)</label>
-              <input id="sync_max_rate_adjustment" name="sync_max_rate_adjustment" type="text" value="{{index .Values "sync_max_rate_adjustment"}}" required>
-              {{with index .Errors "sync_max_rate_adjustment"}}<p class="error">{{.}}</p>{{end}}
-            </div>
-
-            <h2 class="setup-section-title">Media server</h2>
-            <div class="field">
-              <label for="server_url">Emby server URL</label>
-              <input id="server_url" name="server_url" type="text" value="{{index .Values "server_url"}}" placeholder="https://emby.example.com" required>
-              {{with index .Errors "server_url"}}<p class="error">{{.}}</p>{{end}}
-            </div>
-            <div class="field">
-              <label for="public_url">Emby public URL (optional -- leave blank to default to the server URL above)</label>
-              <input id="public_url" name="public_url" type="text" value="{{index .Values "public_url"}}">
-              {{with index .Errors "public_url"}}<p class="error">{{.}}</p>{{end}}
-            </div>
-
-            <button type="submit" class="btn btn-primary">Save configuration</button>
-          </form>
-
-          <p class="login-footnote">TOKEN_ENCRYPTION_KEY / TOKEN_ENCRYPTION_KEY_FILE are never collected here -- they always come from your environment, never from this form or config.jsonc.</p>
-        {{end}}
+        <div class="key-box">
+          <p>Your generated encryption key -- shown once, copy it now:</p>
+          <code>{{.GeneratedKey}}</code>
+          <p class="login-footnote">Set it as <code>TOKEN_ENCRYPTION_KEY</code>, or save it to a file and set <code>TOKEN_ENCRYPTION_KEY_FILE</code> to that file's path, in your environment (.env, docker-compose.yml, or the Podman quadlet's EnvironmentFile). This value is never written to config.jsonc and is not shown again.</p>
+        </div>
       </div>
     </div>
   </section>
+  {{else}}
+  <div class="wizard-shell">
+    <div class="login-card setup-card setup-card--wizard" id="wizard-root">
+      <div class="wizard-header">
+        <div>
+          <h1>Set up Watch Party</h1>
+          <p>Four steps. Smart defaults are filled in already -- change only what you need.</p>
+        </div>
+        <button type="button" class="wizard-advanced-toggle" id="wizard-advanced-toggle" role="switch" aria-checked="false">
+          <span>Show Advanced</span>
+          <span class="wizard-toggle-track"><span class="wizard-toggle-knob"></span></span>
+        </button>
+      </div>
+
+      {{if .FormError}}<p class="error" style="padding: 0 34px; margin-top: 16px;">{{.FormError}}</p>{{end}}
+
+      <form method="POST" action="/" id="wizard-form">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+
+        <div class="wizard-body">
+          <nav class="wizard-rail" aria-label="Setup steps">
+            <button type="button" class="wizard-rail-item" data-rail-step="1">
+              <span class="wizard-rail-badge"><span class="wizard-badge-num">1</span><svg class="wizard-check-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg></span>
+              <span><span class="wizard-rail-title">Encryption Key</span><span class="wizard-rail-sub">Protect your users' Emby tokens</span></span>
+            </button>
+            <button type="button" class="wizard-rail-item" data-rail-step="2">
+              <span class="wizard-rail-badge"><span class="wizard-badge-num">2</span><svg class="wizard-check-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg></span>
+              <span><span class="wizard-rail-title">General Settings</span><span class="wizard-rail-sub">Title, logging, network basics</span></span>
+            </button>
+            <button type="button" class="wizard-rail-item" data-rail-step="3">
+              <span class="wizard-rail-badge"><span class="wizard-badge-num">3</span><svg class="wizard-check-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg></span>
+              <span><span class="wizard-rail-title">Party &amp; Playback Settings</span><span class="wizard-rail-sub">Tune sync and connect to your media server</span></span>
+            </button>
+            <button type="button" class="wizard-rail-item" data-rail-step="4">
+              <span class="wizard-rail-badge"><span class="wizard-badge-num">4</span><svg class="wizard-check-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg></span>
+              <span><span class="wizard-rail-title">Review &amp; Save</span><span class="wizard-rail-sub">Confirm and write config.jsonc</span></span>
+            </button>
+          </nav>
+
+          <div class="wizard-content">
+
+            <!-- Step 1: Encryption Key -->
+            <section data-step="1">
+              <h2>Encryption Key</h2>
+              <p class="wizard-step-sub">Protect your users' Emby tokens</p>
+
+              <p>Set this key as <span class="wizard-inline-code">TOKEN_ENCRYPTION_KEY</span> (env) or <span class="wizard-inline-code">TOKEN_ENCRYPTION_KEY_FILE</span> (secret file).</p>
+              <p>This key is never written to disk and will not be shown again.</p>
+              <div class="wizard-key-block"><code>{{.GeneratedKey}}</code></div>
+
+              <div class="wizard-disclosure" id="wizard-disclosure">
+                <button type="button" class="wizard-disclosure-toggle" id="wizard-disclosure-toggle" aria-expanded="false">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
+                  <span id="wizard-disclosure-label">Show More Info...</span>
+                </button>
+                <div class="wizard-disclosure-body" id="wizard-disclosure-body" hidden>
+                  When a user logs in, Emby issues an access token for that user's account. Watch Party persists this token so that user doesn't need to re-authenticate with Emby on every visit -- it's encrypted with this key before it's ever written to disk, and decrypted only in memory when a request needs it (e.g. fetching a playback URL on that user's behalf).
+                </div>
+              </div>
+            </section>
+
+            <!-- Step 2: General Settings -->
+            <section data-step="2" hidden>
+              <h2>General Settings</h2>
+              <p class="wizard-step-sub">Title, logging, network basics</p>
+
+              <div class="field">
+                <label for="title">Site Title</label>
+                <input id="title" name="title" type="text" value="{{index .Values "title"}}">
+                {{with index .Errors "title"}}<p class="error">{{.}}</p>{{end}}
+              </div>
+              <div class="field">
+                <label for="log_level">Log Level</label>
+                <select id="log_level" name="log_level">
+                  <option value="debug" {{if eq (index .Values "log_level") "debug"}}selected{{end}}>debug</option>
+                  <option value="info" {{if eq (index .Values "log_level") "info"}}selected{{end}}>info</option>
+                  <option value="warn" {{if eq (index .Values "log_level") "warn"}}selected{{end}}>warn</option>
+                  <option value="error" {{if eq (index .Values "log_level") "error"}}selected{{end}}>error</option>
+                </select>
+                {{with index .Errors "log_level"}}<p class="error">{{.}}</p>{{end}}
+              </div>
+              <div class="field">
+                <label for="browser_origins">Browser Origins</label>
+                <p class="field-helper">URLs that are allowed to access Watch Party. One per line, or comma-separated.</p>
+                <textarea id="browser_origins" name="browser_origins" rows="3">{{index .Values "browser_origins"}}</textarea>
+                {{with index .Errors "browser_origins"}}<p class="error">{{.}}</p>{{end}}
+              </div>
+              <div class="field">
+                <label for="listen_ip">Listen Address</label>
+                <p class="field-helper">IP and Port that Watch Party will listen on. (0.0.0.0 listens on all interfaces)</p>
+                <input type="hidden" id="listen_address" name="listen_address" value="{{index .Values "listen_address"}}">
+                <div class="wizard-listen-row">
+                  <input id="listen_ip" type="text" placeholder="0.0.0.0">
+                  <span class="wizard-listen-sep">:</span>
+                  <input id="listen_port" type="text" inputmode="numeric" placeholder="8080">
+                </div>
+                {{with index .Errors "listen_address"}}<p class="error">{{.}}</p>{{end}}
+              </div>
+              <div class="field" data-advanced-field>
+                <label for="session_idle_timeout__count" class="is-advanced-label">Session Idle Timeout</label>
+                <p class="field-helper">How long before a Watch Party user session becomes invalidated due to no activity.</p>
+                {{template "duration_control" (durationCtl "session_idle_timeout" (index .Values "session_idle_timeout"))}}
+                {{with index .Errors "session_idle_timeout"}}<p class="error">{{.}}</p>{{end}}
+              </div>
+              <div class="field" data-advanced-field>
+                <label for="session_age_timeout__count" class="is-advanced-label">Session Max Age</label>
+                <p class="field-helper">Maximum Watch Party user session age, regardless of activity.</p>
+                {{template "duration_control" (durationCtl "session_age_timeout" (index .Values "session_age_timeout"))}}
+                {{with index .Errors "session_age_timeout"}}<p class="error">{{.}}</p>{{end}}
+              </div>
+              <div class="field">
+                <label for="server_url">Emby Server URL</label>
+                <p class="field-helper">Emby's base server URL, as reachable from the Watch Party container/process itself.</p>
+                <input id="server_url" name="server_url" type="text" value="{{index .Values "server_url"}}" placeholder="http://emby:8096">
+                {{with index .Errors "server_url"}}<p class="error">{{.}}</p>{{end}}
+              </div>
+              <div class="field">
+                <label for="public_url">Emby Public URL</label>
+                <p class="field-helper">Emby's public URL, as reachable from a participant's browser.</p>
+                <input id="public_url" name="public_url" type="text" value="{{index .Values "public_url"}}" placeholder="http://emby:8096">
+                {{with index .Errors "public_url"}}<p class="error">{{.}}</p>{{end}}
+              </div>
+            </section>
+
+            <!-- Step 3: Party & Playback Settings -->
+            <section data-step="3" hidden>
+              <h2>Party &amp; Playback Settings</h2>
+              <p class="wizard-step-sub">Tune sync and connect to your media server</p>
+
+              <div class="field">
+                <label for="host_grace_period__count">Disconnected Party Host Grace Period</label>
+                <p class="field-helper">How much time a Party Host has to reconnect to the party before the "Host" status transfers to a different Attendee in the party.</p>
+                {{template "duration_control" (durationCtl "host_grace_period" (index .Values "host_grace_period"))}}
+                {{with index .Errors "host_grace_period"}}<p class="error">{{.}}</p>{{end}}
+              </div>
+              <div class="field">
+                <label for="inactivity_timeout__count">Party Inactivity Timeout</label>
+                <p class="field-helper">How much time a Party can go with no activity (playback or reconnects) before it's automatically ended.</p>
+                {{template "duration_control" (durationCtl "inactivity_timeout" (index .Values "inactivity_timeout"))}}
+                {{with index .Errors "inactivity_timeout"}}<p class="error">{{.}}</p>{{end}}
+              </div>
+              <div class="field" data-advanced-field>
+                <label for="progress_interval__count" class="is-advanced-label">Emby Progress Report Interval</label>
+                <p class="field-helper">How often each participant's watch progress is reported back to their own Emby account.</p>
+                {{template "duration_control" (durationCtl "progress_interval" (index .Values "progress_interval"))}}
+                {{with index .Errors "progress_interval"}}<p class="error">{{.}}</p>{{end}}
+              </div>
+              <div class="field" data-advanced-field>
+                <label for="sync_snapshot_interval__count" class="is-advanced-label">Sync Snapshot Interval</label>
+                <p class="field-helper">How often Watch Party double-checks everyone's playback position and re-syncs the group.</p>
+                {{template "duration_control" (durationCtl "sync_snapshot_interval" (index .Values "sync_snapshot_interval"))}}
+                {{with index .Errors "sync_snapshot_interval"}}<p class="error">{{.}}</p>{{end}}
+              </div>
+              <div class="field" data-advanced-field>
+                <label for="sync_soft_drift__count" class="is-advanced-label">Soft Drift Threshold</label>
+                <p class="field-helper">Playback drift below this is left uncorrected.</p>
+                {{template "duration_control" (durationCtl "sync_soft_drift" (index .Values "sync_soft_drift"))}}
+                {{with index .Errors "sync_soft_drift"}}<p class="error">{{.}}</p>{{end}}
+              </div>
+              <div class="field" data-advanced-field>
+                <label for="sync_hard_drift__count" class="is-advanced-label">Hard Drift Threshold</label>
+                <p class="field-helper">Playback drift above this triggers a hard seek.</p>
+                {{template "duration_control" (durationCtl "sync_hard_drift" (index .Values "sync_hard_drift"))}}
+                {{with index .Errors "sync_hard_drift"}}<p class="error">{{.}}</p>{{end}}
+              </div>
+              <div class="field" data-advanced-field>
+                <label for="sync_max_rate_adjustment" class="is-advanced-label">Max Playback Rate Adjustment</label>
+                <p class="field-helper">Max fractional playback-rate nudge for gradual drift correction. (0.05 &rArr; rate range [0.95, 1.05])</p>
+                <div class="duration-control">
+                  <div class="duration-spin wizard-rate-field">
+                    <input id="sync_max_rate_adjustment" name="sync_max_rate_adjustment" type="text" inputmode="decimal" value="{{index .Values "sync_max_rate_adjustment"}}">
+                    <div class="duration-spin-arrows">
+                      <button type="button" id="sync_max_rate_adjustment__up" tabindex="-1" aria-label="Increase"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M18 15l-6-6-6 6"/></svg></button>
+                      <button type="button" id="sync_max_rate_adjustment__down" tabindex="-1" aria-label="Decrease"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M6 9l6 6 6-6"/></svg></button>
+                    </div>
+                  </div>
+                </div>
+                {{with index .Errors "sync_max_rate_adjustment"}}<p class="error">{{.}}</p>{{end}}
+              </div>
+            </section>
+
+            <!-- Step 4: Review & Save -->
+            <section data-step="4" hidden>
+              <h2>Review &amp; Save</h2>
+              <p class="wizard-step-sub">Check everything below, which will be written to <span class="wizard-inline-code">config.jsonc</span>.</p>
+
+              <div id="wizard-review"></div>
+
+              <div id="wizard-preview-section" hidden>
+                <p class="wizard-preview-heading">Preview -- approximate; the saved file may include additional formatting/comments</p>
+                <pre class="wizard-preview-pre" id="wizard-preview"></pre>
+              </div>
+            </section>
+
+          </div>
+        </div>
+
+        <div class="wizard-footer">
+          <button type="button" class="btn btn-ghost" id="wizard-back">Back</button>
+          <span class="wizard-spacer"></span>
+          <button type="button" class="btn btn-primary" id="wizard-next">Next</button>
+          <button type="submit" class="btn btn-primary" id="wizard-save" hidden>Save configuration</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script type="module">
+    import { wireWizardSteps } from "/static/js/wizard-steps.js";
+    wireWizardSteps(document);
+  </script>
+  {{end}}
 </body>
 </html>
+
+{{define "duration_control"}}
+<div class="duration-control">
+  <div class="duration-spin">
+    <input type="hidden" name="{{.Field}}" id="{{.Field}}" value="{{.Value}}">
+    <input type="text" inputmode="numeric" autocomplete="off" id="{{.Field}}__count" value="0">
+    <div class="duration-spin-arrows">
+      <button type="button" id="{{.Field}}__up" tabindex="-1" aria-label="Increase"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M18 15l-6-6-6 6"/></svg></button>
+      <button type="button" id="{{.Field}}__down" tabindex="-1" aria-label="Decrease"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M6 9l6 6 6-6"/></svg></button>
+    </div>
+  </div>
+  <select class="duration-unit" id="{{.Field}}__unit"></select>
+</div>
+{{end}}

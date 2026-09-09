@@ -169,6 +169,84 @@ func TestPeriodicProgress_ReportsServerDerivedPosition(t *testing.T) {
 	}
 }
 
+// TestPeriodicProgress_NegativeInterval_DisablesTickerWithoutPanicking
+// guards the sentinel fix: a negative interval ("Never" -- see
+// config.ValidateDisableableDuration) must not reach time.NewTicker at
+// all, since a non-positive duration panics there. If Run() still tried to
+// construct one, the goroutine started below would have crashed the
+// process before this test could observe anything. Event-triggered
+// reporting (RecordPlaySession) is independent of the ticker and must
+// still work; periodic progress reporting must never fire.
+func TestPeriodicProgress_NegativeInterval_DisablesTickerWithoutPanicking(t *testing.T) {
+	dir := t.TempDir()
+	db, err := dbx.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	store := dbx.NewStore(db)
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	hub := party.NewHub(store, party.Tuning{
+		SnapshotInterval: time.Hour, SoftDriftMS: 300, HardDriftMS: 1500,
+		MaxRateAdjustment: 0.05, HostGracePeriod: 20 * time.Second,
+	}, logger)
+	t.Cleanup(func() { hub.Shutdown(context.Background()) })
+
+	srv, mu, calls := newFakeEmbyReportServer(t)
+	embyClient := emby.NewClient(srv.URL)
+	key := make([]byte, 32)
+	cipher, err := cryptox.NewTokenCipher(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := store.UpsertUser(ctx, "user1", "Alice", mustEncrypt(t, cipher, "tok1"), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	rp := New(hub, store, embyClient, cipher, -1*time.Millisecond, logger)
+
+	p, err := hub.CreateParty(ctx, "party1", "Test Party", party.Settings{AutoAdvance: true, ShowNextDialog: true, AutoplayEnabled: true, AutoplayDelaySeconds: 5}, "user1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Join("user1", "Alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.HandleControl("user1", "play", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go rp.Run(runCtx)
+
+	rp.RecordPlaySession(ctx, "party1", "user1", "src1", "sess1", "DirectStream")
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := len(*calls)
+		mu.Unlock()
+		if n >= 1 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*calls) == 0 {
+		t.Fatal("expected the event-triggered start report even with the periodic ticker disabled")
+	}
+	for _, c := range *calls {
+		if c.path == "/Sessions/Playing/Progress" {
+			t.Error("periodic progress report fired despite a negative (disabled) interval")
+		}
+	}
+}
+
 func TestPartyEnd_TriggersStopReport(t *testing.T) {
 	rp, hub, _, mu, calls := setupReporter(t)
 	ctx := context.Background()

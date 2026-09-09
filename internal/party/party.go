@@ -242,8 +242,22 @@ func (p *Party) currentEmbyItemID() string {
 
 func (p *Party) run() {
 	defer close(p.stopped)
-	snapshotTicker := time.NewTicker(p.tuning.SnapshotInterval)
-	defer snapshotTicker.Stop()
+	// A negative SnapshotInterval is the "Never" sentinel (see
+	// config.ValidateDisableableDuration) -- periodic re-sync is disabled
+	// entirely rather than starting a ticker at all. time.NewTicker panics
+	// on a non-positive duration, so this guard also stands as the last
+	// line of defense against a zero value that should already have been
+	// rejected at config load time. snapshotCh stays nil (never fires in
+	// the select below) when disabled, the same nil-channel idiom pendingCh
+	// already uses a few lines down for "no pending transition timer".
+	var snapshotCh <-chan time.Time
+	if p.tuning.SnapshotInterval < 0 {
+		p.logger.Info("sync snapshot re-sync disabled (negative interval)", "party_id", p.ID)
+	} else {
+		snapshotTicker := time.NewTicker(p.tuning.SnapshotInterval)
+		defer snapshotTicker.Stop()
+		snapshotCh = snapshotTicker.C
+	}
 	graceTicker := time.NewTicker(time.Second)
 	defer graceTicker.Stop()
 
@@ -265,7 +279,7 @@ func (p *Party) run() {
 				return
 			}
 			fn()
-		case <-snapshotTicker.C:
+		case <-snapshotCh:
 			p.onSnapshotTick()
 		case <-graceTicker.C:
 			p.onGraceTick()

@@ -252,6 +252,39 @@ func TestValidateSyncDrift_HardNotGreaterThanSoft_Rejected(t *testing.T) {
 	}
 }
 
+// TestValidateSyncDrift_DisabledSide_ExemptsOrderingCheck: a negative value
+// means "disabled" (see ValidateDisableableDuration); ordering between
+// "disabled" and any other value -- including another disabled value --
+// isn't meaningful, so the hard>soft check must not fire when either side
+// is negative, even in the otherwise-rejected equal/hard<soft shapes.
+func TestValidateSyncDrift_DisabledSide_ExemptsOrderingCheck(t *testing.T) {
+	cases := []struct{ soft, hard time.Duration }{
+		{-1 * time.Second, 1500 * time.Millisecond}, // soft disabled, hard real
+		{300 * time.Millisecond, -1 * time.Second},  // hard disabled, soft real
+		{-1 * time.Second, -1 * time.Second},        // both disabled, equal -- would fail hard<=soft if not exempted
+		{-1 * time.Second, -2 * time.Second},        // both disabled, "hard" more negative than "soft"
+	}
+	for _, tc := range cases {
+		if err := ValidateSyncDrift(tc.soft, tc.hard); err != nil {
+			t.Errorf("ValidateSyncDrift(%v, %v) = %v, want nil (disabled side exempts ordering)", tc.soft, tc.hard, err)
+		}
+	}
+}
+
+func TestValidateDisableableDuration_Zero_Rejected(t *testing.T) {
+	if err := ValidateDisableableDuration("session_idle_timeout", 0); err == nil {
+		t.Error("ValidateDisableableDuration(field, 0) = nil, want an error")
+	}
+}
+
+func TestValidateDisableableDuration_PositiveOrNegative_OK(t *testing.T) {
+	for _, d := range []time.Duration{1, time.Second, 24 * time.Hour, -1, -time.Second, -24 * time.Hour} {
+		if err := ValidateDisableableDuration("session_idle_timeout", d); err != nil {
+			t.Errorf("ValidateDisableableDuration(field, %v) = %v, want nil", d, err)
+		}
+	}
+}
+
 func TestValidateMaxRateAdjustment_InRange_OK(t *testing.T) {
 	for _, v := range []float64{0.01, 0.05, 0.5, 0.99} {
 		if err := ValidateMaxRateAdjustment(v); err != nil {
