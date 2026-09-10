@@ -1,4 +1,4 @@
-# Issue Playbook — Watch Party
+# Contributing — Issue Workflow
 
 This defines how work enters the Watch Party repo. It exists to make sure
 every non-trivial change traces back to a written Problem/Goal/Scope before
@@ -67,9 +67,18 @@ Two axes only. No priority labels, no status labels — priority is
 whatever you choose to work on next, and status is tracked by the Issue
 being open/closed plus its linked PR state.
 
-- `type:bug` / `type:feature` / `type:refactor`
-- `area:sync` / `area:chat` / `area:playlist` / `area:wizard` / `area:ui` / `area:infra`
+- Apply one type label per Issue: `bug` / `feature` / `refactor`
+  (`bug` is a GitHub default label — no need to recreate it; `feature`
+  and `refactor` must be created manually)
+- Apply one or more area labels: `area:sync` / `area:chat` /
+  `area:playlist` / `area:wizard` / `area:ui` / `area:infra`
 - `trivial` — exempts a PR from needing a linked Issue
+
+No `type:` prefix — GitHub's native Issue Type field would be the more
+current mechanism for this axis, but it's currently organization-only
+and unavailable on this personal-account repo. Plain labels are used
+instead; there's no `area` label whose name collides with a type name,
+so no namespace prefix is needed here.
 
 ## Sub-issues
 
