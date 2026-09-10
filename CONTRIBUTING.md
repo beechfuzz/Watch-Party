@@ -1,0 +1,111 @@
+# Issue Playbook — Watch Party
+
+This defines how work enters the Watch Party repo. It exists to make sure
+every non-trivial change traces back to a written Problem/Goal/Scope before
+implementation starts, and complements — not duplicates — the process
+already defined in `CLAUDE.md` and the plan-approval gate.
+
+## Core rule
+
+**Every behavior-changing PR must reference an Issue.** The Issue is the
+unit of intent; the PR is the unit of change. `Fixes #N` / `Closes #N` in
+the PR body is what makes that traceable — an Issue with no linked PR, or
+a PR with no linked Issue, breaks the chain.
+
+## What requires an Issue
+
+Requires one:
+- New features or behavior changes
+- Bug fixes
+- Refactors
+- Anything Claude Code will implement
+
+Does not require one (`trivial` label on the PR instead):
+- Typo/formatting/comment-only changes
+- Dependency bumps with no behavior change
+- Any one-line change with zero scope ambiguity
+
+If you're unsure which bucket something falls in, it needs an Issue —
+the cost of an unnecessary Issue is low; the cost of an unscoped Claude
+Code session is not.
+
+## Issue template
+
+```markdown
+## Problem
+What's wrong or what opportunity exists?
+
+## Goal
+What should be different when this is done?
+
+## Scope
+What is included in this change?
+
+## Non-Goals
+What is explicitly NOT included, even if related?
+
+## Acceptance Criteria
+- [ ] Verifiable, testable condition
+- [ ] ...
+
+## Notes
+Relevant context, links, prior discussion.
+```
+
+**Non-Goals is the highest-value section.** It's the written boundary
+Claude Code's plan gets checked against before you approve it — the same
+boundary "investigate-first / plan-first" already enforces, just set one
+step earlier and made durable instead of living only in chat.
+
+**Acceptance Criteria doubles as the close-out checklist** — the same
+list your pasted terminal output and CI status are checked against at
+close-out.
+
+## Labels
+
+Two axes only. No priority labels, no status labels — priority is
+whatever you choose to work on next, and status is tracked by the Issue
+being open/closed plus its linked PR state.
+
+- `type:bug` / `type:feature` / `type:refactor`
+- `area:sync` / `area:chat` / `area:playlist` / `area:wizard` / `area:ui` / `area:infra`
+- `trivial` — exempts a PR from needing a linked Issue
+
+## Sub-issues
+
+Use GitHub sub-issues only when a body of work genuinely decomposes into
+independently mergeable pieces — e.g. the voice-chat SFU work (transport,
+moderation controls, audio verification strategy) once it leaves
+exploration. Don't create sub-issues for implementation steps within a
+single PR.
+
+## Workflow
+
+1. Open an Issue using the template above before starting any Claude Code
+   session for that change.
+2. The Issue's Scope/Non-Goals is what gets pasted into or referenced by
+   the Claude Code prompt.
+3. Claude Code's plan is checked against the Issue's Scope/Non-Goals
+   before you give the literal "approved."
+4. Close-out verification (pasted terminal output, live CI check) is
+   checked against the Issue's Acceptance Criteria, not just "looks done."
+5. The merging PR includes `Fixes #N` / `Closes #N` so the Issue closes
+   automatically and the history stays queryable.
+
+## Deliberately excluded
+
+- **Milestones / GitHub Projects** — not adopted. `overview.md`'s
+  "current state" / "on the horizon" sections already serve that
+  function for a single-maintainer repo; a board would duplicate it
+  with no second reader to justify the upkeep.
+- **Priority and status labels** — not adopted, for the same reason:
+  nothing consumes them but you, and you already know what's next.
+- **YAML issue forms** — not adopted; a pasted Markdown template gives
+  the same structure with less repo overhead.
+
+## Future (not yet implemented)
+
+A GitHub Action that fails a PR check when the PR body has no `#`-issue
+reference and no `trivial` label, so the rule is self-enforcing rather
+than memory-dependent. Deferred until the manual version has run long
+enough to prove out the template and label set.
