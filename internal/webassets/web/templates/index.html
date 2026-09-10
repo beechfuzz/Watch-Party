@@ -36,6 +36,7 @@
     </div>
   </section>
 
+  {{if .Authenticated}}
   <section id="home-section" hidden>
     <div class="app-shell">
       {{template "sidebar" .}}
@@ -118,6 +119,7 @@
       </div>
     </form>
   </dialog>
+  {{end}}
 
   <script type="module" src="/static/js/app.js"></script>
 </body>
