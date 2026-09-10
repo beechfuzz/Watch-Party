@@ -74,7 +74,7 @@ Two axes plus two flags. No priority labels, no status labels — priority is wh
 ### Flags
 
 - `trivial` — exempts a PR from needing a linked Issue.
-- `security` — cross-cutting flag for any Issue with a security implication, applied alongside its type and area label(s), not in place of them.
+- `security` — cross-cutting flag for any Issue with a security implication, applied alongside its type and area label(s), not in place of them. On a public repo, don't post exploit-level detail (working PoC code, exact crafted requests, step-by-step reproduction) to a `security`-flagged Issue until its fix has merged — a high-level finding (what's vulnerable, how it was confirmed, at a conclusion level) and the chosen remediation approach with reasoning are enough to satisfy the workflow in the meantime. Post the full technical detail as a follow-up comment once the fix is no longer live against `main`.
 
 ### If no label is an accurate fit
 
