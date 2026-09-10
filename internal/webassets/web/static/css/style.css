@@ -4,6 +4,19 @@
    ../fonts/README.md) for the same "no runtime CDN dependency" reason
    hls.js is vendored rather than CDN-loaded — see ARCHITECTURE.md §1.6. */
 
+/* Opts index.html into cross-document View Transitions for same-origin
+   navigations -- smooths the reload the login/logout flow now does (see
+   ARCHITECTURE.md's home-dashboard-auth-bypass postmortem) instead of a
+   plain flash between the login screen and the dashboard. Purely a
+   rendering enhancement: an unsupporting browser (this at-rule isn't
+   universally shipped yet) just ignores the unrecognized at-rule per
+   ordinary forward-compatible CSS parsing and performs a normal
+   navigation -- no JS feature-detection branch, nothing to fall back to
+   on purpose. */
+@view-transition {
+  navigation: auto;
+}
+
 @font-face {
   font-family: 'Inter';
   font-style: normal;

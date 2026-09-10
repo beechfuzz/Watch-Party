@@ -576,11 +576,17 @@ func TestStaticAssetsAndPages_NotCacheable(t *testing.T) {
 	// or an intermediate CDN caching by file extension (a real default for
 	// some CDNs, regardless of what the origin sends) can keep serving a
 	// pre-deploy JS/CSS file indefinitely -- see ARCHITECTURE.md §5.6.
+	//
+	// /party/{id} is authenticated-only as of the home-dashboard-auth-bypass
+	// fix (ARCHITECTURE.md), so this exercises it with a valid session --
+	// see TestPartyPage_Unauthenticated_Redirects (pages_test.go) for the
+	// unauthenticated case, which 302s rather than serving cacheable page
+	// content at all.
 	_, srv := newTestApp(t)
-	httpClient := &http.Client{}
+	c := loginTestClient(t, srv)
 
 	for _, path := range []string{"/static/js/player.js", "/static/css/style.css", "/", "/party/some-id"} {
-		resp, err := httpClient.Get(srv.URL + path)
+		resp, err := c.http.Get(srv.URL + path)
 		if err != nil {
 			t.Fatalf("GET %s: %v", path, err)
 		}

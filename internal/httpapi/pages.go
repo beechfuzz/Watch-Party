@@ -2,10 +2,12 @@ package httpapi
 
 import (
 	"bytes"
+	"errors"
 	"html/template"
 	"log/slog"
 	"net/http"
 
+	"github.com/beechfuzz/watch-party/internal/session"
 	"github.com/beechfuzz/watch-party/internal/webassets"
 )
 
@@ -24,11 +26,13 @@ func mustParseTemplates() *template.Template {
 // ActiveNav marks which sidebar nav item, if any, should render as
 // "is-active" -- "home" on the dashboard; left empty on the party room,
 // since none of the sidebar's destinations represent "you're in a party"
-// today.
+// today. Authenticated gates index.html's home-dashboard markup
+// (home-section and create-party-dialog) -- see registerPages.
 type pageData struct {
-	PartyID   string
-	ActiveNav string
-	Title     string
+	PartyID       string
+	ActiveNav     string
+	Title         string
+	Authenticated bool
 }
 
 // registerPages attaches the server-rendered HTML shell and static asset
@@ -37,11 +41,15 @@ type pageData struct {
 // JSON API, per the spec's "server's authoritative state is the single
 // source of truth, client is a thin renderer" design.
 //
-// title is the operator-configured site title (config.Config.Title /
-// server_settings.title), passed to every page template and the shared
-// sidebar partial in place of the "Watch Party" literal they used before
-// the config-file layer existed.
-func registerPages(mux *http.ServeMux, logger *slog.Logger, title string) {
+// Both page routes check session validity before rendering -- see
+// ARCHITECTURE.md's home-dashboard-auth-bypass postmortem. Any
+// Sessions.Authenticate error, not just "no session", is treated as
+// unauthenticated here: a page load failing safe to the login screen (or a
+// redirect to it) is preferable to a 500 on the app's front door, and
+// unlike the /api/... handlers wrapped in withAuth, there's no JSON error
+// body to distinguish "unauthorized" from "internal error" for a page
+// response anyway. The real error is still logged.
+func registerPages(mux *http.ServeMux, app *App) {
 	staticSub, err := webassets.StaticFS()
 	if err != nil {
 		panic("webassets: static fs: " + err.Error())
@@ -50,7 +58,14 @@ func registerPages(mux *http.ServeMux, logger *slog.Logger, title string) {
 	mux.Handle("GET /static/", http.StripPrefix("/static/", noCache(fileServer)))
 
 	mux.HandleFunc("GET /party/{id}", func(w http.ResponseWriter, r *http.Request) {
-		renderPage(w, logger, pageTemplates, "party.html", pageData{PartyID: r.PathValue("id"), Title: title})
+		if _, err := app.Sessions.Authenticate(r.Context(), r); err != nil {
+			if !errors.Is(err, session.ErrNoSession) && !errors.Is(err, session.ErrSessionExpired) {
+				app.Logger.Error("session authenticate failed", "error", err)
+			}
+			http.Redirect(w, r, "/", http.StatusFound)
+			return
+		}
+		renderPage(w, app.Logger, pageTemplates, "party.html", pageData{PartyID: r.PathValue("id"), Title: app.Title})
 	})
 
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
@@ -58,7 +73,12 @@ func registerPages(mux *http.ServeMux, logger *slog.Logger, title string) {
 			http.NotFound(w, r)
 			return
 		}
-		renderPage(w, logger, pageTemplates, "index.html", pageData{ActiveNav: "home", Title: title})
+		_, err := app.Sessions.Authenticate(r.Context(), r)
+		authenticated := err == nil
+		if err != nil && !errors.Is(err, session.ErrNoSession) && !errors.Is(err, session.ErrSessionExpired) {
+			app.Logger.Error("session authenticate failed", "error", err)
+		}
+		renderPage(w, app.Logger, pageTemplates, "index.html", pageData{ActiveNav: "home", Title: app.Title, Authenticated: authenticated})
 	})
 }
 

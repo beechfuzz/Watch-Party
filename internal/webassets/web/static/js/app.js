@@ -1,6 +1,17 @@
 // Index page: login form, then the dashboard (active/your parties +
 // create). Server is the source of truth; this just renders whatever
 // /api/me and /api/parties say.
+//
+// home-section and create-party-dialog only exist in the DOM when the
+// server rendered this page as authenticated (see pages.go's
+// Authenticated gate on GET / -- ARCHITECTURE.md's home-dashboard-
+// auth-bypass postmortem): an unauthenticated page load never ships that
+// markup at all, so every lookup below can come back null. Login success
+// navigates to "/" (see the submit handler) rather than revealing this
+// markup in place, so by the time any of it is actually used the page has
+// always been freshly, authenticated-ly rendered -- but the lookups and
+// listener wiring still happen unconditionally at module load on *every*
+// load, authenticated or not, so they're guarded against null here.
 import { api, setCSRFToken } from "./api.js";
 import { wireSettingsForm } from "./settingsForm.js";
 import { initSidebar } from "./sidebar.js";
@@ -19,10 +30,12 @@ const createDialog = document.getElementById("create-party-dialog");
 const createForm = document.getElementById("create-party-form");
 const createError = document.getElementById("create-error");
 const cancelCreateBtn = document.getElementById("cancel-create-btn");
-const createSettingsForm = wireSettingsForm({
-  autoAdvance: "create-auto-advance", showNextDialog: "create-show-next-dialog",
-  autoplayEnabled: "create-autoplay-enabled", autoplayDelay: "create-autoplay-delay",
-});
+const createSettingsForm = homeSection
+  ? wireSettingsForm({
+      autoAdvance: "create-auto-advance", showNextDialog: "create-show-next-dialog",
+      autoplayEnabled: "create-autoplay-enabled", autoplayDelay: "create-autoplay-delay",
+    })
+  : null;
 
 const activeGrid = document.getElementById("active-parties-grid");
 const activeCount = document.getElementById("active-count");
@@ -30,7 +43,7 @@ const yourSection = document.getElementById("your-parties-section");
 const yourList = document.getElementById("your-parties-list");
 const yourCount = document.getElementById("your-count");
 
-const sidebar = initSidebar({ onLoggedOut: showLogin });
+const sidebar = homeSection ? initSidebar({ onLoggedOut: showLogin }) : null;
 
 let me = null;
 
@@ -65,7 +78,10 @@ async function init() {
 
 function showLogin() {
   loginSection.hidden = false;
-  homeSection.hidden = true;
+  // homeSection doesn't exist in the DOM on an unauthenticated page load
+  // (see the module-header comment) -- this runs from init()'s /api/me
+  // failure on exactly that load, so it must be guarded.
+  if (homeSection) homeSection.hidden = true;
 }
 
 async function showHome() {
@@ -190,34 +206,40 @@ loginForm.addEventListener("submit", async (e) => {
       method: "POST",
       body: { username: formData.get("username"), password: formData.get("password") },
     });
-    me = result;
+    // home-section isn't in this document -- an unauthenticated page load
+    // never ships it (see the module-header comment above). Navigate
+    // instead of showHome()-ing in place, so the now-authenticated
+    // GET / renders the real dashboard shell for init() to reveal, the
+    // same path any returning already-logged-in visitor already takes.
     setCSRFToken(result.csrf_token);
-    showHome();
+    window.location.href = "/";
   } catch (err) {
     showError(loginError, err.message);
   }
 });
 
-createBtn.addEventListener("click", () => {
-  hideError(createError);
-  createForm.reset();
-  createSettingsForm.resync();
-  createDialog.showModal();
-});
-cancelCreateBtn.addEventListener("click", () => createDialog.close());
-createForm.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  hideError(createError);
-  const formData = new FormData(createForm);
-  try {
-    const result = await api("/api/parties", {
-      method: "POST",
-      body: { name: formData.get("name"), ...createSettingsForm.read() },
-    });
-    window.location.href = `/party/${encodeURIComponent(result.party_id)}`;
-  } catch (err) {
-    showError(createError, err.message);
-  }
-});
+if (homeSection) {
+  createBtn.addEventListener("click", () => {
+    hideError(createError);
+    createForm.reset();
+    createSettingsForm.resync();
+    createDialog.showModal();
+  });
+  cancelCreateBtn.addEventListener("click", () => createDialog.close());
+  createForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    hideError(createError);
+    const formData = new FormData(createForm);
+    try {
+      const result = await api("/api/parties", {
+        method: "POST",
+        body: { name: formData.get("name"), ...createSettingsForm.read() },
+      });
+      window.location.href = `/party/${encodeURIComponent(result.party_id)}`;
+    } catch (err) {
+      showError(createError, err.message);
+    }
+  });
+}
 
 init();

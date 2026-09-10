@@ -70,5 +70,5 @@ func RegisterRoutes(mux *http.ServeMux, app *App) {
 
 	mux.HandleFunc("GET /ws/parties/{id}", app.handleWebSocket) // auth + origin validated inside (cookie-based; see ws.go)
 
-	registerPages(mux, app.Logger, app.Title)
+	registerPages(mux, app)
 }
