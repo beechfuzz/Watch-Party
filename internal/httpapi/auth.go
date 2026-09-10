@@ -3,6 +3,7 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"mime"
 	"net/http"
 	"time"
 
@@ -29,6 +30,17 @@ type loginResponse struct {
 // variable goes out of scope (and is eligible for GC) as soon as this
 // function returns; nothing here persists it anywhere.
 func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if !a.originAllowed(r.Header.Get("Origin")) {
+		writeError(w, http.StatusForbidden, "origin_not_allowed", "origin not allowed")
+		return
+	}
+
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		writeError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json")
+		return
+	}
+
 	var req loginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Username == "" || req.Password == "" {
 		writeError(w, http.StatusBadRequest, "bad_request", "username and password are required")
