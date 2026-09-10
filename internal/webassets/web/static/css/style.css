@@ -728,6 +728,55 @@ body.wizard-advanced-on .setup-card--wizard .field[data-advanced-field] { displa
 .player-idle p { margin: 0; font-size: 14px; font-weight: 500; color: var(--text-secondary); }
 .player-idle span { font-size: 12.5px; }
 
+/* Shown in place of a denied item, layered atop the still-visible (but
+   click-blocked -- see player.js's updatePlayerVisibility) <video> rather
+   than replacing it, unlike .player-idle above: a denied item never has a
+   src set (loadCurrentItem returns before attachSource runs), so the
+   native controls bar renders in its ordinary inert/no-source state
+   underneath this card, exactly as a real Emby-side denial should look --
+   not hidden outright. .player-restricted itself is the full-frame,
+   pointer-events-capturing layer (see the "video controls disabled"
+   requirement); only the centered card has a visible fill/border. */
+.player-restricted {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  padding: 24px; cursor: not-allowed;
+}
+.player-restricted-card {
+  display: flex; flex-direction: column; align-items: center; gap: 12px; text-align: center;
+  max-width: 440px; width: 100%; padding: 32px 28px;
+  background: rgba(15,8,8,0.88); backdrop-filter: blur(2px);
+  border: 1px solid rgba(232,97,90,0.45); border-radius: var(--radius-panel);
+  animation: player-restricted-pulse 1.8s ease-in-out infinite;
+}
+.player-restricted-icon {
+  width: 56px; height: 56px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+  border: 1.5px solid rgba(232,97,90,0.5); background: rgba(232,97,90,0.1);
+  color: var(--error); font-size: 26px; font-weight: 700; font-family: var(--font-mono);
+}
+.player-restricted-label {
+  font-family: var(--font-mono); font-size: 12px; font-weight: 700; letter-spacing: 0.15em;
+  text-transform: uppercase; color: var(--error);
+}
+.player-restricted-message { margin: 0; font-size: 15.5px; font-weight: 500; color: var(--text-primary); line-height: 1.4; }
+
+@keyframes player-restricted-pulse {
+  0%, 100% { border-color: rgba(232,97,90,0.35); box-shadow: 0 0 16px rgba(232,97,90,0.15); }
+  50% { border-color: rgba(232,97,90,0.75); box-shadow: 0 0 34px rgba(232,97,90,0.4); }
+}
+@media (prefers-reduced-motion: reduce) { .player-restricted-card { animation: none; } }
+/* .player-frame is aspect-ratio:16/9 with overflow:hidden -- at the
+   smallest supported viewport width the frame is short enough that the
+   round card's default padding/icon size would clip against that boundary
+   (and dull the pulse's own glow asymmetrically along with it), so this
+   shrinks the card's footprint rather than its max-width, which is
+   already a relative fit. */
+@media (max-width: 640px) {
+  .player-restricted-card { padding: 20px 18px; gap: 8px; }
+  .player-restricted-icon { width: 42px; height: 42px; font-size: 20px; }
+  .player-restricted-label { font-size: 10.5px; }
+  .player-restricted-message { font-size: 13.5px; }
+}
+
 .next-item-banner {
   position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%);
   background: rgba(10,13,18,0.88); backdrop-filter: blur(4px);

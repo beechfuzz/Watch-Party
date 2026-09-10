@@ -255,52 +255,67 @@ func (a *App) handleGetParty(w http.ResponseWriter, r *http.Request) {
 		snap = wsproto.SnapshotPayload{PartyID: row.ID, Name: row.Name, HostUserID: row.HostUserID}
 	}
 
-	// Media authorization must be re-validated on join, not just at party
-	// creation — confirm this specific user (not just the host) can access
-	// the CURRENT item before they can see/join the party. With a playlist,
-	// the current item can change after join (see ARCHITECTURE.md's
-	// Playlist section) — an idle party (no current item yet) has nothing
-	// to authorize against, so this check only runs once there is one; a
-	// per-participant re-check against whatever becomes current later
-	// happens naturally at handlePlaybackURL, which every client calls
-	// again whenever the current item changes.
+	// Joining/loading the party page no longer depends on whether this
+	// participant can see the party's current item (see ARCHITECTURE.md
+	// §19.6) — the party itself (Attendees, Playlist, Chat) is always
+	// visible to every signed-in user, same as it already was for an idle
+	// party. Only the item's own title/metadata is gated per participant
+	// here, following the same fail-closed placeholder pattern
+	// handleGetPlaylist/handleListParties already use: default to
+	// "Restricted item" and only reveal the real title on a confirmed,
+	// error-free IsItemVisible. Real per-item media *access* (the actual
+	// stream URL) is still independently re-validated at handlePlaybackURL
+	// every time the current item changes, not decided here.
 	itemTitle := ""
+	itemRestricted := false
 	if snap.ItemID != "" {
 		token, err := a.TokenCipher.Decrypt(user.EncryptedAccessToken)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
 			return
 		}
+		itemTitle = "Restricted item"
+		itemRestricted = true
+		// A dead Emby credential (as opposed to a merely-inaccessible item)
+		// is a different, non-placeholder-able problem: no title/metadata
+		// substitution can paper over a login that no longer works at all,
+		// and every subsequent Emby call this session makes will fail the
+		// same way — so this specific case still hard-stops the page load
+		// with a clear "sign in again" response, same as it did before this
+		// checkpoint stopped hard-denying on a plain "not visible."
+		visible, visErr := a.Emby.IsItemVisible(r.Context(), token, user.ID, snap.ItemID)
+		if visErr != nil && errors.Is(visErr, emby.ErrUnauthorized) {
+			_ = a.Store.DeleteSessionsForUser(r.Context(), user.ID)
+			writeError(w, http.StatusUnauthorized, "unauthorized", "your Emby session is no longer valid, please sign in again")
+			return
+		}
 		// GetItem alone is not a trustworthy authorization decision — Emby's
 		// direct-by-item-ID endpoints don't enforce per-user library access
 		// control the way its query/listing endpoints do (confirmed live
 		// against a real Emby server — see ARCHITECTURE.md's dated entry on
-		// the Emby library-access bypass). Gate on IsItemVisible first.
-		if visible, err := a.Emby.IsItemVisible(r.Context(), token, user.ID, snap.ItemID); err != nil {
-			a.handleEmbyErr(w, r.Context(), user.ID, err, "you do not have access to this media item")
-			return
-		} else if !visible {
-			writeError(w, http.StatusBadGateway, "emby_error", "you do not have access to this media item")
-			return
+		// the Emby library-access bypass). Any other IsItemVisible error
+		// (e.g. a transient Emby outage) is treated the same as "not
+		// visible" here — fail closed on the leak-prevention question this
+		// field answers, matching handleGetPlaylist/handleListParties.
+		if visErr == nil && visible {
+			if item, err := a.Emby.GetItem(r.Context(), token, user.ID, snap.ItemID); err == nil {
+				itemTitle = item.Name
+				itemRestricted = false
+			}
 		}
-		item, err := a.Emby.GetItem(r.Context(), token, user.ID, snap.ItemID)
-		if err != nil {
-			a.handleEmbyErr(w, r.Context(), user.ID, err, "you do not have access to this media item")
-			return
-		}
-		itemTitle = item.Name
 	}
 
-	// ItemTitle rides alongside the snapshot rather than joining
-	// wsproto.SnapshotPayload itself — the party actor has no Emby access
-	// (by design; see ARCHITECTURE.md §3) and so has no way to populate a
-	// title. Name, unlike ItemTitle, IS part of SnapshotPayload (so a host
-	// rename propagates live to already-connected clients via the ordinary
-	// snapshot broadcast, not just this HTTP response).
+	// ItemTitle/ItemRestricted ride alongside the snapshot rather than
+	// joining wsproto.SnapshotPayload itself — the party actor has no Emby
+	// access (by design; see ARCHITECTURE.md §3) and so has no way to
+	// populate a title. Name, unlike ItemTitle, IS part of SnapshotPayload
+	// (so a host rename propagates live to already-connected clients via
+	// the ordinary snapshot broadcast, not just this HTTP response).
 	writeJSON(w, http.StatusOK, struct {
 		wsproto.SnapshotPayload
-		ItemTitle string `json:"item_title"`
-	}{SnapshotPayload: snap, ItemTitle: itemTitle})
+		ItemTitle      string `json:"item_title"`
+		ItemRestricted bool   `json:"item_restricted"`
+	}{SnapshotPayload: snap, ItemTitle: itemTitle, ItemRestricted: itemRestricted})
 }
 
 func (a *App) handlePlaybackURL(w http.ResponseWriter, r *http.Request) {
@@ -357,11 +372,23 @@ func (a *App) handlePlaybackURL(w http.ResponseWriter, r *http.Request) {
 	// access to the item — see ARCHITECTURE.md's dated entry on the Emby
 	// library-access bypass). Gate on IsItemVisible first, before ever
 	// calling PlaybackInfo.
+	// A genuine IsItemVisible call failure (Emby unreachable, a transient
+	// error) is still routed through handleEmbyErr below — that's a real
+	// upstream problem, not an authorization decision, and stays
+	// emby_error/502 (or unauthorized/401 with session cleanup for a dead
+	// token). A confirmed, error-free "not visible" is different in kind:
+	// Emby answered successfully and said no. That's Watch Party's own
+	// access_denied decision, not a gateway failure, so it gets its own
+	// code and the status (403) that decision actually deserves — this is
+	// also the one signal the client uses to distinguish "you don't have
+	// access to this video" (a persistent, specific message) from any other
+	// playback-url failure (a generic, transient-sounding one). See
+	// ARCHITECTURE.md §19.6.
 	if visible, err := a.Emby.IsItemVisible(r.Context(), token, user.ID, current.ItemID); err != nil {
 		a.handleEmbyErr(w, r.Context(), user.ID, err, "could not get a playback URL from Emby")
 		return
 	} else if !visible {
-		writeError(w, http.StatusBadGateway, "emby_error", "could not get a playback URL from Emby")
+		writeError(w, http.StatusForbidden, "access_denied", "your Emby account does not have access to this video")
 		return
 	}
 

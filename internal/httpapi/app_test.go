@@ -728,20 +728,96 @@ func setUpBypassTestParties(t *testing.T) (app *App, srv *httptest.Server, alice
 	return app, srv, alice, bob, restrictedParty, openParty
 }
 
+// TestGetParty_DeadEmbyTokenStillHardDeniesAndClearsSessions covers the one
+// case handleGetParty's rewrite deliberately keeps hard-denying rather than
+// falling through to the "Restricted item" placeholder: a genuinely dead
+// Emby credential (IsItemVisible's underlying call returns 401, mapped to
+// emby.ErrUnauthorized), as opposed to a merely-inaccessible item. No
+// placeholder can paper over a login that no longer works at all -- every
+// other Emby call this session makes would fail the same way -- so this
+// still returns 401/unauthorized and clears the user's Watch Party sessions,
+// exactly as handleGetParty did before this fix for any IsItemVisible error.
+// See ARCHITECTURE.md §19.6.
+func TestGetParty_DeadEmbyTokenStillHardDeniesAndClearsSessions(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/Users/AuthenticateByName", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"AccessToken": "alice-token",
+			"User":        map[string]string{"Id": "user-alice", "Name": "Alice"},
+		})
+	})
+	mux.HandleFunc("/Users/{userId}/Items/{itemId}", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"Id": "item1", "Name": "Movie", "RunTimeTicks": int64(1200000000)})
+	})
+	mux.HandleFunc("/Users/user-alice/Items", bulkItemsHandler(map[string]map[string]any{
+		"item1": {"Id": "item1", "Name": "Movie", "RunTimeTicks": int64(1200000000)},
+	}))
+	// Bob's own Emby credential is dead -- the listing endpoint IsItemVisible
+	// calls rejects it with a 401, mapped by the emby client to
+	// ErrUnauthorized, distinct from a merely-empty (but successful) items
+	// list.
+	mux.HandleFunc("/Users/user-bob/Items", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+	mux.HandleFunc("/Sessions/Playing", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) })
+	fakeEmbySrv := httptest.NewServer(mux)
+	t.Cleanup(fakeEmbySrv.Close)
+
+	app, srv := newTestAppWithEmby(t, emby.NewClient(fakeEmbySrv.URL))
+	alice := loginTestClient(t, srv)
+
+	bobToken, err := app.TokenCipher.Encrypt("bob-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Store.UpsertUser(context.Background(), "user-bob", "Bob", bobToken, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	bob := sessionClientForUser(t, app, srv, "user-bob")
+
+	partyID := createPartyWithCurrentItem(t, alice, "Movie Night", "item1")
+
+	resp, got := bob.do("GET", "/api/parties/"+partyID, nil, false)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("bob get party with dead Emby token: status = %d, want 401: %v", resp.StatusCode, got)
+	}
+	if got["error"] != "unauthorized" {
+		t.Errorf("bob get party with dead Emby token: error = %v, want \"unauthorized\"", got["error"])
+	}
+
+	// The session was deleted server-side, not just this one request denied
+	// -- confirmed by a follow-up request on the same (now-stale) session
+	// cookie coming back unauthenticated rather than merely re-denied for
+	// the same item-visibility reason.
+	if resp, _ := bob.do("GET", "/api/me", nil, false); resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("bob GET /api/me after dead-token denial: status = %d, want 401 (session should have been cleared)", resp.StatusCode)
+	}
+}
+
 // TestPlaybackURL_DeniesUserNotInEmbyLibraryListing_EvenWhenPlaybackInfoGrants
 // is the Issue #57 regression test for handlePlaybackURL: this is the
 // checkpoint that actually hands back a playable stream URL, and the one
 // the original bug report reproduced against. Without the IsItemVisible
 // gate, Bob would get a 200 with a real playback URL here, since the fake
-// PlaybackInfo grants unconditionally.
+// PlaybackInfo grants unconditionally. Also pins the specific status/code
+// (403/access_denied, see ARCHITECTURE.md §19.6) this checkpoint's clean
+// "not visible" answer returns, distinct from a genuine Emby-call failure
+// (which stays emby_error/502 via handleEmbyErr, untouched by this test).
 func TestPlaybackURL_DeniesUserNotInEmbyLibraryListing_EvenWhenPlaybackInfoGrants(t *testing.T) {
 	_, _, alice, bob, restrictedParty, openParty := setUpBypassTestParties(t)
 
 	if resp, got := alice.do("GET", "/api/parties/"+restrictedParty+"/playback-url", nil, false); resp.StatusCode != http.StatusOK {
 		t.Fatalf("alice restricted-item playback-url: status = %d body=%v", resp.StatusCode, got)
 	}
-	if resp, got := bob.do("GET", "/api/parties/"+restrictedParty+"/playback-url", nil, false); resp.StatusCode == http.StatusOK {
+	resp, got := bob.do("GET", "/api/parties/"+restrictedParty+"/playback-url", nil, false)
+	if resp.StatusCode == http.StatusOK {
 		t.Errorf("bob should be denied playback of the restricted item, got 200: %v", got)
+	}
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("bob restricted-item playback-url: status = %d, want 403", resp.StatusCode)
+	}
+	if got["error"] != "access_denied" {
+		t.Errorf("bob restricted-item playback-url: error = %v, want \"access_denied\"", got["error"])
 	}
 	// Fix must not over-restrict: Bob still gets a real playback URL for an
 	// item he genuinely has library access to.
@@ -750,52 +826,94 @@ func TestPlaybackURL_DeniesUserNotInEmbyLibraryListing_EvenWhenPlaybackInfoGrant
 	}
 }
 
-// TestGetParty_DeniesJoinWhenUserNotInEmbyLibraryListing is the Issue #57
-// regression test for handleGetParty's join-time gate.
-func TestGetParty_DeniesJoinWhenUserNotInEmbyLibraryListing(t *testing.T) {
+// TestGetParty_RestrictsItemTitleWhenUserNotInEmbyLibraryListing_StillAllowsJoin
+// supersedes the old TestGetParty_DeniesJoinWhenUserNotInEmbyLibraryListing:
+// per ARCHITECTURE.md §19.6, a participant who can't see the party's current
+// item must still get a fully functional party room (Attendees, Playlist,
+// Chat) -- only the video itself is gated, at handlePlaybackURL, not the
+// whole page load. handleGetParty now follows the same fail-closed
+// placeholder pattern handleGetPlaylist/handleListParties already used
+// (TestGetPlaylist_RestrictsRowWhenUserNotInEmbyLibraryListing,
+// TestListParties_ShowsPlaceholderWhenUserNotInEmbyLibraryListing) rather
+// than denying the whole request.
+func TestGetParty_RestrictsItemTitleWhenUserNotInEmbyLibraryListing_StillAllowsJoin(t *testing.T) {
 	_, _, alice, bob, restrictedParty, openParty := setUpBypassTestParties(t)
 
-	if resp, got := alice.do("GET", "/api/parties/"+restrictedParty, nil, false); resp.StatusCode != http.StatusOK {
-		t.Fatalf("alice get restricted party: status = %d body=%v", resp.StatusCode, got)
+	resp, aliceBody := alice.do("GET", "/api/parties/"+restrictedParty, nil, false)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("alice get restricted party: status = %d body=%v", resp.StatusCode, aliceBody)
 	}
-	if resp, got := bob.do("GET", "/api/parties/"+restrictedParty, nil, false); resp.StatusCode == http.StatusOK {
-		t.Errorf("bob should be denied join for the restricted item, got 200: %v", got)
+	if aliceBody["item_title"] != "Restricted Movie" || aliceBody["item_restricted"] == true {
+		t.Errorf("alice's restricted party body = %v, want real title and item_restricted=false/absent", aliceBody)
 	}
+
+	resp, bobBody := bob.do("GET", "/api/parties/"+restrictedParty, nil, false)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("bob should still be able to load the restricted party, got %d: %v", resp.StatusCode, bobBody)
+	}
+	if bobBody["item_title"] != "Restricted item" || bobBody["item_restricted"] != true {
+		t.Errorf("bob's restricted party body = %v, want item_title=\"Restricted item\" item_restricted=true", bobBody)
+	}
+
 	if resp, got := bob.do("GET", "/api/parties/"+openParty, nil, false); resp.StatusCode != http.StatusOK {
 		t.Fatalf("bob get open party: status = %d body=%v", resp.StatusCode, got)
 	}
 }
 
-// TestWebSocketJoin_DeniesUserNotInEmbyLibraryListing is the Issue #57
-// regression test for the WS upgrade handler's join-time gate -- the other
-// repro variant from the original bug report (join while the restricted
-// item is already current).
-func TestWebSocketJoin_DeniesUserNotInEmbyLibraryListing(t *testing.T) {
-	_, srv, _, bob, restrictedParty, openParty := setUpBypassTestParties(t)
+// TestGetParty_RestrictedPartyStillExposesPlaylistAndChatEndpoints asserts
+// this fix's actual purpose directly, not just each endpoint's individual
+// gate: a participant denied the current item still gets a fully
+// functional room -- the playlist and chat endpoints both work for them on
+// exactly the same restricted party, per ARCHITECTURE.md §19.6.
+func TestGetParty_RestrictedPartyStillExposesPlaylistAndChatEndpoints(t *testing.T) {
+	_, _, _, bob, restrictedParty, _ := setUpBypassTestParties(t)
 
-	wsURL := srv.URL + "/ws/parties/" + restrictedParty
-	req, _ := http.NewRequest("GET", wsURL, nil)
-	req.Header.Set("Origin", "http://test-origin.example")
-	req.Header.Set("Connection", "Upgrade")
-	req.Header.Set("Upgrade", "websocket")
-	req.Header.Set("Sec-WebSocket-Version", "13")
-	req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
-	for _, ck := range bob.http.Jar.Cookies(nil) {
-		req.AddCookie(ck)
+	if resp, got := bob.do("GET", "/api/parties/"+restrictedParty+"/playlist", nil, false); resp.StatusCode != http.StatusOK {
+		t.Fatalf("bob get restricted party's playlist: status = %d body=%v", resp.StatusCode, got)
 	}
-	resp, err := bob.http.Do(req)
+	if resp, got := bob.do("GET", "/api/parties/"+restrictedParty+"/chat", nil, false); resp.StatusCode != http.StatusOK {
+		t.Fatalf("bob get restricted party's chat history: status = %d body=%v", resp.StatusCode, got)
+	}
+}
+
+// TestWebSocketJoin_AllowsJoinAndChatWhenUserNotInEmbyLibraryListing
+// supersedes the old TestWebSocketJoin_DeniesUserNotInEmbyLibraryListing:
+// per ARCHITECTURE.md §19.6, the WS join gate no longer denies the
+// connection based on the party's current item -- media access is decided
+// solely at handlePlaybackURL now, not at join time. Bob must be able to
+// both connect to, and chat in, a party whose current item he has no Emby
+// library access to.
+func TestWebSocketJoin_AllowsJoinAndChatWhenUserNotInEmbyLibraryListing(t *testing.T) {
+	_, srv, alice, bob, restrictedParty, _ := setUpBypassTestParties(t)
+
+	aliceConn := dialPartyWS(t, srv, alice, restrictedParty)
+	readUntilType(t, aliceConn, wsproto.MsgSnapshot, 2*time.Second)
+
+	bobConn := dialPartyWS(t, srv, bob, restrictedParty)
+	readUntilType(t, bobConn, wsproto.MsgSnapshot, 2*time.Second)
+
+	sendPayload, err := json.Marshal(wsproto.ChatSendPayload{Body: "hi from a denied viewer"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Errorf("status = %d, want 403 when bob has no Emby library access to the current item", resp.StatusCode)
+	writeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := wsjson.Write(writeCtx, bobConn, wsproto.Envelope{
+		ProtocolVersion: wsproto.ProtocolVersion, Type: wsproto.MsgChatSend, Payload: sendPayload,
+	}); err != nil {
+		t.Fatalf("bob write chat_send: %v", err)
 	}
 
-	// Fix must not over-restrict: Bob can still join a party whose current
-	// item he genuinely has access to.
-	conn := dialPartyWS(t, srv, bob, openParty)
-	conn.Close(websocket.StatusNormalClosure, "")
+	for name, conn := range map[string]*websocket.Conn{"alice (other member)": aliceConn, "bob (sender, denied the current item)": bobConn} {
+		env := readUntilType(t, conn, wsproto.MsgChatMessage, 3*time.Second)
+		var msg wsproto.ChatMessagePayload
+		if err := json.Unmarshal(env.Payload, &msg); err != nil {
+			t.Fatalf("%s: decode chat_message payload: %v", name, err)
+		}
+		if msg.UserID != "user-bob" || msg.Body != "hi from a denied viewer" {
+			t.Errorf("%s: chat_message = %+v, want from user-bob with the sent body", name, msg)
+		}
+	}
 }
 
 // TestGetPlaylist_RestrictsRowWhenUserNotInEmbyLibraryListing is the Issue
