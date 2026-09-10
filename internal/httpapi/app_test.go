@@ -501,6 +501,16 @@ func TestPlaybackURL_StartsAtPartysCurrentPosition(t *testing.T) {
 // host) is denied Emby access to the new item; Bob, who joined earlier and
 // has separate access, must be unaffected.
 func TestPlaybackURL_ReAuthorizedPerCurrentItem(t *testing.T) {
+	// aliceCanSeeItem2 models access being revoked (parental control,
+	// per-user library restriction, etc.) between the time Alice adds
+	// item2 to the playlist (when she could still see it, so the batch-add
+	// endpoint's own Emby.GetItems visibility check passes) and the time
+	// it becomes current (when she's since lost access). Flipped to false
+	// by the test itself after the add+select steps, before asserting the
+	// denial -- see below.
+	var aliceCanSeeItem2 atomic.Bool
+	aliceCanSeeItem2.Store(true)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/Users/AuthenticateByName", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
@@ -514,7 +524,16 @@ func TestPlaybackURL_ReAuthorizedPerCurrentItem(t *testing.T) {
 	mux.HandleFunc("/Users/user-alice/Items/item2", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{"Id": "item2", "Name": "Show", "RunTimeTicks": int64(600000000)})
 	})
-	mux.HandleFunc("/Users/user-alice/Items", bulkItemsHandler(map[string]map[string]any{
+	mux.HandleFunc("/Users/user-alice/Items", func(w http.ResponseWriter, r *http.Request) {
+		items := map[string]map[string]any{
+			"item1": {"Id": "item1", "Name": "Movie", "RunTimeTicks": int64(1200000000)},
+		}
+		if aliceCanSeeItem2.Load() {
+			items["item2"] = map[string]any{"Id": "item2", "Name": "Show", "RunTimeTicks": int64(600000000)}
+		}
+		bulkItemsHandler(items)(w, r)
+	})
+	mux.HandleFunc("/Users/user-bob/Items", bulkItemsHandler(map[string]map[string]any{
 		"item1": {"Id": "item1", "Name": "Movie", "RunTimeTicks": int64(1200000000)},
 		"item2": {"Id": "item2", "Name": "Show", "RunTimeTicks": int64(600000000)},
 	}))
@@ -578,6 +597,10 @@ func TestPlaybackURL_ReAuthorizedPerCurrentItem(t *testing.T) {
 		t.Fatalf("select item2: status = %d body=%v", respPlay.StatusCode, playBody)
 	}
 
+	// Access revoked between add-time and now -- see aliceCanSeeItem2's doc
+	// comment above.
+	aliceCanSeeItem2.Store(false)
+
 	// Alice is now denied for the new current item...
 	if resp, got := alice.do("GET", "/api/parties/"+partyID+"/playback-url", nil, false); resp.StatusCode == http.StatusOK {
 		t.Errorf("alice should be denied playback of item2, got 200: %v", got)
@@ -585,6 +608,269 @@ func TestPlaybackURL_ReAuthorizedPerCurrentItem(t *testing.T) {
 	// ...but Bob, who has separate access, still gets a real playback URL.
 	if resp, got := bob.do("GET", "/api/parties/"+partyID+"/playback-url", nil, false); resp.StatusCode != http.StatusOK {
 		t.Fatalf("bob item2 playback-url: status = %d body=%v", resp.StatusCode, got)
+	}
+}
+
+// --- Issue #57: Emby library-access bypass regression tests ---
+//
+// The fake Emby server below deliberately reproduces the exact shape
+// confirmed live against a real Emby server (see ARCHITECTURE.md's dated
+// entry on the Emby library-access bypass): GetItem and PlaybackInfo grant
+// unconditionally to any authenticated user regardless of that user's own
+// library access, while the bulk listing endpoint
+// (GET /Users/{userId}/Items?Ids=...) correctly omits an item the requesting
+// user has no access to. This is unlike TestPlaybackURL_ReAuthorizedPerCurrentItem's
+// fake server above, which encodes the *assumption* that Emby denies the
+// wrong user directly via PlaybackInfo -- exactly the assumption that
+// turned out to be false. Each test below fails without the IsItemVisible
+// gate at its checkpoint and passes with it.
+
+const (
+	bypassItemRestricted = "item-restricted-gate"
+	bypassItemOpen       = "item-open-gate"
+)
+
+// newBypassFakeEmby returns a fake Emby server shaped exactly like the
+// confirmed real bug: GetItem/PlaybackInfo grant any authenticated user
+// access to any item regardless of that user's own library grants; only the
+// bulk listing endpoint filters correctly, and only for user-bob does it
+// omit bypassItemRestricted.
+func newBypassFakeEmby(t *testing.T) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/Users/AuthenticateByName", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"AccessToken": "alice-token",
+			"User":        map[string]string{"Id": "user-alice", "Name": "Alice"},
+		})
+	})
+	// GetItem: grants unconditionally, matching the confirmed real bug --
+	// no check of which userId/token is asking.
+	mux.HandleFunc("/Users/{userId}/Items/{itemId}", func(w http.ResponseWriter, r *http.Request) {
+		switch r.PathValue("itemId") {
+		case bypassItemRestricted:
+			json.NewEncoder(w).Encode(map[string]any{"Id": bypassItemRestricted, "Name": "Restricted Movie", "RunTimeTicks": int64(1200000000)})
+		case bypassItemOpen:
+			json.NewEncoder(w).Encode(map[string]any{"Id": bypassItemOpen, "Name": "Open Movie", "RunTimeTicks": int64(600000000)})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	// PlaybackInfo: also grants unconditionally, matching the confirmed
+	// real bug -- this is the call that actually builds a playable stream.
+	mux.HandleFunc("/Items/{itemId}/PlaybackInfo", func(w http.ResponseWriter, r *http.Request) {
+		itemID := r.PathValue("itemId")
+		json.NewEncoder(w).Encode(map[string]any{
+			"PlaySessionId": "sess-" + itemID,
+			"MediaSources":  []map[string]any{{"Id": "src-" + itemID, "Container": "mp4", "SupportsDirectStream": true}},
+		})
+	})
+	// Bulk listing: the one endpoint confirmed to filter correctly. Alice
+	// can see both items; Bob can see only the open one.
+	mux.HandleFunc("/Users/user-alice/Items", bulkItemsHandler(map[string]map[string]any{
+		bypassItemRestricted: {"Id": bypassItemRestricted, "Name": "Restricted Movie", "RunTimeTicks": int64(1200000000)},
+		bypassItemOpen:       {"Id": bypassItemOpen, "Name": "Open Movie", "RunTimeTicks": int64(600000000)},
+	}))
+	mux.HandleFunc("/Users/user-bob/Items", bulkItemsHandler(map[string]map[string]any{
+		bypassItemOpen: {"Id": bypassItemOpen, "Name": "Open Movie", "RunTimeTicks": int64(600000000)},
+	}))
+	mux.HandleFunc("/Sessions/Playing", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) })
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// sessionClientForUser creates a real session directly for an existing user
+// (bypassing Emby login) and returns a testClient authenticated as them --
+// for a second test user without a second AuthenticateByName branch.
+// Mirrors the manual session-creation pattern
+// TestPlaybackURL_ReAuthorizedPerCurrentItem established for Bob above.
+func sessionClientForUser(t *testing.T, app *App, srv *httptest.Server, userID string) *testClient {
+	t.Helper()
+	c := newTestClientFor(t, srv)
+	rec := httptest.NewRecorder()
+	fakeReq := httptest.NewRequest("POST", "/", nil)
+	sess, err := app.Sessions.Create(context.Background(), rec, fakeReq, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ck := range rec.Result().Cookies() {
+		c.http.Jar.SetCookies(nil, []*http.Cookie{ck})
+	}
+	c.csrfToken = sess.CSRFToken
+	return c
+}
+
+// setUpBypassTestParties wires up newBypassFakeEmby, logs in Alice (host,
+// full library access) and Bob (denied library access to
+// bypassItemRestricted but genuinely able to see bypassItemOpen), and
+// returns two active parties: restrictedParty's current item is
+// bypassItemRestricted, openParty's is bypassItemOpen -- the latter exists
+// so each test below can also assert the fix doesn't over-restrict Bob's
+// genuine access.
+func setUpBypassTestParties(t *testing.T) (app *App, srv *httptest.Server, alice, bob *testClient, restrictedParty, openParty string) {
+	t.Helper()
+	fakeEmbySrv := newBypassFakeEmby(t)
+	app, srv = newTestAppWithEmby(t, emby.NewClient(fakeEmbySrv.URL))
+	alice = loginTestClient(t, srv)
+
+	bobToken, err := app.TokenCipher.Encrypt("bob-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Store.UpsertUser(context.Background(), "user-bob", "Bob", bobToken, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	bob = sessionClientForUser(t, app, srv, "user-bob")
+
+	restrictedParty = createPartyWithCurrentItem(t, alice, "Restricted Party", bypassItemRestricted)
+	openParty = createPartyWithCurrentItem(t, alice, "Open Party", bypassItemOpen)
+	return app, srv, alice, bob, restrictedParty, openParty
+}
+
+// TestPlaybackURL_DeniesUserNotInEmbyLibraryListing_EvenWhenPlaybackInfoGrants
+// is the Issue #57 regression test for handlePlaybackURL: this is the
+// checkpoint that actually hands back a playable stream URL, and the one
+// the original bug report reproduced against. Without the IsItemVisible
+// gate, Bob would get a 200 with a real playback URL here, since the fake
+// PlaybackInfo grants unconditionally.
+func TestPlaybackURL_DeniesUserNotInEmbyLibraryListing_EvenWhenPlaybackInfoGrants(t *testing.T) {
+	_, _, alice, bob, restrictedParty, openParty := setUpBypassTestParties(t)
+
+	if resp, got := alice.do("GET", "/api/parties/"+restrictedParty+"/playback-url", nil, false); resp.StatusCode != http.StatusOK {
+		t.Fatalf("alice restricted-item playback-url: status = %d body=%v", resp.StatusCode, got)
+	}
+	if resp, got := bob.do("GET", "/api/parties/"+restrictedParty+"/playback-url", nil, false); resp.StatusCode == http.StatusOK {
+		t.Errorf("bob should be denied playback of the restricted item, got 200: %v", got)
+	}
+	// Fix must not over-restrict: Bob still gets a real playback URL for an
+	// item he genuinely has library access to.
+	if resp, got := bob.do("GET", "/api/parties/"+openParty+"/playback-url", nil, false); resp.StatusCode != http.StatusOK {
+		t.Fatalf("bob open-item playback-url: status = %d body=%v", resp.StatusCode, got)
+	}
+}
+
+// TestGetParty_DeniesJoinWhenUserNotInEmbyLibraryListing is the Issue #57
+// regression test for handleGetParty's join-time gate.
+func TestGetParty_DeniesJoinWhenUserNotInEmbyLibraryListing(t *testing.T) {
+	_, _, alice, bob, restrictedParty, openParty := setUpBypassTestParties(t)
+
+	if resp, got := alice.do("GET", "/api/parties/"+restrictedParty, nil, false); resp.StatusCode != http.StatusOK {
+		t.Fatalf("alice get restricted party: status = %d body=%v", resp.StatusCode, got)
+	}
+	if resp, got := bob.do("GET", "/api/parties/"+restrictedParty, nil, false); resp.StatusCode == http.StatusOK {
+		t.Errorf("bob should be denied join for the restricted item, got 200: %v", got)
+	}
+	if resp, got := bob.do("GET", "/api/parties/"+openParty, nil, false); resp.StatusCode != http.StatusOK {
+		t.Fatalf("bob get open party: status = %d body=%v", resp.StatusCode, got)
+	}
+}
+
+// TestWebSocketJoin_DeniesUserNotInEmbyLibraryListing is the Issue #57
+// regression test for the WS upgrade handler's join-time gate -- the other
+// repro variant from the original bug report (join while the restricted
+// item is already current).
+func TestWebSocketJoin_DeniesUserNotInEmbyLibraryListing(t *testing.T) {
+	_, srv, _, bob, restrictedParty, openParty := setUpBypassTestParties(t)
+
+	wsURL := srv.URL + "/ws/parties/" + restrictedParty
+	req, _ := http.NewRequest("GET", wsURL, nil)
+	req.Header.Set("Origin", "http://test-origin.example")
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Sec-WebSocket-Version", "13")
+	req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	for _, ck := range bob.http.Jar.Cookies(nil) {
+		req.AddCookie(ck)
+	}
+	resp, err := bob.http.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want 403 when bob has no Emby library access to the current item", resp.StatusCode)
+	}
+
+	// Fix must not over-restrict: Bob can still join a party whose current
+	// item he genuinely has access to.
+	conn := dialPartyWS(t, srv, bob, openParty)
+	conn.Close(websocket.StatusNormalClosure, "")
+}
+
+// TestGetPlaylist_RestrictsRowWhenUserNotInEmbyLibraryListing is the Issue
+// #57 regression test for handleGetPlaylist (§1c): without the
+// IsItemVisible gate, Bob's playlist row would show the real title/poster
+// for the restricted item instead of the "Restricted item" placeholder.
+func TestGetPlaylist_RestrictsRowWhenUserNotInEmbyLibraryListing(t *testing.T) {
+	_, _, alice, bob, restrictedParty, _ := setUpBypassTestParties(t)
+
+	_, aliceBody := alice.do("GET", "/api/parties/"+restrictedParty+"/playlist", nil, false)
+	aliceItems, _ := aliceBody["items"].([]any)
+	if len(aliceItems) != 1 {
+		t.Fatalf("alice playlist items = %v, want 1", aliceBody)
+	}
+	aliceRow := aliceItems[0].(map[string]any)
+	if aliceRow["title"] != "Restricted Movie" || aliceRow["restricted"] == true {
+		t.Errorf("alice's playlist row = %v, want real title and restricted=false/absent", aliceRow)
+	}
+
+	_, bobBody := bob.do("GET", "/api/parties/"+restrictedParty+"/playlist", nil, false)
+	bobItems, _ := bobBody["items"].([]any)
+	if len(bobItems) != 1 {
+		t.Fatalf("bob playlist items = %v, want 1", bobBody)
+	}
+	bobRow := bobItems[0].(map[string]any)
+	if bobRow["title"] != "Restricted item" || bobRow["restricted"] != true {
+		t.Errorf("bob's playlist row = %v, want title=\"Restricted item\" restricted=true", bobRow)
+	}
+	if bobRow["poster_url"] != nil || bobRow["series_name"] != nil {
+		t.Errorf("bob's playlist row leaked metadata it shouldn't have: %v", bobRow)
+	}
+}
+
+// TestListParties_ShowsPlaceholderWhenUserNotInEmbyLibraryListing is the
+// Issue #57 regression test for handleListParties (§1d): without the
+// IsItemVisible gate, Bob's Home page would show the real current-item
+// title for the restricted party instead of the "Restricted item"
+// placeholder, even though he's never joined it.
+func TestListParties_ShowsPlaceholderWhenUserNotInEmbyLibraryListing(t *testing.T) {
+	_, _, alice, bob, restrictedParty, openParty := setUpBypassTestParties(t)
+
+	_, bobBody := bob.do("GET", "/api/parties", nil, false)
+	bobParties, _ := bobBody["parties"].([]any)
+	var bobRestrictedTitle, bobOpenTitle any
+	found := 0
+	for _, p := range bobParties {
+		row := p.(map[string]any)
+		switch row["party_id"] {
+		case restrictedParty:
+			bobRestrictedTitle = row["item_title"]
+			found++
+		case openParty:
+			bobOpenTitle = row["item_title"]
+			found++
+		}
+	}
+	if found != 2 {
+		t.Fatalf("expected both parties in bob's listing, got %d matches: %v", found, bobParties)
+	}
+	if bobRestrictedTitle != "Restricted item" {
+		t.Errorf("bob's restricted-party item_title = %v, want \"Restricted item\"", bobRestrictedTitle)
+	}
+	// Fix must not over-restrict: Bob still sees the real title for a party
+	// whose current item he genuinely has access to.
+	if bobOpenTitle != "Open Movie" {
+		t.Errorf("bob's open-party item_title = %v, want real title \"Open Movie\"", bobOpenTitle)
+	}
+
+	_, aliceBody := alice.do("GET", "/api/parties", nil, false)
+	aliceParties, _ := aliceBody["parties"].([]any)
+	for _, p := range aliceParties {
+		row := p.(map[string]any)
+		if row["party_id"] == restrictedParty && row["item_title"] != "Restricted Movie" {
+			t.Errorf("alice's restricted-party item_title = %v, want real title \"Restricted Movie\"", row["item_title"])
+		}
 	}
 }
 

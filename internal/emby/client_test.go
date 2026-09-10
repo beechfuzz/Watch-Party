@@ -587,6 +587,65 @@ func TestGetItems_CommaJoinedIdsAndPartialResponse(t *testing.T) {
 	}
 }
 
+func TestIsItemVisible_ItemPresentInResponse_True(t *testing.T) {
+	var gotPath, gotIds string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotIds = r.URL.Query().Get("Ids")
+		json.NewEncoder(w).Encode(map[string]any{
+			"Items": []map[string]any{{"Id": "item-1", "Name": "Movie"}},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	visible, err := c.IsItemVisible(context.Background(), "tok", "user-1", "item-1")
+	if err != nil {
+		t.Fatalf("IsItemVisible: %v", err)
+	}
+	if !visible {
+		t.Error("visible = false, want true when the item is present in the listing response")
+	}
+	if gotPath != "/Users/user-1/Items" {
+		t.Errorf("path = %q", gotPath)
+	}
+	if gotIds != "item-1" {
+		t.Errorf("Ids query param = %q", gotIds)
+	}
+}
+
+// This is the exact shape confirmed live against a real Emby server for a
+// user with no library access to the item: HTTP 200, with the item simply
+// omitted from Items rather than an error — see ARCHITECTURE.md's dated
+// entry on the Emby library-access bypass.
+func TestIsItemVisible_ItemOmittedFromResponse_False(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"Items": []map[string]any{}})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	visible, err := c.IsItemVisible(context.Background(), "tok", "user-1", "item-1")
+	if err != nil {
+		t.Fatalf("IsItemVisible: %v", err)
+	}
+	if visible {
+		t.Error("visible = true, want false when the item is omitted from the listing response")
+	}
+}
+
+func TestIsItemVisible_EmbyError_PropagatesError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	if _, err := c.IsItemVisible(context.Background(), "tok", "user-1", "item-1"); err == nil {
+		t.Error("IsItemVisible: want error on non-2xx response, got nil")
+	}
+}
+
 func TestGetItem_ParsesRunTimeTicks(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/Users/user-1/Items/item7" {
