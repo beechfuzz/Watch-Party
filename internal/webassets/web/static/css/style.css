@@ -508,6 +508,9 @@ body.wizard-advanced-on .setup-card--wizard .field[data-advanced-field] { displa
 .sign-out-btn:hover { color: var(--text-secondary); background: var(--bg-panel); }
 .sign-out-btn svg { width: 15px; height: 15px; }
 
+#sidebar-logout-error { margin: -4px 18px 12px; }
+.sidebar.is-collapsed #sidebar-logout-error { display: none; }
+
 /* ---- collapsed left sidebar: icon-only rail ---- */
 .sidebar.is-collapsed { width: var(--sidebar-w-collapsed); }
 .sidebar.is-collapsed .sidebar-top { flex-direction: column; gap: 10px; padding: 18px 10px 20px; }
