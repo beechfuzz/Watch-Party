@@ -12,11 +12,13 @@
 // cycle with no reload in between).
 //
 // onBeforeNavigate, when supplied, is awaited before following a sidebar
-// link or signing out -- this is what makes "navigate away from a party
-// via the sidebar" register as an explicit leave rather than a silent
-// disconnect. The dashboard has nothing to leave, so app.js calls
-// initSidebar without it and a sidebar click just behaves like a normal
-// link/logout.
+// link, and before signing out *if* the sign-out attempt is actually going
+// to navigate away (see the logout click handler below for why that's
+// conditional, not unconditional, for sign-out specifically) -- this is
+// what makes "navigate away from a party via the sidebar" register as an
+// explicit leave rather than a silent disconnect. The dashboard has nothing
+// to leave, so app.js calls initSidebar without it and a sidebar click just
+// behaves like a normal link/logout.
 //
 // This module also owns the sidebar's collapsed/expanded (icon-only rail)
 // toggle -- pure load/serialize logic lives in sidebar-collapse.js, unit
@@ -43,6 +45,7 @@ export function initSidebar({ onBeforeNavigate, onLoggedOut } = {}) {
   const avatarInitial = document.getElementById("user-avatar-initial");
   const userName = document.getElementById("user-name");
   const logoutBtn = document.getElementById("logout-btn");
+  const logoutError = document.getElementById("sidebar-logout-error");
   const sidebarEl = document.querySelector(".sidebar");
   const collapseToggleBtn = document.getElementById("sidebar-collapse-toggle");
 
@@ -63,14 +66,55 @@ export function initSidebar({ onBeforeNavigate, onLoggedOut } = {}) {
     });
   }
 
+  // A failed logout must not be treated as a successful one (Issue #54):
+  // POST /api/auth/logout can fail three ways -- a network error (fetch()
+  // itself rejects, err.status undefined), a 403 csrf_mismatch (the session
+  // is very likely still alive; withCSRF rejected this one request), or a
+  // 401 (withAuth already found no valid session at all). Only the 401 case
+  // is one where the server has *confirmed* the outcome we're about to
+  // display -- for the other two, the session may well still be valid, so
+  // navigating to "/" would just silently re-render the still-authenticated
+  // dashboard/party page, exactly the bug this branch exists to avoid.
+  //
+  // onBeforeNavigate (party-page leave-before-you-disconnect, see
+  // player.js) only runs once we've decided we ARE navigating -- not
+  // unconditionally up front -- so a 403/network failure leaves party
+  // membership and the WebSocket connection completely untouched: nothing
+  // to reconcile, and a retry click is just the same attempt again from a
+  // clean start. clearCSRFToken() is gated the same way, for the same
+  // reason: on a 403/network failure the token in sessionStorage may still
+  // be exactly what the session needs, and clearing it anyway would 403 the
+  // user's very next unrelated request with no indication why.
   logoutBtn.addEventListener("click", async () => {
-    if (onBeforeNavigate) await onBeforeNavigate();
+    logoutError.hidden = true;
+    let err = null;
     try {
       await api("/api/auth/logout", { method: "POST" });
-    } finally {
+    } catch (e) {
+      err = e;
+    }
+    if (!err || err.status === 401) {
+      if (onBeforeNavigate) await onBeforeNavigate();
       clearCSRFToken();
       if (onLoggedOut) onLoggedOut();
+      return;
     }
+    // The collapsed (icon-only) rail hides .user-text entirely and has no
+    // room for a message -- silently suppressing the error there would be
+    // exactly the kind of silent failure this fix exists to avoid, just
+    // relocated to one layout state instead of eliminated. Force the rail
+    // open so the error is actually seen, without touching the visitor's
+    // *stored* collapse preference (COLLAPSE_STORAGE_KEY) -- this is a
+    // one-time, transient disclosure, not a permanent layout change; a
+    // later page load still honors whatever they had collapsed to before.
+    if (collapsed) {
+      collapsed = false;
+      applyCollapsedState(sidebarEl, collapseToggleBtn, collapsed);
+    }
+    logoutError.textContent = err.status === undefined
+      ? "Couldn't reach the server — check your connection and try again."
+      : err.message;
+    logoutError.hidden = false;
   });
 
   return {
