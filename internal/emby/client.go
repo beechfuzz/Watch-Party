@@ -476,6 +476,37 @@ func (c *Client) GetItems(ctx context.Context, accessToken, userID string, itemI
 	return out, nil
 }
 
+// IsItemVisible answers "does this user's own library access actually
+// include this item" using GET /Users/{userId}/Items?Ids={itemId} — the
+// query/listing endpoint confirmed (live, against a real Emby server) to
+// correctly omit an item the requesting user has no library access to. This
+// exists because the direct-by-ID endpoints (GetItem, and PlaybackInfo's
+// underlying call) were confirmed NOT to enforce that same per-user library
+// ACL — see ARCHITECTURE.md's dated entry on the Emby library-access bypass
+// for the live verification this is based on. Every authorization
+// checkpoint in this package's callers must gate on this before trusting a
+// GetItem/PlaybackInfo response, rather than trusting those direct-by-ID
+// calls as the authorization decision.
+func (c *Client) IsItemVisible(ctx context.Context, accessToken, userID, itemID string) (bool, error) {
+	vals := url.Values{}
+	vals.Set("Ids", itemID)
+	u := fmt.Sprintf("%s/Users/%s/Items?%s", c.baseURL, url.PathEscape(userID), vals.Encode())
+	var parsed struct {
+		Items []struct {
+			ID string `json:"Id"`
+		} `json:"Items"`
+	}
+	if err := c.getJSON(ctx, u, accessToken, &parsed); err != nil {
+		return false, err
+	}
+	for _, it := range parsed.Items {
+		if it.ID == itemID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // ImageURL builds a browser-fetchable poster URL for itemID, using the same
 // query-param api_key auth as the constructed playback URL (an <img> tag
 // can't set custom headers either) — see GetPlaybackURL and

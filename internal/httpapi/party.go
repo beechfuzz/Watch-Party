@@ -101,8 +101,20 @@ func (a *App) handleListParties(w http.ResponseWriter, r *http.Request) {
 
 		itemTitle := ""
 		if snap.ItemID != "" {
-			if item, err := a.Emby.GetItem(r.Context(), token, user.ID, snap.ItemID); err == nil {
-				itemTitle = item.Name
+			// GetItem alone is not a trustworthy authorization decision —
+			// Emby's direct-by-item-ID endpoints don't enforce per-user
+			// library access control the way its query/listing endpoints
+			// do (confirmed live against a real Emby server — see
+			// ARCHITECTURE.md's dated entry on the Emby library-access
+			// bypass). Gate on IsItemVisible first so a denied viewer's
+			// Home page can't leak the real title of an item outside their
+			// own Emby grants.
+			if visible, err := a.Emby.IsItemVisible(r.Context(), token, user.ID, snap.ItemID); err == nil && visible {
+				if item, err := a.Emby.GetItem(r.Context(), token, user.ID, snap.ItemID); err == nil {
+					itemTitle = item.Name
+				} else {
+					itemTitle = "Restricted item"
+				}
 			} else {
 				itemTitle = "Restricted item"
 			}
@@ -259,6 +271,18 @@ func (a *App) handleGetParty(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
 			return
 		}
+		// GetItem alone is not a trustworthy authorization decision — Emby's
+		// direct-by-item-ID endpoints don't enforce per-user library access
+		// control the way its query/listing endpoints do (confirmed live
+		// against a real Emby server — see ARCHITECTURE.md's dated entry on
+		// the Emby library-access bypass). Gate on IsItemVisible first.
+		if visible, err := a.Emby.IsItemVisible(r.Context(), token, user.ID, snap.ItemID); err != nil {
+			a.handleEmbyErr(w, r.Context(), user.ID, err, "you do not have access to this media item")
+			return
+		} else if !visible {
+			writeError(w, http.StatusBadGateway, "emby_error", "you do not have access to this media item")
+			return
+		}
 		item, err := a.Emby.GetItem(r.Context(), token, user.ID, snap.ItemID)
 		if err != nil {
 			a.handleEmbyErr(w, r.Context(), user.ID, err, "you do not have access to this media item")
@@ -322,6 +346,22 @@ func (a *App) handlePlaybackURL(w http.ResponseWriter, r *http.Request) {
 	token, err := a.TokenCipher.Decrypt(user.EncryptedAccessToken)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
+		return
+	}
+
+	// PlaybackInfo alone is not a trustworthy authorization decision — Emby's
+	// direct-by-item-ID endpoints (including PlaybackInfo) don't enforce
+	// per-user library access control the way its query/listing endpoints
+	// do (confirmed live against a real Emby server: PlaybackInfo returned
+	// a valid, playable MediaSources entry for a user with no library
+	// access to the item — see ARCHITECTURE.md's dated entry on the Emby
+	// library-access bypass). Gate on IsItemVisible first, before ever
+	// calling PlaybackInfo.
+	if visible, err := a.Emby.IsItemVisible(r.Context(), token, user.ID, current.ItemID); err != nil {
+		a.handleEmbyErr(w, r.Context(), user.ID, err, "could not get a playback URL from Emby")
+		return
+	} else if !visible {
+		writeError(w, http.StatusBadGateway, "emby_error", "could not get a playback URL from Emby")
 		return
 	}
 
@@ -488,16 +528,25 @@ func (a *App) handleGetPlaylist(w http.ResponseWriter, r *http.Request) {
 			Position: it.Position, AddedByUserID: it.AddedByUserID,
 			IsCurrent: row.CurrentPlaylistItemID != nil && *row.CurrentPlaylistItemID == it.ID,
 		}
-		if embyItem, err := a.Emby.GetItem(r.Context(), token, user.ID, it.ItemID); err == nil {
-			view.Title = embyItem.Name
-			view.PosterURL = a.Emby.ImageURL(it.ItemID, token)
-			view.ItemType = embyItem.Type
-			view.SeriesName = embyItem.SeriesName
-			view.SeasonNumber = embyItem.SeasonNumber
-			view.EpisodeNumber = embyItem.EpisodeNumber
-		} else {
-			view.Restricted = true
-			view.Title = "Restricted item"
+		// GetItem alone is not a trustworthy authorization decision — Emby's
+		// direct-by-item-ID endpoints don't enforce per-user library access
+		// control the way its query/listing endpoints do (confirmed live
+		// against a real Emby server — see ARCHITECTURE.md's dated entry on
+		// the Emby library-access bypass). Gate on IsItemVisible first, so a
+		// denied viewer can't learn a restricted item's real title/poster
+		// through the playlist listing either.
+		view.Restricted = true
+		view.Title = "Restricted item"
+		if visible, err := a.Emby.IsItemVisible(r.Context(), token, user.ID, it.ItemID); err == nil && visible {
+			if embyItem, err := a.Emby.GetItem(r.Context(), token, user.ID, it.ItemID); err == nil {
+				view.Restricted = false
+				view.Title = embyItem.Name
+				view.PosterURL = a.Emby.ImageURL(it.ItemID, token)
+				view.ItemType = embyItem.Type
+				view.SeriesName = embyItem.SeriesName
+				view.SeasonNumber = embyItem.SeasonNumber
+				view.EpisodeNumber = embyItem.EpisodeNumber
+			}
 		}
 		out = append(out, view)
 	}

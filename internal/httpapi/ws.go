@@ -131,6 +131,23 @@ func (a *App) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
+		// GetItem alone is not a trustworthy authorization decision: Emby's
+		// direct-by-item-ID endpoints do not enforce per-user library
+		// access control the way its query/listing endpoints do (confirmed
+		// live against a real Emby server — see ARCHITECTURE.md's dated
+		// entry on the Emby library-access bypass). IsItemVisible checks
+		// the listing endpoint first and denies before GetItem is even
+		// asked.
+		if visible, err := a.Emby.IsItemVisible(r.Context(), token, user.ID, currentItemID); err != nil {
+			if errors.Is(err, emby.ErrUnauthorized) {
+				_ = a.Store.DeleteSessionsForUser(r.Context(), user.ID)
+			}
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		} else if !visible {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		if _, err := a.Emby.GetItem(r.Context(), token, user.ID, currentItemID); err != nil {
 			if errors.Is(err, emby.ErrUnauthorized) {
 				_ = a.Store.DeleteSessionsForUser(r.Context(), user.ID)
