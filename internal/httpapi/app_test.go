@@ -186,6 +186,7 @@ func (c *testClient) do(method, path string, body any, csrf bool) (*http.Respons
 		c.t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://test-origin.example") // matches newTestAppWithEmby's AppOrigins
 	if csrf {
 		req.Header.Set("X-CSRF-Token", c.csrfToken)
 	}
@@ -269,6 +270,77 @@ func TestLogin_WrongPassword(t *testing.T) {
 	resp, body := c.do("POST", "/api/auth/login", map[string]string{"username": "alice", "password": "wrong"}, false)
 	if resp.StatusCode != 401 {
 		t.Fatalf("status = %d, body = %v", resp.StatusCode, body)
+	}
+}
+
+// loginRequestManual builds a POST /api/auth/login request by hand rather
+// than via c.do, since c.do always sets both a matching Origin and
+// Content-Type: application/json -- these tests each need to deliberately
+// omit or vary exactly one of those headers. Mirrors the manual-request
+// pattern TestWebSocket_OriginRejected already establishes for the
+// WebSocket upgrade path's own Origin rejection.
+func loginRequestManual(t *testing.T, srv *httptest.Server, contentType, origin string) *http.Response {
+	t.Helper()
+	body := strings.NewReader(`{"username":"alice","password":"hunter2"}`)
+	req, err := http.NewRequest("POST", srv.URL+"/api/auth/login", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	if origin != "" {
+		req.Header.Set("Origin", origin)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	return resp
+}
+
+// TestLogin_RejectsNonJSONContentType guards the 415 half of Issue #52's
+// login-CSRF remediation: a plain cross-site HTML form can't set an
+// arbitrary Content-Type like application/json, so rejecting anything else
+// closes that forgery vector even before the Origin check runs.
+func TestLogin_RejectsNonJSONContentType(t *testing.T) {
+	_, srv := newTestApp(t)
+	resp := loginRequestManual(t, srv, "application/x-www-form-urlencoded", "http://test-origin.example")
+	if resp.StatusCode != http.StatusUnsupportedMediaType {
+		t.Errorf("status = %d, want 415 for a non-JSON Content-Type", resp.StatusCode)
+	}
+}
+
+// TestLogin_AcceptsJSONWithCharsetParam guards against mime.ParseMediaType
+// misuse: a raw string comparison against "application/json" would wrongly
+// reject a legitimate "application/json; charset=utf-8" Content-Type.
+func TestLogin_AcceptsJSONWithCharsetParam(t *testing.T) {
+	_, srv := newTestApp(t)
+	resp := loginRequestManual(t, srv, "application/json; charset=utf-8", "http://test-origin.example")
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200 for application/json with a charset param", resp.StatusCode)
+	}
+}
+
+// TestLogin_RejectsMissingOrigin guards the fail-closed half of Issue #52's
+// remediation: no Origin header at all must be rejected, not treated as
+// same-origin -- there is deliberately no Referer fallback.
+func TestLogin_RejectsMissingOrigin(t *testing.T) {
+	_, srv := newTestApp(t)
+	resp := loginRequestManual(t, srv, "application/json", "")
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want 403 for a missing Origin", resp.StatusCode)
+	}
+}
+
+// TestLogin_RejectsDisallowedOrigin guards the actual CSRF fix: a
+// cross-site Origin not present in AppOrigins must be rejected.
+func TestLogin_RejectsDisallowedOrigin(t *testing.T) {
+	_, srv := newTestApp(t)
+	resp := loginRequestManual(t, srv, "application/json", "http://evil.example")
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want 403 for a disallowed Origin", resp.StatusCode)
 	}
 }
 
