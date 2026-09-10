@@ -43,7 +43,15 @@ const yourSection = document.getElementById("your-parties-section");
 const yourList = document.getElementById("your-parties-list");
 const yourCount = document.getElementById("your-count");
 
-const sidebar = homeSection ? initSidebar({ onLoggedOut: showLogin }) : null;
+// onLoggedOut navigates instead of showLogin()-ing in place -- home-section
+// and create-party-dialog were rendered into this document while the
+// session was still valid (see the module-header comment), so hiding them
+// via `hidden` after logout leaves that markup sitting in the live DOM,
+// outliving the session it was gated on. A fresh GET / is the only way to
+// get a render that's actually re-gated server-side -- the same fix
+// already applied to the login success handler below and to player.js's
+// own onLoggedOut.
+const sidebar = homeSection ? initSidebar({ onLoggedOut: () => { window.location.href = "/"; } }) : null;
 
 let me = null;
 
