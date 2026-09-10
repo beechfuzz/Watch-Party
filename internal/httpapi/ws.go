@@ -14,7 +14,6 @@ import (
 	"nhooyr.io/websocket/wsjson"
 
 	"github.com/beechfuzz/watch-party/internal/dbx"
-	"github.com/beechfuzz/watch-party/internal/emby"
 	"github.com/beechfuzz/watch-party/internal/party"
 	"github.com/beechfuzz/watch-party/internal/syncalg"
 	"github.com/beechfuzz/watch-party/internal/wsproto"
@@ -118,45 +117,15 @@ func (a *App) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Media authorization must be re-validated on join, not just at party
-	// creation. An idle party (nothing currently loaded — true for every
-	// party immediately after creation now that media is added afterward
-	// via the playlist) has nothing to authorize against yet; once there IS
-	// a current item, the real per-participant, per-item check happens
-	// again at handlePlaybackURL every time the current item changes, not
-	// only here at join — see ARCHITECTURE.md's Playlist section.
-	if currentItemID := p.Snapshot().ItemID; currentItemID != "" {
-		token, err := a.TokenCipher.Decrypt(user.EncryptedAccessToken)
-		if err != nil {
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		// GetItem alone is not a trustworthy authorization decision: Emby's
-		// direct-by-item-ID endpoints do not enforce per-user library
-		// access control the way its query/listing endpoints do (confirmed
-		// live against a real Emby server — see ARCHITECTURE.md's dated
-		// entry on the Emby library-access bypass). IsItemVisible checks
-		// the listing endpoint first and denies before GetItem is even
-		// asked.
-		if visible, err := a.Emby.IsItemVisible(r.Context(), token, user.ID, currentItemID); err != nil {
-			if errors.Is(err, emby.ErrUnauthorized) {
-				_ = a.Store.DeleteSessionsForUser(r.Context(), user.ID)
-			}
-			http.Error(w, "forbidden", http.StatusForbidden)
-			return
-		} else if !visible {
-			http.Error(w, "forbidden", http.StatusForbidden)
-			return
-		}
-		if _, err := a.Emby.GetItem(r.Context(), token, user.ID, currentItemID); err != nil {
-			if errors.Is(err, emby.ErrUnauthorized) {
-				_ = a.Store.DeleteSessionsForUser(r.Context(), user.ID)
-			}
-			http.Error(w, "forbidden", http.StatusForbidden)
-			return
-		}
-	}
-
+	// This join no longer gates on media authorization for the party's
+	// current item — joining (and everything that flows from it: chat,
+	// attendees, the playlist) must not depend on whether this participant
+	// can see whatever happens to be playing right now. Per-participant,
+	// per-item access is validated at handlePlaybackURL instead, which
+	// every client already calls fresh for the current item on join and
+	// again on every subsequent item change (see ARCHITECTURE.md's
+	// Playlist section and §19.6) — that is now the sole checkpoint for
+	// this decision, not a join-time prerequisite.
 	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		OriginPatterns: a.originHosts(),
 	})

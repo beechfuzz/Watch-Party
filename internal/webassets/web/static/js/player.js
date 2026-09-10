@@ -42,6 +42,7 @@ const partyId = window.WATCH_PARTY_ID;
 const video = document.getElementById("video");
 const playerFrame = document.getElementById("player-frame");
 const playerIdleEl = document.getElementById("player-idle");
+const playerRestrictedEl = document.getElementById("player-restricted");
 const partyTitleEl = document.getElementById("party-title");
 const partySubtitleEl = document.getElementById("party-subtitle");
 const syncBadge = document.getElementById("sync-badge");
@@ -91,6 +92,7 @@ const sidebar = initSidebar({
 let me = null;
 let hostUserId = null;
 let currentItemId = ""; // "" means idle: nothing currently loaded
+let itemRestrictedForMe = false; // true when loadCurrentItem's playback-url fetch got access_denied
 let currentSeq = -1;
 let currentState = null; // { positionTicks, isPlaying, serverTimestampMs }
 let clockOffsetMs = 0;
@@ -612,7 +614,7 @@ function renderMembers(members, hostReconnecting) {
     }
     membersEl.appendChild(row);
   }
-  updateIdleVisibility();
+  updatePlayerVisibility();
   // Ending the party is host-only, enforced server-side (a non-host's
   // request 403s — see ARCHITECTURE.md §3/handleEndParty), but there's no
   // reason to show a participant a button that can only ever error out for
@@ -627,10 +629,32 @@ function renderMembers(members, hostReconnecting) {
 // having just run out of queued items -- not just playing/paused. The
 // player shows a placeholder instead of an empty/frozen <video> element,
 // and host controls (which have nothing to act on) hide along with it.
-function updateIdleVisibility() {
+// Separately (and mutually exclusively, since a restricted item is by
+// definition a current item), a current item this participant's own Emby
+// account can't see shows the access-denied overlay instead -- see
+// loadCurrentItem's catch and ARCHITECTURE.md §19.6. Unlike idle, the
+// <video> element itself stays visible underneath (its native controls
+// bar renders in its ordinary inert/no-source state, matching a real
+// Emby-side denial): .player-restricted is a full-frame, pointer-events
+// layer on top of it that blocks every click, and video.tabIndex is
+// dropped so it can't be reached and operated via keyboard either -- see
+// style.css's .player-restricted for the visual side of "video controls
+// disabled". Host controls stay enabled even when the host is themselves
+// denied the current item: those buttons dispatch WS commands that drive
+// playback for every other participant regardless of the host's own local
+// view.
+function updatePlayerVisibility() {
   const idle = !currentItemId;
+  const restricted = !idle && itemRestrictedForMe;
   playerIdleEl.hidden = !idle;
+  playerRestrictedEl.hidden = !restricted;
   video.hidden = idle;
+  if (restricted) {
+    video.tabIndex = -1;
+    if (document.activeElement === video) video.blur();
+  } else {
+    video.removeAttribute("tabindex");
+  }
   hostControls.hidden = !isHost() || idle;
 }
 
@@ -715,7 +739,7 @@ function handleSnapshotOrControl(env) {
     // panel so its "Now playing" badge follows along.
     if (p.item_id !== currentItemId) {
       currentItemId = p.item_id;
-      updateIdleVisibility();
+      updatePlayerVisibility();
       loadCurrentItem(currentItemId);
       loadPlaylist();
     }
@@ -753,13 +777,30 @@ async function loadCurrentItem(itemId) {
   video.pause();
   video.removeAttribute("src");
   video.load();
+  // Cleared unconditionally, including the idle transition -- a
+  // transition away from a restricted item (to idle, or to a new item this
+  // participant can see) must not leave the access-denied overlay showing
+  // while the fetch below is still in flight.
+  itemRestrictedForMe = false;
+  updatePlayerVisibility();
   if (!itemId) return;
 
   let playback;
   try {
     playback = await api(`/api/parties/${encodeURIComponent(partyId)}/playback-url`);
   } catch (err) {
-    showError("Could not get a playback URL from Emby: " + err.message);
+    // access_denied is Watch Party's own confirmed "this account can't see
+    // this item" decision (handlePlaybackURL's IsItemVisible gate) -- a
+    // persistent, specific overlay is warranted. Any other failure (a
+    // genuine Emby/network problem, party ended, etc.) keeps the existing
+    // generic, transient toast: it isn't a confirmed access decision, so it
+    // shouldn't make that specific accusation. See ARCHITECTURE.md §19.6.
+    if (err.code === "access_denied") {
+      itemRestrictedForMe = true;
+      updatePlayerVisibility();
+    } else {
+      showError("Could not get a playback URL from Emby: " + err.message);
+    }
     return;
   }
   requestedStartPositionTicks = playback.start_position_ticks || 0;
@@ -853,7 +894,7 @@ async function main() {
   // stream loads — see calibratePlaybackOffset. A freshly-created party (or
   // one whose playlist just ran out) has no current item at all yet --
   // loadCurrentItem no-ops in that case and the idle placeholder (already
-  // shown by updateIdleVisibility, called from renderMembers above) stands
+  // shown by updatePlayerVisibility, called from renderMembers above) stands
   // in for the player.
   await loadCurrentItem(currentItemId);
 
