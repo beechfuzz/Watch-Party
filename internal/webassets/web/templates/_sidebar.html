@@ -55,10 +55,11 @@
   </div>
   {{/* Owned entirely by sidebar.js -- shown only when POST /api/auth/logout
        fails in a way that isn't safe to treat as "already logged out" (see
-       ARCHITECTURE.md's logout-failure-UX section). Lives here rather than
-       behind a per-page callback so app.js/player.js don't each need their
-       own near-identical copy of this wiring -- see that section for the
-       full reasoning. */}}
+       ARCHITECTURE.md §18). Lives here rather than behind a per-page
+       callback so app.js/player.js don't each need their own near-identical
+       copy of this wiring -- see that section for the full reasoning.
+       sidebar.js also force-expands a collapsed rail before ever showing
+       this, since the collapsed layout has no room to display it. */}}
   <p class="error" id="sidebar-logout-error" hidden></p>
 </aside>
 {{end}}

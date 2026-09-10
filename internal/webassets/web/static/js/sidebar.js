@@ -99,6 +99,18 @@ export function initSidebar({ onBeforeNavigate, onLoggedOut } = {}) {
       if (onLoggedOut) onLoggedOut();
       return;
     }
+    // The collapsed (icon-only) rail hides .user-text entirely and has no
+    // room for a message -- silently suppressing the error there would be
+    // exactly the kind of silent failure this fix exists to avoid, just
+    // relocated to one layout state instead of eliminated. Force the rail
+    // open so the error is actually seen, without touching the visitor's
+    // *stored* collapse preference (COLLAPSE_STORAGE_KEY) -- this is a
+    // one-time, transient disclosure, not a permanent layout change; a
+    // later page load still honors whatever they had collapsed to before.
+    if (collapsed) {
+      collapsed = false;
+      applyCollapsedState(sidebarEl, collapseToggleBtn, collapsed);
+    }
     logoutError.textContent = err.status === undefined
       ? "Couldn't reach the server — check your connection and try again."
       : err.message;

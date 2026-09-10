@@ -508,8 +508,10 @@ body.wizard-advanced-on .setup-card--wizard .field[data-advanced-field] { displa
 .sign-out-btn:hover { color: var(--text-secondary); background: var(--bg-panel); }
 .sign-out-btn svg { width: 15px; height: 15px; }
 
+/* No .is-collapsed override here on purpose: sidebar.js force-expands the
+   rail before ever setting logoutError.hidden = false, specifically so this
+   element is never shown while the rail has no room to display it. */
 #sidebar-logout-error { margin: -4px 18px 12px; }
-.sidebar.is-collapsed #sidebar-logout-error { display: none; }
 
 /* ---- collapsed left sidebar: icon-only rail ---- */
 .sidebar.is-collapsed { width: var(--sidebar-w-collapsed); }
